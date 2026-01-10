@@ -1143,23 +1143,48 @@ process_and_output_buffer(void *drcontext, bool skip_size_cap)
                 set_local_mode(data, BBDUP_MODE_TRACE);
             }
         } else if (op_trace_for_instrs.get_value() > 0) {
+            // bool hit_window_end = false;
+            // for (mem_ref = data->buf_base + header_size; mem_ref < buf_ptr;
+            //      mem_ref += instru->sizeof_entry()) {
+            //     if (!window_changed && !hit_window_end &&
+            //         op_trace_for_instrs.get_value() > 0) {
+            //         hit_window_end =
+            //             count_traced_instrs(drcontext, instru->get_instr_count(mem_ref),
+            //                                 op_trace_for_instrs.get_value());
+            //         // We have to finish this buffer so we'll go a little beyond the
+            //         // precise requested window length.
+            //         // XXX: For small windows this may be significant: we could go
+            //         // ~5K beyond if we hit the threshold near the start of a full buffer.
+            //         // Should we discard the rest of the entries in such a case, at
+            //         // a block boundary, even though we already collected them?
+            //     }
+            // }
             bool hit_window_end = false;
+            static thread_local addr_t prev_pc = 0;
             for (mem_ref = data->buf_base + header_size; mem_ref < buf_ptr;
                  mem_ref += instru->sizeof_entry()) {
-                if (!window_changed && !hit_window_end &&
-                    op_trace_for_instrs.get_value() > 0) {
-                    hit_window_end =
-                        count_traced_instrs(drcontext, instru->get_instr_count(mem_ref),
-                                            op_trace_for_instrs.get_value());
-                    // We have to finish this buffer so we'll go a little beyond the
-                    // precise requested window length.
-                    // XXX: For small windows this may be significant: we could go
-                    // ~5K beyond if we hit the threshold near the start of a full buffer.
-                    // Should we discard the rest of the entries in such a case, at
-                    // a block boundary, even though we already collected them?
+
+                if (!window_changed && !hit_window_end) {
+                    uintptr_t toadd = 0;
+                    trace_type_t type = instru->get_entry_type(mem_ref);
+
+                    if (type == TRACE_TYPE_INSTR) {
+                        addr_t pc = instru->get_entry_addr(drcontext, mem_ref);
+
+                        if (pc == prev_pc) {
+                            toadd = 0;
+                        } else {
+                            toadd = 1;
+                            prev_pc = pc;
+                        }
+                    }
+
+                    hit_window_end = count_traced_instrs(drcontext, toadd,
+                                                        op_trace_for_instrs.get_value());
                 }
             }
             if (hit_window_end) {
+                prev_pc = 0;
                 if (op_offline.get_value() && op_split_windows.get_value()) {
                     size_t add =
                         instru->append_thread_exit(buf_ptr, dr_get_thread_id(drcontext));
