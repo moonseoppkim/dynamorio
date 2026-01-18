@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -32,26 +32,22 @@
 
 #include "../globals.h"
 #include "instr.h"
+#include "encode_api.h"
 #include "decode.h"
 
-/* FIXME i#1551: add A64 and Thumb support throughout */
-
+/* XXX i#6690: currently only A32 and Thumb is supported for instruction encoding.
+ * We want to add support for A32 and Thumb decoding and synthetic ISA encoding as well.
+ * XXX i#1684: move this function to core/ir/instr_shared.c once we can support
+ * all architectures in the same build of DR.
+ */
 bool
 instr_set_isa_mode(instr_t *instr, dr_isa_mode_t mode)
 {
-    if (mode == DR_ISA_ARM_THUMB)
-        instr->flags |= INSTR_THUMB_MODE;
-    else if (mode == DR_ISA_ARM_A32)
-        instr->flags &= ~INSTR_THUMB_MODE;
-    else
+    if (mode != DR_ISA_ARM_THUMB && mode != DR_ISA_ARM_A32 && mode != DR_ISA_REGDEPS) {
         return false;
+    }
+    instr->isa_mode = mode;
     return true;
-}
-
-dr_isa_mode_t
-instr_get_isa_mode(instr_t *instr)
-{
-    return TEST(INSTR_THUMB_MODE, instr->flags) ? DR_ISA_ARM_THUMB : DR_ISA_ARM_A32;
 }
 
 int
@@ -80,6 +76,12 @@ opc_is_not_a_real_memory_load(int opc)
     return false;
 }
 
+bool
+opc_is_not_a_real_memory_store(int opc)
+{
+    return false;
+}
+
 /* return the branch type of the (branch) inst */
 uint
 instr_branch_type(instr_t *cti_instr)
@@ -87,7 +89,7 @@ instr_branch_type(instr_t *cti_instr)
     instr_get_opcode(cti_instr); /* ensure opcode is valid */
     if (instr_get_opcode(cti_instr) == OP_blx) {
         /* To handle the mode switch we go through the ibl.
-         * FIXME i#1551: once we have far linking through stubs we should
+         * XXX i#1551: once we have far linking through stubs we should
          * remove this and have a faster link through the stub.
          */
         return LINK_INDIRECT | LINK_CALL;
@@ -111,7 +113,7 @@ instr_branch_type(instr_t *cti_instr)
 bool
 instr_is_mov(instr_t *instr)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return false;
 }
@@ -135,7 +137,7 @@ instr_is_near_call_direct(instr_t *instr)
 {
     int opc = instr_get_opcode(instr);
     /* Mode-switch call is not "near".
-     * FIXME i#1551: once we switch OP_blx to use far-stub linking instead of
+     * XXX i#1551: once we switch OP_blx to use far-stub linking instead of
      * ibl we can then consider it "near".
      */
     return (opc == OP_bl);
@@ -438,9 +440,17 @@ instr_is_rep_string_op(instr_t *instr)
 }
 
 bool
-instr_is_floating_ex(instr_t *instr, dr_fp_type_t *type OUT)
+instr_is_floating_type(instr_t *instr, dr_instr_category_t *type DR_PARAM_OUT)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
+    CLIENT_ASSERT(false, "NYI");
+    return false;
+}
+
+bool
+instr_is_floating_ex(instr_t *instr, dr_fp_type_t *type DR_PARAM_OUT)
+{
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return false;
 }
@@ -448,7 +458,7 @@ instr_is_floating_ex(instr_t *instr, dr_fp_type_t *type OUT)
 bool
 instr_is_floating(instr_t *instr)
 {
-    return instr_is_floating_ex(instr, NULL);
+    return instr_is_floating_type(instr, NULL);
 }
 
 bool
@@ -527,7 +537,7 @@ instr_is_sse4A(instr_t *instr)
 bool
 instr_is_mov_imm_to_tos(instr_t *instr)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return false;
 }
@@ -657,7 +667,7 @@ instr_cbr_taken(instr_t *instr, priv_mcontext_t *mc, bool pre)
 static bool
 opc_jcc_taken(int opc, reg_t eflags)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return false;
 }
@@ -666,7 +676,7 @@ opc_jcc_taken(int opc, reg_t eflags)
 bool
 instr_jcc_taken(instr_t *instr, reg_t eflags)
 {
-    /* FIXME i#1551: NYI -- make exported routine x86-only and export
+    /* TODO i#1551: NYI -- make exported routine x86-only and export
      * instr_cbr_taken() (but need public mcontext)?
      */
     return opc_jcc_taken(instr_get_opcode(instr), eflags);
@@ -679,7 +689,7 @@ DR_API
 int
 instr_cmovcc_to_jcc(int cmovcc_opcode)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return OP_INVALID;
 }
@@ -688,7 +698,7 @@ DR_API
 bool
 instr_cmovcc_triggered(instr_t *instr, reg_t eflags)
 {
-    /* FIXME i#1551: NYI */
+    /* TODO i#1551: NYI */
     CLIENT_ASSERT(false, "NYI");
     return false;
 }
@@ -813,7 +823,7 @@ opnd_same_sizes_ok(opnd_size_t s1, opnd_size_t s2, bool is_reg)
 instr_t *
 instr_create_nbyte_nop(dcontext_t *dcontext, uint num_bytes, bool raw)
 {
-    /* FIXME i#1551: NYI on ARM */
+    /* TODO i#1551: NYI on ARM */
     ASSERT_NOT_IMPLEMENTED(false);
     return NULL;
 }
@@ -905,7 +915,7 @@ DR_API
 bool
 instr_is_scatter(instr_t *instr)
 {
-    /* XXX i#3837: no scatter-store on ARM? */
+    /* No scatter-store on AArch32. */
     return false;
 }
 
@@ -913,6 +923,16 @@ DR_API
 bool
 instr_is_gather(instr_t *instr)
 {
-    /* XXX i#3837: no gather-load on ARM? */
+    /* No gather-load on AArch32. */
+    return false;
+}
+
+bool
+instr_compute_vector_address(instr_t *instr, priv_mcontext_t *mc, size_t mc_size,
+                             dr_mcontext_flags_t mc_flags, opnd_t curop, uint addr_index,
+                             DR_PARAM_OUT bool *have_addr, DR_PARAM_OUT app_pc *addr,
+                             DR_PARAM_OUT bool *write)
+{
+    CLIENT_ASSERT(false, "There are no AArch32 instructions that use vector addressing");
     return false;
 }

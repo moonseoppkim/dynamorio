@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2021-2022 Google, Inc.   All rights reserved.
+ * Copyright (c) 2021-2025 Google, Inc.   All rights reserved.
  * Copyright (c) 2018 ARM Limited. All rights reserved.
  * **********************************************************
  *
@@ -70,7 +70,7 @@ event_instruction_change(void *drcontext, void *tag, instrlist_t *bb, bool for_t
                          bool translating);
 static dr_emit_flags_t
 event_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-               bool translating, OUT void **user_data);
+               bool translating, DR_PARAM_OUT void **user_data);
 
 static dr_emit_flags_t
 event_insertion(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
@@ -82,7 +82,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     if (!drmgr_init())
         DR_ASSERT(false);
 
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     if (!drmgr_register_bb_app2app_event(event_instruction_change, NULL))
         DR_ASSERT(false);
@@ -129,7 +129,11 @@ should_fully_emulate_instr(instr_t *instr)
 #elif defined(X86_64)
     opnd_t dst = instr_get_dst(instr, 0);
     opnd_t src1 = instr_get_src(instr, 1);
-    if (!opnd_same(src1, dst) || !opnd_is_reg(src0) || opnd_get_size(src0) != OPSZ_8)
+    /* As noted, we limit to register operands, partly because TEST cannot
+     * take two memory operands.
+     */
+    if (!opnd_same(src1, dst) || !opnd_is_reg(src0) || !opnd_is_reg(dst) ||
+        opnd_get_size(src0) != OPSZ_8)
         return false;
 #else
 #    error Architecture not supported.
@@ -347,7 +351,7 @@ event_instruction_change(void *drcontext, void *tag, instrlist_t *bb, bool for_t
 
 static dr_emit_flags_t
 event_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-               bool translating, OUT void **user_data)
+               bool translating, DR_PARAM_OUT void **user_data)
 {
     bool in_emulation = false;
     for (instr_t *instr = instrlist_first(bb); instr != NULL;

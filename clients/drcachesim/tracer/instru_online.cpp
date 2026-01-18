@@ -179,6 +179,15 @@ online_instru_t::append_thread_header(byte *buf_ptr, thread_id_t tid,
     new_buf += append_marker(new_buf, TRACE_MARKER_TYPE_CACHE_LINE_SIZE,
                              proc_get_cache_line_size());
     new_buf += append_marker(new_buf, TRACE_MARKER_TYPE_PAGE_SIZE, dr_page_size());
+#if defined(AARCH64)
+    // TRACE_MARKER_TYPE_VECTOR_LENGTH is emitted in the thread header to establish the
+    // initial vector length for the thread, but the marker can also be emitted again
+    // later if the app changes the vector length.
+    if (proc_has_feature(FEATURE_SVE)) {
+        new_buf += append_marker(new_buf, TRACE_MARKER_TYPE_VECTOR_LENGTH,
+                                 proc_get_vector_length_bytes());
+    }
+#endif
     return (int)(new_buf - buf_ptr);
 }
 
@@ -193,19 +202,25 @@ online_instru_t::append_unit_header(byte *buf_ptr, thread_id_t tid, intptr_t win
 {
     byte *new_buf = buf_ptr;
     new_buf += append_tid(new_buf, tid);
-    uint64 frozen = frozen_timestamp_.load(std::memory_order_acquire);
-    new_buf += append_marker(
-        new_buf, TRACE_MARKER_TYPE_TIMESTAMP,
-        // Truncated to 32 bits for 32-bit: we live with it.
-        static_cast<uintptr_t>(frozen != 0 ? frozen : instru_t::get_timestamp()));
+    new_buf += append_timestamp(new_buf);
     if (window >= 0)
         new_buf += append_marker(new_buf, TRACE_MARKER_TYPE_WINDOW_ID, (uintptr_t)window);
     new_buf += append_marker(new_buf, TRACE_MARKER_TYPE_CPU_ID, instru_t::get_cpu_id());
     return (int)(new_buf - buf_ptr);
 }
 
+int
+online_instru_t::append_timestamp(byte *buf_ptr)
+{
+    uint64 frozen = frozen_timestamp_.load(std::memory_order_acquire);
+    return append_marker(
+        buf_ptr, TRACE_MARKER_TYPE_TIMESTAMP,
+        // Truncated to 32 bits for 32-bit: we live with it.
+        static_cast<uintptr_t>(frozen != 0 ? frozen : instru_t::get_timestamp()));
+}
+
 bool
-online_instru_t::refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp)
+online_instru_t::clamp_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp)
 {
     trace_entry_t *stamp = reinterpret_cast<trace_entry_t *>(buf_ptr);
     stamp++; // Skip the tid added by append_unit_header() before the timestamp.
@@ -314,6 +329,15 @@ online_instru_t::insert_save_type_and_size(void *drcontext, instrlist_t *ilist,
         MINSERT(ilist, where,
                 INSTR_CREATE_movk(drcontext, opnd_create_reg(scratch),
                                   OPND_CREATE_INT(size), OPND_CREATE_INT8(16)));
+        MINSERT(ilist, where,
+                XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(base, disp),
+                                   opnd_create_reg(scratch)));
+#elif defined(RISCV64)
+        scratch = reg_resize_to_opsz(scratch, OPSZ_4);
+        /* Load immediate 'type | (size << 16)' to the scratch reg */
+        instrlist_insert_mov_immed_ptrsz(drcontext, (ptr_int_t)(type | (size << 16)),
+                                         opnd_create_reg(scratch), ilist, where, NULL,
+                                         NULL);
         MINSERT(ilist, where,
                 XINST_CREATE_store(drcontext, OPND_CREATE_MEM32(base, disp),
                                    opnd_create_reg(scratch)));

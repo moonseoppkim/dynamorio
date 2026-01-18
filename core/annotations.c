@@ -1,5 +1,5 @@
 /* ******************************************************
- * Copyright (c) 2014-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
  * ******************************************************/
 
 /*
@@ -39,6 +39,8 @@
 #include "annotations.h"
 
 #ifdef ANNOTATIONS /* around whole file */
+
+#    include "annotations_api.h"
 
 #    if !(defined(WINDOWS) && defined(X64))
 #        include "valgrind.h"
@@ -227,11 +229,11 @@ valgrind_running_on_valgrind(dr_vg_client_request_t *request);
 #    endif
 
 static bool
-is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *start_pc, instr_t *scratch,
-                  OUT const char **name);
+is_annotation_tag(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *cur_pc, instr_t *scratch,
+                  DR_PARAM_OUT const char **name);
 
 static void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch);
 
 /* Create argument operands for the instrumented clean call */
@@ -315,8 +317,9 @@ annotation_exit()
 }
 
 bool
-instrument_annotation(dcontext_t *dcontext, IN OUT app_pc *start_pc,
-                      OUT instr_t **substitution _IF_WINDOWS_X64(IN bool hint_is_safe))
+instrument_annotation(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *start_pc,
+                      DR_PARAM_OUT instr_t **substitution
+                          _IF_WINDOWS_X64(DR_PARAM_IN bool hint_is_safe))
 {
     annotation_layout_t layout = { 0 };
     /* This instr_t is used for analytical decoding throughout the detection functions.
@@ -360,7 +363,7 @@ instrument_annotation(dcontext_t *dcontext, IN OUT app_pc *start_pc,
           /* layout.type is already ANNOTATION_TYPE_NONE */
         });
     if (layout.type != ANNOTATION_TYPE_NONE) {
-        LOG(GLOBAL, LOG_ANNOTATIONS, 2,
+        LOG(THREAD, LOG_ANNOTATIONS, 2,
             "Decoded %s annotation %s. Next pc now " PFX ".\n",
             (layout.type == ANNOTATION_TYPE_EXPRESSION) ? "expression" : "statement",
             layout.name, layout.resume_pc);
@@ -780,6 +783,12 @@ lookup_valgrind_request(ptr_uint_t request)
     case VG_USERREQ__MAKE_MEM_DEFINED_IF_ADDRESSABLE:
         return DR_VG_ID__MAKE_MEM_DEFINED_IF_ADDRESSABLE;
     case VG_USERREQ__DISCARD_TRANSLATIONS: return DR_VG_ID__DISCARD_TRANSLATIONS;
+    case VG_USERREQ__MAKE_MEM_UNDEFINED: return DR_VG_ID__MAKE_MEM_UNDEFINED;
+    case VG_USERREQ__MAKE_MEM_DEFINED: return DR_VG_ID__MAKE_MEM_DEFINED;
+    case VG_USERREQ__CHECK_MEM_IS_ADDRESSABLE: return DR_VG_ID__CHECK_MEM_IS_ADDRESSABLE;
+    case VG_USERREQ__CHECK_MEM_IS_DEFINED: return DR_VG_ID__CHECK_MEM_IS_DEFINED;
+    case VG_USERREQ__MALLOCLIKE_BLOCK: return DR_VG_ID__MALLOCLIKE_BLOCK;
+    case VG_USERREQ__FREELIKE_BLOCK: return DR_VG_ID__FREELIKE_BLOCK;
     }
     return DR_VG_ID__LAST;
 }
@@ -845,8 +854,8 @@ valgrind_running_on_valgrind(dr_vg_client_request_t *request)
  * See https://dynamorio.org/page_annotations.html for complete examples.
  */
 static inline bool
-is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *cur_pc, instr_t *scratch,
-                  OUT const char **name)
+is_annotation_tag(dcontext_t *dcontext, DR_PARAM_INOUT app_pc *cur_pc, instr_t *scratch,
+                  DR_PARAM_OUT const char **name)
 {
     app_pc start_pc = *cur_pc;
 
@@ -923,7 +932,7 @@ is_annotation_tag(dcontext_t *dcontext, IN OUT app_pc *cur_pc, instr_t *scratch,
  *            (note that the Statement annotation concludes with a special case).
  */
 static inline void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch)
 {
     app_pc cur_pc = layout->start_pc, last_call = NULL;
@@ -990,13 +999,13 @@ identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
  *   (step 7) advance the label pointer to the name token.
  */
 static inline void
-identify_annotation(dcontext_t *dcontext, IN OUT annotation_layout_t *layout,
+identify_annotation(dcontext_t *dcontext, DR_PARAM_INOUT annotation_layout_t *layout,
                     instr_t *scratch)
 {
     app_pc cur_pc = layout->start_pc;
     if (is_annotation_tag(dcontext, &cur_pc, scratch, &layout->name)) { /* step 1 */
 #        ifdef WINDOWS
-        if (*(cur_pc++) == RAW_OPCODE_pop_eax) {                        /* step 2 */
+        if (*(cur_pc++) == RAW_OPCODE_pop_eax) { /* step 2 */
 #        else
         if (instr_get_opcode(scratch) == OP_bsf) { /* step 2 */
 #        endif

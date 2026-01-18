@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2022-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _NULL_FILTER_H_
-#define _NULL_FILTER_H_ 1
+#define _NULL_FILTER_H_
 
 #include "record_filter.h"
 
@@ -47,7 +47,9 @@ public:
         return nullptr;
     }
     bool
-    parallel_shard_filter(trace_entry_t &entry, void *shard_data) override
+    parallel_shard_filter(
+        trace_entry_t &entry, void *shard_data,
+        record_filter_t::record_filter_info_t &record_filter_info) override
     {
         return true;
     }

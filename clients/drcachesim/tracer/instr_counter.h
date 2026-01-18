@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * **********************************************************/
 
@@ -32,12 +32,31 @@
  */
 
 #ifndef _INSTR_COUNTER_
-#define _INSTR_COUNTER_ 1
+#define _INSTR_COUNTER_
+
+#include <atomic>
 
 #include "dr_api.h"
 
 namespace dynamorio {
 namespace drmemtrace {
+
+extern std::atomic<uint64> retrace_start_timestamp;
+
+void
+delete_instr_window_lists();
+
+void
+maybe_increment_irregular_window_index();
+
+uint64
+get_initial_no_trace_for_instrs_value();
+
+uint64
+get_current_trace_for_instrs_value();
+
+uint64
+get_current_no_trace_for_instrs_value();
 
 dr_emit_flags_t
 event_inscount_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
@@ -53,7 +72,7 @@ void
 event_inscount_thread_init(void *drcontext);
 
 void
-event_inscount_init();
+event_inscount_init(client_id_t id);
 
 } // namespace drmemtrace
 } // namespace dynamorio

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -41,7 +41,7 @@
  */
 
 #ifndef _GLOBALS_SHARED_H_
-#define _GLOBALS_SHARED_H_ 1
+#define _GLOBALS_SHARED_H_
 
 /* if not Unix, we assume Windows */
 #ifndef UNIX
@@ -74,14 +74,14 @@
 #    define RISCV_64
 #endif
 
-#include "globals_api.h"
+#include "globals_api.h" // IWYU pragma: export
 
 #include <limits.h> /* for USHRT_MAX */
 #ifdef UNIX
 #    include <signal.h>
 #endif
 
-#include "c_defines.h"
+#include "c_defines.h" // IWYU pragma: export
 
 #ifdef X64
 #    define POINTER_MAX ULLONG_MAX
@@ -98,7 +98,7 @@
 
 #define MAX_CLIENT_LIBS 16
 
-/* FIXME: these macros double-evaluate their args -- if we can't trust
+/* XXX: these macros double-evaluate their args -- if we can't trust
  * compiler to do CSE, should we replace w/ inline functions?  would need
  * separate signed and unsigned versions
  */
@@ -564,9 +564,9 @@ typedef char liststring_t[MAX_LIST_OPTION_LENGTH];
  * Expected to be a subdirectory of DYNAMORIO_CACHE_ROOT.
  */
 
-/* Location for persisted caches; FIXME: currently the same as the ASLR sharing dir */
+/* Location for persisted caches; XXX: currently the same as the ASLR sharing dir */
 #define DYNAMORIO_VAR_PERSCACHE_ROOT_ID DYNAMORIO_CACHE_ROOT
-/* FIXME case 9651: security model, etc. */
+/* XXX case 9651: security model, etc. */
 #define DYNAMORIO_VAR_PERSCACHE_SHARED_ID DYNAMORIO_CACHE_SHARED
 /* case 10255: use a suffix to distinguish from ASLR files in same dir
  * DR persisted cache => "dpc"
@@ -688,7 +688,7 @@ typedef char liststring_t[MAX_LIST_OPTION_LENGTH];
 #    define EVENT_LOG_KEY LCONCAT(L_EXPAND_LEVEL(EVENTLOG_REGISTRY_SUBKEY), EVENTLOG_NAME)
 #    define EVENT_SOURCE_KEY LCONCAT(EVENT_LOG_KEY, EVENTSOURCE_NAME)
 /* Log key values (NOTE the values here are the values our installer uses,
- * not sure what all of them mean).  FIXME would be nice if these were
+ * not sure what all of them mean).  XXX would be nice if these were
  * shared with the installer config file. Only used by DRcontrol (via
  * share/config.c) to set up new eventlogs (mainly for vista where our
  * installer doesn't work yet xref case 8482).*/
@@ -842,7 +842,7 @@ enum DLL_TYPE {
  *  See case 3702.
  **/
 enum {
-    /* FIXME: keep in mind that we only read decimal values */
+    /* XXX: keep in mind that we only read decimal values */
     RUNUNDER_OFF = 0x00, /* 0 */
     RUNUNDER_ON = 0x01,  /* 1 */
     RUNUNDER_ALL = 0x02, /* 2 */
@@ -933,9 +933,9 @@ enum {
 #else
     NUDGE_NUDGER_FREE_STACK = 0x02, /* nudger will free the nudge thread's stack so the
                                      * nudge thread itself shouldn't */
-    NUDGE_FREE_ARG = 0x04,          /* nudge arg is in a separate allocation and should
-                                     * be freed by the nudge thread */
 #endif
+    NUDGE_FREE_ARG = 0x04, /* nudge arg is in a separate allocation and should
+                            * be freed by the nudge thread */
 };
 
 typedef struct {
@@ -954,9 +954,9 @@ typedef struct {
     uint flags : 2;
     int ignored2; /* siginfo_t.si_code: has meaning to kernel so we avoid using */
 #else
-    uint version;                   /* version number for future proofing */
-    uint nudge_action_mask;         /* drawn from NUDGE_DEFS above */
-    uint flags;                     /* flags drawn from above enum */
+    uint version;           /* version number for future proofing */
+    uint nudge_action_mask; /* drawn from NUDGE_DEFS above */
+    uint flags;             /* flags drawn from above enum */
 #endif
     client_id_t client_id; /* unique ID identifying client */
     uint64 client_arg;     /* argument for a client nudge */
@@ -988,7 +988,7 @@ typedef struct {
  */
 #    define HOTP_POLICY_ID_LENGTH 9
 
-#    include "probe_api.h"
+#    include "probe_api.h" // IWYU pragma: export
 
 typedef dr_probe_status_t hotp_inject_status_t;
 
@@ -1089,7 +1089,7 @@ enum {
  * Also, hotp_context_t exposes the dr_mcontext_t struct to hot patches,
  * so be careful when changing any field offsets.
  *
- * FIXME: remove eax-ebx-ecx-edx and use the local_state_t
+ * XXX: remove eax-ebx-ecx-edx and use the local_state_t
  * version from within DR as well as from the ibl (case 3701).
  *
  * PR 264138: for xmm fields, we do NOT specify 16-byte alignment for
@@ -1103,7 +1103,7 @@ enum {
 
 /* Internal machine context structure */
 typedef struct _priv_mcontext_t {
-#include "mcxtx_api.h"
+#include "mcxtx_api.h" // IWYU pragma: export
 } priv_mcontext_t;
 
 #endif /* _GLOBALS_SHARED_H_ */

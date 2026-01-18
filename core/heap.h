@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,7 +40,7 @@
  */
 
 #ifndef _HEAP_H_
-#define _HEAP_H_ 1
+#define _HEAP_H_
 
 #ifdef HEAP_ACCOUNTING
 typedef enum {
@@ -93,7 +93,11 @@ typedef enum {
 } map_flags_t;
 
 typedef byte *heap_pc;
-#define HEAP_ALIGNMENT sizeof(heap_pc *)
+#ifdef ARM
+#    define HEAP_ALIGNMENT 8 /* Some C++ functions require 8-byte alignment on ARM. */
+#else
+#    define HEAP_ALIGNMENT sizeof(heap_pc *)
+#endif
 extern vm_area_vector_t *landing_pad_areas;
 
 #ifdef X64
@@ -105,7 +109,8 @@ void
 request_region_be_heap_reachable(byte *start, size_t size);
 
 void
-vmcode_get_reachable_region(byte **region_start OUT, byte **region_end OUT);
+vmcode_get_reachable_region(byte **region_start DR_PARAM_OUT,
+                            byte **region_end DR_PARAM_OUT);
 #endif
 
 /* Virtual memory types.  These are bitmask values. */
@@ -161,8 +166,8 @@ bool
 heap_check_option_compatibility(void);
 
 bool
-is_vmm_reserved_address(byte *pc, size_t size, OUT byte **region_start,
-                        OUT byte **region_end);
+is_vmm_reserved_address(byte *pc, size_t size, DR_PARAM_OUT byte **region_start,
+                        DR_PARAM_OUT byte **region_end);
 /* Returns whether "target" is reachable from all future vmcode allocations. */
 bool
 rel32_reachable_from_vmcode(byte *target);
@@ -231,7 +236,7 @@ heap_unreserve_for_external_mapping(byte *p, size_t size, which_vmm_t which);
 
 /* updates dynamo_areas and calls the os_ versions */
 byte *
-d_r_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+d_r_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
              map_flags_t map_flags);
 bool
 d_r_unmap_file(byte *map, size_t size);
@@ -279,7 +284,7 @@ void
 print_heap_statistics(void);
 #endif
 
-/* FIXME: persistence is yet another dimension here
+/* XXX: persistence is yet another dimension here
  * let's clean all these up and have a single alloc routine?
  */
 /* i#1791: nonpersistent heap cannot be used for IR or other client allocations */

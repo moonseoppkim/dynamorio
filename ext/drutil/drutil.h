@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.   All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /* drutil: DynamoRIO Instrumentation Utilities
@@ -23,7 +23,7 @@
 /* DynamoRIO Instrumentation Utilities Extension */
 
 #ifndef _DRUTIL_H_
-#define _DRUTIL_H_ 1
+#define _DRUTIL_H_
 
 /**
  * @file drutil.h
@@ -101,7 +101,7 @@ DR_EXPORT
 bool
 drutil_insert_get_mem_addr_ex(void *drcontext, instrlist_t *bb, instr_t *where,
                               opnd_t memref, reg_id_t dst, reg_id_t scratch,
-                              OUT bool *scratch_used);
+                              DR_PARAM_OUT bool *scratch_used);
 
 DR_EXPORT
 /**
@@ -187,8 +187,8 @@ DR_EXPORT
  * \return whether successful.
  */
 bool
-drutil_expand_rep_string_ex(void *drcontext, instrlist_t *bb, OUT bool *expanded,
-                            OUT instr_t **stringop);
+drutil_expand_rep_string_ex(void *drcontext, instrlist_t *bb, DR_PARAM_OUT bool *expanded,
+                            DR_PARAM_OUT instr_t **stringop);
 
 DR_EXPORT
 /**

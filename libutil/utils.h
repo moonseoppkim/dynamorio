@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2005-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -90,7 +90,7 @@ DWORD
 reboot_system();
 
 /* grokked from the core.
- * FIXME: shareme!
+ * XXX: shareme!
  * if NULL is passed for directory, then it is ignored and no directory
  *  check is done, and filename_base is assumed to be absolute.
  * TODO: make this a proactive check: make sure the file can be
@@ -186,8 +186,9 @@ set_registry_permissions_for_user(WCHAR *hklm_keyname, WCHAR *user);
 
 /* used by get_violation_info() */
 typedef struct _VIOLATION_INFO {
-    DWORD flags;         /* IN, NYI */
-    const WCHAR *report; /* OUT, Filename of generated report file. NULL if error.*/
+    DWORD flags; /* DR_PARAM_IN, NYI */
+    const WCHAR
+        *report; /* DR_PARAM_OUT, Filename of generated report file. NULL if error.*/
     WCHAR buf[MAX_PATH]; /* space for filename */
 } VIOLATION_INFO;
 
@@ -232,16 +233,16 @@ get_violation_info(EVENTLOGRECORD *pevlr, /* INOUT */ VIOLATION_INFO *info);
 #    define CANARY_URL_SIZE 20       /* NYI so arbitrary */
 #    define CANARY_MESSAGE_SIZE 1024 /* NYI so arbitrary */
 typedef struct _CANARY_INFO {
-    DWORD run_flags;                /* tests to run */
-    DWORD info_flags;               /* info to gather, NYI */
-    int canary_code;                /* canary return code, like an NTSTATUS */
-    const WCHAR *report;            /* OUT, filename of generated report file */
-    const WCHAR *url;               /* OUT, url string to use for querying determina */
-    const WCHAR *msg;               /* OUT, msg to display to user */
-    WCHAR buf_report[MAX_PATH];     /* space for report filename */
-    WCHAR buf_url[CANARY_URL_SIZE]; /* space for url */
+    DWORD run_flags;     /* tests to run */
+    DWORD info_flags;    /* info to gather, NYI */
+    int canary_code;     /* canary return code, like an NTSTATUS */
+    const WCHAR *report; /* DR_PARAM_OUT, filename of generated report file */
+    const WCHAR *url;    /* DR_PARAM_OUT, url string to use for querying determina */
+    const WCHAR *msg;    /* DR_PARAM_OUT, msg to display to user */
+    WCHAR buf_report[MAX_PATH];             /* space for report filename */
+    WCHAR buf_url[CANARY_URL_SIZE];         /* space for url */
     WCHAR buf_message[CANARY_MESSAGE_SIZE]; /* space for use message */
-    /* Used by DRcontrol to inject faults, FIXME get rid of these and the flags and
+    /* Used by DRcontrol to inject faults, XXX get rid of these and the flags and
      * go to a more data driven model. Other users should set fault_run to 0. */
     DWORD fault_run;
     WCHAR *canary_fault_args;
@@ -322,9 +323,9 @@ set_abortlevel(int level);
 
 #    define NULL_HANDLER ;
 
-#    define DO_ASSERT(expr) DO_ASSERT_EXPR(#    expr, expr, 0, NULL_HANDLER)
+#    define DO_ASSERT(expr) DO_ASSERT_EXPR(#expr, expr, 0, NULL_HANDLER)
 
-#    define DO_ASSERT_HANDLE(expr, handler) DO_ASSERT_EXPR(#    expr, expr, 1, handler)
+#    define DO_ASSERT_HANDLE(expr, handler) DO_ASSERT_EXPR(#expr, expr, 1, handler)
 
 #    define DO_DEBUG(l, expr)                                        \
         {                                                            \
@@ -426,7 +427,7 @@ void
 show_all_events();
 #    endif
 
-#else //#ifdef DEBUG
+#else // #ifdef DEBUG
 
 #    define DO_DEBUG(l, x)
 #    define DO_ASSERT(x)

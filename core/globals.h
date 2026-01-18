@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,9 +40,9 @@
  */
 
 #ifndef _GLOBALS_H_
-#define _GLOBALS_H_ 1
+#define _GLOBALS_H_
 
-#include "configure.h"
+#include "configure.h" // IWYU pragma: export
 
 #ifdef WINDOWS
 /* Vista SDK compiler default is to set NTDDI_VERSION to NTDDI_LONGHORN, causing
@@ -81,7 +81,7 @@
 #    pragma warning( \
         disable : 4159) // #pragma pack has popped previously pushed identifier
 
-/* FIXME case 191729: this is coming from our own code.  We could
+/* XXX case 191729: this is coming from our own code.  We could
  * switch to the _s versions when on Windows.
  */
 #    pragma warning(disable : 4996) //'sscanf' was declared deprecated
@@ -90,7 +90,7 @@
 
 #endif
 
-#include "globals_shared.h"
+#include "globals_shared.h" // IWYU pragma: export
 
 /* currently we always export statistics structure */
 #define DYNAMORIO_STATS_EXPORTS 1
@@ -191,7 +191,7 @@ typedef unsigned long ulong;
 #    define ALT_DIRSEP DIRSEP
 #endif
 
-/* FIXME: what is range of thread_id_t on linux and on win32?
+/* XXX: what is range of thread_id_t on linux and on win32?
  * linux routines use -1 as sentinel, right?
  * on win32, are ids only 16 bits?
  * if so, change thread_id_t to be a signed int and use -1?
@@ -291,32 +291,34 @@ typedef struct _thread_record_t {
 /* We don't include dr_api.h, that's for external use. */
 #ifdef DR_APP_EXPORTS
 /* we only export app interface if DR_APP_EXPORTS is defined */
-#    include "dr_app.h"
+#    include "dr_app.h" // IWYU pragma: export
 /* a few always-exported routines are part of the app interface */
 #    undef DYNAMORIO_EXPORT
 #    define DYNAMORIO_EXPORT DR_APP_API
 #endif
 
-/* AArch64 Scalable Vector Extension's vector length in bits. This depends on
- * the hardware implementation and can be one of:
- * 128 256 384 512 640 768 896 1024 1152 1280 1408 1536 1664 1792 1920 2048
- * See https://developer.arm.com/documentation/102476/0100/Introducing-SVE
+/* - AArch64 Scalable Vector Extension's vector length in bits. This depends on
+ *   the hardware implementation and can be one of:
+ *   128 256 384 512 640 768 896 1024 1152 1280 1408 1536 1664 1792 1920 2048
+ *   See https://developer.arm.com/documentation/102476/0100/Introducing-SVE
+ * - RISC-V Vector's vector length in bits which is from 64 to 65536 in the
+ *   power of 2.
  * This variable stores the length for off-line decoding.
  */
-extern int sve_veclen;
+extern int vector_length;
 
-#include "heap.h"
-#include "options_struct.h"
-#include "utils.h"
-#include "options.h"
-#include "os_exports.h"
-#include "arch_exports.h"
-#include "drlibc.h"
-#include "vmareas.h"
-#include "instrlist.h"
-#include "dispatch.h"
+#include "heap.h"           // IWYU pragma: export
+#include "options_struct.h" // IWYU pragma: export
+#include "utils.h"          // IWYU pragma: export
+#include "options.h"        // IWYU pragma: export
+#include "os_exports.h"     // IWYU pragma: export
+#include "arch_exports.h"   // IWYU pragma: export
+#include "drlibc.h"         // IWYU pragma: export
+#include "vmareas.h"        // IWYU pragma: export
+#include "instrlist.h"      // IWYU pragma: export
+#include "dispatch.h"       // IWYU pragma: export
 
-#include "dr_stats.h"
+#include "dr_stats.h" // IWYU pragma: export
 
 /* did the client request a premature exit at a potentially awkward spot
  * (nudge handler, signal handler)?
@@ -371,7 +373,7 @@ typedef struct _client_data_t {
      * the client is in client library code.  For dr_mutex_lock() we set client_grab_mutex
      * to the client mutex that is being locked so that we can set
      * client_thread_safe_for_sync only around the actual wait.
-     * FIXME - PR 231301, we may need a way for clients that call ntdll directly to
+     * XXX - PR 231301, we may need a way for clients that call ntdll directly to
      * mark client_thread_safe_for_synch for client-owned threads when calling out to
      * ntdll. Especially if they're calling system calls that wait or take a long time
      * to finish etc. Applies to generated code and other libraries called by the client
@@ -411,6 +413,9 @@ typedef struct _client_data_t {
      * but only upon failures.
      */
     dr_error_code_t error_code;
+
+    /* Flag for dr_invoke_syscall_as_app(). */
+    bool skip_client_syscall_events;
 } client_data_t;
 
 #ifdef UNIX
@@ -431,6 +436,7 @@ extern bool control_all_threads;     /* ok for "weird" things to happen -- not a
 extern bool dynamo_heap_initialized; /* has dynamo_heap been initialized? */
 extern bool dynamo_initialized;      /* has dynamo been initialized? */
 extern bool dynamo_started;          /* has DR initiated takeover of the app? */
+extern bool dr_started_and_attached; /* Has DR taken over threads present at startup? */
 extern bool dynamo_exited;           /* has dynamo exited? */
 extern bool dynamo_exited_all_other_threads; /* has dynamo exited and synched? */
 extern bool dynamo_exited_and_cleaned;       /* has dynamo component cleanup started? */
@@ -445,6 +451,7 @@ extern bool dynamo_all_threads_synched; /* are all other threads suspended safel
  * so this is always set on Windows.
  */
 extern bool dynamo_control_via_attach;
+extern bool started_detach;
 /* Not guarded by DR_APP_EXPORTS because later detach implementations might not
  * go through the app interface.
  */
@@ -453,6 +460,7 @@ extern thread_id_t detacher_tid;
 
 extern event_t dr_app_started;
 extern event_t dr_attach_finished;
+extern event_t dr_all_threads_attached;
 
 extern bool standalone_library; /* used as standalone library */
 #ifdef UNIX
@@ -567,6 +575,8 @@ dynamo_thread_exit(void);
 void
 dynamo_thread_stack_free_and_exit(byte *stack);
 int
+dynamo_thread_exit_dcontext(dcontext_t *dcontext);
+int
 dynamo_other_thread_exit(thread_record_t *tr _IF_WINDOWS(bool detach_stacked_callbacks));
 void
 dynamo_thread_under_dynamo(dcontext_t *dcontext);
@@ -663,7 +673,7 @@ enum {
 /* Number of nested calls into native modules that we support.  This number
  * needs to equal the number of stubs in x86.asm:back_from_native_retstubs,
  * which is checked at startup in native_exec.c.
- * FIXME: Remove this limitation if we ever need to support true mutual
+ * XXX: Remove this limitation if we ever need to support true mutual
  * recursion between native and non-native modules.
  */
 enum { MAX_NATIVE_RETSTACK = 10 };
@@ -675,7 +685,7 @@ typedef struct _retaddr_and_retloc_t {
 
 /* To handle TRY/EXCEPT/FINALLY setjmp */
 typedef struct try_except_context_t {
-    /* FIXME: we are using a local dr_jmp_buf which is relatively
+    /* XXX: we are using a local dr_jmp_buf which is relatively
      * small so minimal risk of dstack pressure.  Alternatively, we
      * can disallow nesting and have a single buffer per dcontext.
      */
@@ -760,7 +770,7 @@ struct _dcontext_t {
     /* The next application pc to execute.
      * Also used to store the cache pc to execute when entering the code cache,
      * and set to the sentinel value BACK_TO_NATIVE_AFTER_SYSCALL for native_exec.
-     * FIXME: change to a union?
+     * XXX: change to a union?
      */
     app_pc next_tag;
 
@@ -785,7 +795,7 @@ struct _dcontext_t {
     byte *teb_base;
     /* storage for an extra app value around sysenter system calls for the
      * case 5441 Sygate interoperability hack */
-    /* FIXME - this needs to be moved into the upcontext as is written to
+    /* XXX - this needs to be moved into the upcontext as is written to
      * in cache by ignore/shared_syscall, ramifications? */
     app_pc sysenter_storage;
 
@@ -816,7 +826,7 @@ struct _dcontext_t {
 
     /************* end of offset-crucial fields *********************/
 
-    /* FIXME: now that we initialize a new thread's dcontext right away, and
+    /* XXX: now that we initialize a new thread's dcontext right away, and
      * a new callback's as well, we should be able to get rid of this
      */
     bool initialized; /* has this context been used yet? */
@@ -965,7 +975,7 @@ struct _dcontext_t {
     bool is_client_thread_exiting;
 #endif
 
-    /* FIXME trace_sysenter_exit is used to capture an exit from a trace that
+    /* XXX trace_sysenter_exit is used to capture an exit from a trace that
      * ends in a SYSENTER and to enable trace head marking. So it's really a
      * monitor-centric variable. It's placed in the context for now so that
      * it's not shared across contexts (as the monitor data is). Cross-context
@@ -1003,7 +1013,7 @@ struct _dcontext_t {
      * generic_nudge_target).  We can then check this
      * value in those routines after we come out of the cache as a security
      * measure (xref case 552).  This gives us some protection against an
-     * attacker leveraging our own detach routines and the like.  FIXME - if
+     * attacker leveraging our own detach routines and the like.  XXX - if
      * the attacker is able to specify the start address for a newly created
      * thread then they can fake this. */
     void *nudge_target;
@@ -1065,7 +1075,7 @@ struct _dcontext_t {
  */
 #define GLOBAL_DCONTEXT ((dcontext_t *)PTR_UINT_MINUS_1)
 
-/* FIXME: why do we need to force the inline for this simple function? */
+/* XXX: why do we need to force the inline for this simple function? */
 static INLINE_FORCED priv_mcontext_t *
 get_mcontext(dcontext_t *dcontext)
 {

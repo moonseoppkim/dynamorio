@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2022-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2022-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _TYPE_FILTER_H_
-#define _TYPE_FILTER_H_ 1
+#define _TYPE_FILTER_H_
 
 #include "record_filter.h"
 #include "trace_entry.h"
@@ -86,11 +86,13 @@ public:
         return per_shard;
     }
     bool
-    parallel_shard_filter(trace_entry_t &entry, void *shard_data) override
+    parallel_shard_filter(
+        trace_entry_t &entry, void *shard_data,
+        record_filter_t::record_filter_info_t &record_filter_info) override
     {
         per_shard_t *per_shard = reinterpret_cast<per_shard_t *>(shard_data);
         if (entry.type == TRACE_TYPE_MARKER && entry.size == TRACE_MARKER_TYPE_FILETYPE) {
-            if (TESTANY(entry.addr, OFFLINE_FILE_TYPE_ENCODINGS) &&
+            if (TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, entry.addr) &&
                 !per_shard->partial_trace_filter &&
                 remove_trace_types_.find(TRACE_TYPE_ENCODING) !=
                     remove_trace_types_.end()) {

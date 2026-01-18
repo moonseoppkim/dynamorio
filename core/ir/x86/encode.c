@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -119,6 +119,7 @@ const char *const type_names[] = {
     "TYPE_K_EVEX",
     "TYPE_T_REG",
     "TYPE_T_MODRM",
+    "TYPE_G_ES_VAR_REG_SIZE",
 };
 
 /* order corresponds to enum of REG_ and SEG_ constants */
@@ -236,13 +237,360 @@ const reg_id_t dr_reg_fixer[] = {
     DR_REG_BND2,    DR_REG_BND3,
 };
 
+/* Maps real ISA registers to their corresponding virtual DR_ISA_REGDEPS register.
+ * Note that we map real sub-registers to their corresponding containing virtual register.
+ * Same size as dr_reg_fixer[], keep them synched.
+ */
+const reg_id_t d_r_reg_id_to_virtual[] = {
+    DR_REG_NULL,    /* DR_REG_NULL */
+    DR_REG_VIRT0,   /* DR_REG_RAX */
+    DR_REG_VIRT1,   /* DR_REG_RCX */
+    DR_REG_VIRT2,   /* DR_REG_RDX */
+    DR_REG_VIRT3,   /* DR_REG_RBX */
+    DR_REG_VIRT4,   /* DR_REG_RSP */
+    DR_REG_VIRT5,   /* DR_REG_RBP */
+    DR_REG_VIRT6,   /* DR_REG_RSI */
+    DR_REG_VIRT7,   /* DR_REG_RDI */
+    DR_REG_VIRT8,   /* DR_REG_R8 */
+    DR_REG_VIRT9,   /* DR_REG_R9 */
+    DR_REG_VIRT10,  /* DR_REG_R10 */
+    DR_REG_VIRT11,  /* DR_REG_R11 */
+    DR_REG_VIRT12,  /* DR_REG_R12 */
+    DR_REG_VIRT13,  /* DR_REG_R13 */
+    DR_REG_VIRT14,  /* DR_REG_R14 */
+    DR_REG_VIRT15,  /* DR_REG_R15 */
+    DR_REG_VIRT0,   /* DR_REG_EAX */
+    DR_REG_VIRT1,   /* DR_REG_ECX */
+    DR_REG_VIRT2,   /* DR_REG_EDX */
+    DR_REG_VIRT3,   /* DR_REG_EBX */
+    DR_REG_VIRT4,   /* DR_REG_ESP */
+    DR_REG_VIRT5,   /* DR_REG_EBP */
+    DR_REG_VIRT6,   /* DR_REG_ESI */
+    DR_REG_VIRT7,   /* DR_REG_EDI */
+    DR_REG_VIRT8,   /* DR_REG_R8D */
+    DR_REG_VIRT9,   /* DR_REG_R9D */
+    DR_REG_VIRT10,  /* DR_REG_R10D */
+    DR_REG_VIRT11,  /* DR_REG_R11D */
+    DR_REG_VIRT12,  /* DR_REG_R12D */
+    DR_REG_VIRT13,  /* DR_REG_R13D */
+    DR_REG_VIRT14,  /* DR_REG_R14D */
+    DR_REG_VIRT15,  /* DR_REG_R15D */
+    DR_REG_VIRT0,   /* DR_REG_AX */
+    DR_REG_VIRT1,   /* DR_REG_CX */
+    DR_REG_VIRT2,   /* DR_REG_DX */
+    DR_REG_VIRT3,   /* DR_REG_BX */
+    DR_REG_VIRT4,   /* DR_REG_SP */
+    DR_REG_VIRT5,   /* DR_REG_BP */
+    DR_REG_VIRT6,   /* DR_REG_SI */
+    DR_REG_VIRT7,   /* DR_REG_DI */
+    DR_REG_VIRT8,   /* DR_REG_R8W */
+    DR_REG_VIRT9,   /* DR_REG_R9W */
+    DR_REG_VIRT10,  /* DR_REG_R10W */
+    DR_REG_VIRT11,  /* DR_REG_R11W */
+    DR_REG_VIRT12,  /* DR_REG_R12W */
+    DR_REG_VIRT13,  /* DR_REG_R13W */
+    DR_REG_VIRT14,  /* DR_REG_R14W */
+    DR_REG_VIRT15,  /* DR_REG_R15W */
+    DR_REG_VIRT0,   /* DR_REG_AL */
+    DR_REG_VIRT1,   /* DR_REG_CL */
+    DR_REG_VIRT2,   /* DR_REG_DL */
+    DR_REG_VIRT3,   /* DR_REG_BL */
+    DR_REG_VIRT0,   /* DR_REG_AH */
+    DR_REG_VIRT1,   /* DR_REG_CH */
+    DR_REG_VIRT2,   /* DR_REG_DH */
+    DR_REG_VIRT3,   /* DR_REG_BH */
+    DR_REG_VIRT8,   /* DR_REG_R8L */
+    DR_REG_VIRT9,   /* DR_REG_R9L */
+    DR_REG_VIRT10,  /* DR_REG_R10L */
+    DR_REG_VIRT11,  /* DR_REG_R11L */
+    DR_REG_VIRT12,  /* DR_REG_R12L */
+    DR_REG_VIRT13,  /* DR_REG_R13L */
+    DR_REG_VIRT14,  /* DR_REG_R14L */
+    DR_REG_VIRT15,  /* DR_REG_R15L */
+    DR_REG_VIRT4,   /* DR_REG_SPL */
+    DR_REG_VIRT5,   /* DR_REG_BPL */
+    DR_REG_VIRT6,   /* DR_REG_SIL */
+    DR_REG_VIRT7,   /* DR_REG_DIL */
+    DR_REG_VIRT16,  /* DR_REG_MM0 */
+    DR_REG_VIRT17,  /* DR_REG_MM1 */
+    DR_REG_VIRT18,  /* DR_REG_MM2 */
+    DR_REG_VIRT19,  /* DR_REG_MM3 */
+    DR_REG_VIRT20,  /* DR_REG_MM4 */
+    DR_REG_VIRT21,  /* DR_REG_MM5 */
+    DR_REG_VIRT22,  /* DR_REG_MM6 */
+    DR_REG_VIRT23,  /* DR_REG_MM7 */
+    DR_REG_VIRT70,  /* DR_REG_XMM0 */
+    DR_REG_VIRT71,  /* DR_REG_XMM1 */
+    DR_REG_VIRT72,  /* DR_REG_XMM2 */
+    DR_REG_VIRT73,  /* DR_REG_XMM3 */
+    DR_REG_VIRT74,  /* DR_REG_XMM4 */
+    DR_REG_VIRT75,  /* DR_REG_XMM5 */
+    DR_REG_VIRT76,  /* DR_REG_XMM6 */
+    DR_REG_VIRT77,  /* DR_REG_XMM7 */
+    DR_REG_VIRT78,  /* DR_REG_XMM8 */
+    DR_REG_VIRT79,  /* DR_REG_XMM9 */
+    DR_REG_VIRT80,  /* DR_REG_XMM10 */
+    DR_REG_VIRT81,  /* DR_REG_XMM11 */
+    DR_REG_VIRT82,  /* DR_REG_XMM12 */
+    DR_REG_VIRT83,  /* DR_REG_XMM13 */
+    DR_REG_VIRT84,  /* DR_REG_XMM14 */
+    DR_REG_VIRT85,  /* DR_REG_XMM15 */
+    DR_REG_VIRT86,  /* DR_REG_XMM16 */
+    DR_REG_VIRT87,  /* DR_REG_XMM17 */
+    DR_REG_VIRT88,  /* DR_REG_XMM18 */
+    DR_REG_VIRT89,  /* DR_REG_XMM19 */
+    DR_REG_VIRT90,  /* DR_REG_XMM20 */
+    DR_REG_VIRT91,  /* DR_REG_XMM21 */
+    DR_REG_VIRT92,  /* DR_REG_XMM22 */
+    DR_REG_VIRT93,  /* DR_REG_XMM23 */
+    DR_REG_VIRT94,  /* DR_REG_XMM24 */
+    DR_REG_VIRT95,  /* DR_REG_XMM25 */
+    DR_REG_VIRT96,  /* DR_REG_XMM26 */
+    DR_REG_VIRT97,  /* DR_REG_XMM27 */
+    DR_REG_VIRT98,  /* DR_REG_XMM28 */
+    DR_REG_VIRT99,  /* DR_REG_XMM29 */
+    DR_REG_VIRT100, /* DR_REG_XMM30 */
+    DR_REG_VIRT101, /* DR_REG_XMM31 */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_VIRT24,  /* DR_REG_ST0 */
+    DR_REG_VIRT25,  /* DR_REG_ST1 */
+    DR_REG_VIRT26,  /* DR_REG_ST2 */
+    DR_REG_VIRT27,  /* DR_REG_ST3 */
+    DR_REG_VIRT28,  /* DR_REG_ST4 */
+    DR_REG_VIRT29,  /* DR_REG_ST5 */
+    DR_REG_VIRT30,  /* DR_REG_ST6 */
+    DR_REG_VIRT31,  /* DR_REG_ST7 */
+    DR_REG_VIRT32,  /* DR_REG_ES */
+    DR_REG_VIRT33,  /* DR_REG_CS */
+    DR_REG_VIRT34,  /* DR_REG_SS */
+    DR_REG_VIRT35,  /* DR_REG_DS */
+    DR_REG_VIRT36,  /* DR_REG_FS */
+    DR_REG_VIRT37,  /* DR_REG_GS */
+    DR_REG_VIRT38,  /* DR_REG_DR0 */
+    DR_REG_VIRT39,  /* DR_REG_DR1 */
+    DR_REG_VIRT40,  /* DR_REG_DR2 */
+    DR_REG_VIRT41,  /* DR_REG_DR3 */
+    DR_REG_VIRT42,  /* DR_REG_DR4 */
+    DR_REG_VIRT43,  /* DR_REG_DR5 */
+    DR_REG_VIRT44,  /* DR_REG_DR6 */
+    DR_REG_VIRT45,  /* DR_REG_DR7 */
+    DR_REG_VIRT46,  /* DR_REG_DR8 */
+    DR_REG_VIRT47,  /* DR_REG_DR9 */
+    DR_REG_VIRT48,  /* DR_REG_DR10 */
+    DR_REG_VIRT49,  /* DR_REG_DR11 */
+    DR_REG_VIRT50,  /* DR_REG_DR12 */
+    DR_REG_VIRT51,  /* DR_REG_DR13 */
+    DR_REG_VIRT52,  /* DR_REG_DR14 */
+    DR_REG_VIRT53,  /* DR_REG_DR15 */
+    DR_REG_VIRT54,  /* DR_REG_CR0 */
+    DR_REG_VIRT55,  /* DR_REG_CR1 */
+    DR_REG_VIRT56,  /* DR_REG_CR2 */
+    DR_REG_VIRT57,  /* DR_REG_CR3 */
+    DR_REG_VIRT58,  /* DR_REG_CR4 */
+    DR_REG_VIRT59,  /* DR_REG_CR5 */
+    DR_REG_VIRT60,  /* DR_REG_CR6 */
+    DR_REG_VIRT61,  /* DR_REG_CR7 */
+    DR_REG_VIRT62,  /* DR_REG_CR8 */
+    DR_REG_VIRT63,  /* DR_REG_CR9 */
+    DR_REG_VIRT64,  /* DR_REG_CR10 */
+    DR_REG_VIRT65,  /* DR_REG_CR11 */
+    DR_REG_VIRT66,  /* DR_REG_CR12 */
+    DR_REG_VIRT67,  /* DR_REG_CR13 */
+    DR_REG_VIRT68,  /* DR_REG_CR14 */
+    DR_REG_VIRT69,  /* DR_REG_CR15 */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_VIRT70,  /* DR_REG_YMM0 */
+    DR_REG_VIRT71,  /* DR_REG_YMM1 */
+    DR_REG_VIRT72,  /* DR_REG_YMM2 */
+    DR_REG_VIRT73,  /* DR_REG_YMM3 */
+    DR_REG_VIRT74,  /* DR_REG_YMM4 */
+    DR_REG_VIRT75,  /* DR_REG_YMM5 */
+    DR_REG_VIRT76,  /* DR_REG_YMM6 */
+    DR_REG_VIRT77,  /* DR_REG_YMM7 */
+    DR_REG_VIRT78,  /* DR_REG_YMM8 */
+    DR_REG_VIRT79,  /* DR_REG_YMM9 */
+    DR_REG_VIRT80,  /* DR_REG_YMM10 */
+    DR_REG_VIRT81,  /* DR_REG_YMM11 */
+    DR_REG_VIRT82,  /* DR_REG_YMM12 */
+    DR_REG_VIRT83,  /* DR_REG_YMM13 */
+    DR_REG_VIRT84,  /* DR_REG_YMM14 */
+    DR_REG_VIRT85,  /* DR_REG_YMM15 */
+    DR_REG_VIRT86,  /* DR_REG_YMM16 */
+    DR_REG_VIRT87,  /* DR_REG_YMM17 */
+    DR_REG_VIRT88,  /* DR_REG_YMM18 */
+    DR_REG_VIRT89,  /* DR_REG_YMM19 */
+    DR_REG_VIRT90,  /* DR_REG_YMM20 */
+    DR_REG_VIRT91,  /* DR_REG_YMM21 */
+    DR_REG_VIRT92,  /* DR_REG_YMM22 */
+    DR_REG_VIRT93,  /* DR_REG_YMM23 */
+    DR_REG_VIRT94,  /* DR_REG_YMM24 */
+    DR_REG_VIRT95,  /* DR_REG_YMM25 */
+    DR_REG_VIRT96,  /* DR_REG_YMM26 */
+    DR_REG_VIRT97,  /* DR_REG_YMM27 */
+    DR_REG_VIRT98,  /* DR_REG_YMM28 */
+    DR_REG_VIRT99,  /* DR_REG_YMM29 */
+    DR_REG_VIRT100, /* DR_REG_YMM30 */
+    DR_REG_VIRT101, /* DR_REG_YMM31 */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_VIRT70,  /* DR_REG_ZMM0 */
+    DR_REG_VIRT71,  /* DR_REG_ZMM1 */
+    DR_REG_VIRT72,  /* DR_REG_ZMM2 */
+    DR_REG_VIRT73,  /* DR_REG_ZMM3 */
+    DR_REG_VIRT74,  /* DR_REG_ZMM4 */
+    DR_REG_VIRT75,  /* DR_REG_ZMM5 */
+    DR_REG_VIRT76,  /* DR_REG_ZMM6 */
+    DR_REG_VIRT77,  /* DR_REG_ZMM7 */
+    DR_REG_VIRT78,  /* DR_REG_ZMM8 */
+    DR_REG_VIRT79,  /* DR_REG_ZMM9 */
+    DR_REG_VIRT80,  /* DR_REG_ZMM10 */
+    DR_REG_VIRT81,  /* DR_REG_ZMM11 */
+    DR_REG_VIRT82,  /* DR_REG_ZMM12 */
+    DR_REG_VIRT83,  /* DR_REG_ZMM13 */
+    DR_REG_VIRT84,  /* DR_REG_ZMM14 */
+    DR_REG_VIRT85,  /* DR_REG_ZMM15 */
+    DR_REG_VIRT86,  /* DR_REG_ZMM16 */
+    DR_REG_VIRT87,  /* DR_REG_ZMM17 */
+    DR_REG_VIRT88,  /* DR_REG_ZMM18 */
+    DR_REG_VIRT89,  /* DR_REG_ZMM19 */
+    DR_REG_VIRT90,  /* DR_REG_ZMM20 */
+    DR_REG_VIRT91,  /* DR_REG_ZMM21 */
+    DR_REG_VIRT92,  /* DR_REG_ZMM22 */
+    DR_REG_VIRT93,  /* DR_REG_ZMM23 */
+    DR_REG_VIRT94,  /* DR_REG_ZMM24 */
+    DR_REG_VIRT95,  /* DR_REG_ZMM25 */
+    DR_REG_VIRT96,  /* DR_REG_ZMM26 */
+    DR_REG_VIRT97,  /* DR_REG_ZMM27 */
+    DR_REG_VIRT98,  /* DR_REG_ZMM28 */
+    DR_REG_VIRT99,  /* DR_REG_ZMM29 */
+    DR_REG_VIRT100, /* DR_REG_ZMM30 */
+    DR_REG_VIRT101, /* DR_REG_ZMM31 */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_VIRT102, /* DR_REG_K0 */
+    DR_REG_VIRT103, /* DR_REG_K1 */
+    DR_REG_VIRT104, /* DR_REG_K2 */
+    DR_REG_VIRT105, /* DR_REG_K3 */
+    DR_REG_VIRT106, /* DR_REG_K4 */
+    DR_REG_VIRT107, /* DR_REG_K5 */
+    DR_REG_VIRT108, /* DR_REG_K6 */
+    DR_REG_VIRT109, /* DR_REG_K7 */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_INVALID, /* DR_REG_INVALID */
+    DR_REG_VIRT110, /* DR_REG_BND0 */
+    DR_REG_VIRT111, /* DR_REG_BND1 */
+    DR_REG_VIRT112, /* DR_REG_BND2 */
+    DR_REG_VIRT113, /* DR_REG_BND3 */
+};
+
 #ifdef DEBUG
 void
 encode_debug_checks(void)
 {
-    CLIENT_ASSERT(sizeof(dr_reg_fixer) / sizeof(dr_reg_fixer[0]) == DR_REG_LAST_ENUM + 1,
+    CLIENT_ASSERT(sizeof(dr_reg_fixer) / sizeof(dr_reg_fixer[0]) ==
+                      DR_REG_AFTER_LAST_VALID_ENUM,
                   "internal register enum error");
-    CLIENT_ASSERT(sizeof(reg_names) / sizeof(reg_names[0]) == DR_REG_LAST_ENUM + 1,
+    CLIENT_ASSERT(sizeof(d_r_reg_id_to_virtual) == sizeof(dr_reg_fixer),
+                  "register to virtual register map size error");
+    CLIENT_ASSERT(sizeof(reg_names) / sizeof(reg_names[0]) ==
+                      DR_REG_AFTER_LAST_VALID_ENUM,
                   "reg_names missing an entry");
     CLIENT_ASSERT(sizeof(type_names) / sizeof(type_names[0]) == TYPE_BEYOND_LAST_ENUM,
                   "type_names missing an entry");
@@ -344,7 +692,7 @@ type_uses_evex_aaa_bits(int type)
     }
 }
 
-/* Helper routine that sets/checks rex.w or data prefix, if necessary, for
+/* Helper routine that sets/checks rex.w, data, or addr prefix, if necessary, for
  * variable-sized OPSZ_ constants that the user asks for.  We try to be flexible
  * setting/checking only enough prefix flags to ensure that the final template size
  * is one of the possible sizes in the request.
@@ -353,7 +701,7 @@ static bool
 size_ok_varsz(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
               opnd_size_t size_op, opnd_size_t size_template, uint prefix_data_addr)
 {
-    /* FIXME: this code is getting long and complex: is there a better way?
+    /* XXX: this code is getting long and complex: is there a better way?
      * Any way to resolve these var sizes further first?  Doesn't seem like it.
      */
     /* if identical sizes we shouldn't be called */
@@ -437,7 +785,7 @@ size_ok_varsz(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
         if (size_template == OPSZ_4_rex8_short2) {
             if (TEST(prefix_data_addr, di->prefixes))
                 return true; /* Already shrinking so ok */
-            /* FIXME - ambiguous on 64-bit (could widen to 8 or shrink to 2).
+            /* XXX - ambiguous on 64-bit (could widen to 8 or shrink to 2).
              * We choose to widen by default for 64-bit as that seems the more likely
              * usage, but whatever choice we make here could conflict with a later
              * operand and lead to encoding failure even if there was a possible match. */
@@ -535,7 +883,7 @@ resolve_var_x64_size(decode_info_t *di /*x86_mode is IN*/, opnd_size_t sz,
 {
     /* Resolve what we can based purely on x64 and addr_short4
      * (gets rid of all NxM sizes), as well as vendor where the size
-     * differences are static.  FIXME - could also resolve rex
+     * differences are static.  XXX - could also resolve rex
      * availability and vendor rex-varying sizes here,
      * but not without adding more types that would make
      * size_ok routines more complicated.  */
@@ -598,12 +946,12 @@ size_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
     /* for OPSZ_4x8_short2, does the addr prefix select 4 instead of 2 bytes? */
     bool addr_short4 = X64_MODE(di) && addr;
     /* Assumption: the only addr-specified operands that can be short
-     * are OPSZ_4x8_short2 and OPSZ_4x8_short2xi8, or
+     * are OPSZ_4x8_short2, OPSZ_4x8_short2xi8 and OPSZ_addr, or
      * OPSZ_4_short2 for x86 mode on x64.
      * Stack memrefs can pass addr==true and OPSZ_4x8.
      */
     CLIENT_ASSERT(!addr || size_template == OPSZ_4x8 ||
-                      size_template == OPSZ_4x8_short2xi8 ||
+                      size_template == OPSZ_4x8_short2xi8 || size_template == OPSZ_addr ||
                       size_template ==
                           OPSZ_4x8_short2 IF_X64(
                               || (!X64_MODE(di) && size_template == OPSZ_4_short2)),
@@ -635,6 +983,10 @@ size_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
             }
             return false;
         case OPSZ_2:
+            if (!X64_MODE(di) && size_template == OPSZ_addr) {
+                di->prefixes |= prefix_data_addr;
+                return true;
+            }
             if (size_template == OPSZ_2_short1)
                 return !TEST(prefix_data_addr, di->prefixes);
             if (size_template == OPSZ_4_short2 || size_template == OPSZ_8_short2) {
@@ -655,6 +1007,12 @@ size_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
             }
             return false;
         case OPSZ_4:
+            if (size_template == OPSZ_addr) {
+                if (!X64_MODE(di))
+                    return !TEST(prefix_data_addr, di->prefixes);
+                di->prefixes |= prefix_data_addr;
+                return true;
+            }
             if (size_template == OPSZ_4_short2)
                 return !TEST(prefix_data_addr, di->prefixes);
             if (size_template == OPSZ_4_rex8_short2)
@@ -708,7 +1066,8 @@ size_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/,
                 di->prefixes |= PREFIX_REX_W; /* rex.w trumps data prefix */
                 return true;
             }
-            if (size_template == OPSZ_8_short4 || size_template == OPSZ_8_short2)
+            if ((X64_MODE(di) && size_template == OPSZ_addr) ||
+                size_template == OPSZ_8_short4 || size_template == OPSZ_8_short2)
                 return !TEST(prefix_data_addr, di->prefixes);
             if (size_template == OPSZ_8_rex16 || size_template == OPSZ_8_rex16_short4)
                 return !TESTANY(prefix_data_addr | PREFIX_REX_W, di->prefixes);
@@ -1260,7 +1619,7 @@ opnd_type_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/, opn
                  size_ok(di, opnd_get_size(opnd), opsize, false /*!addr*/) &&
                  immed_size_ok(di, opnd_get_immed_int(opnd), opsize)));
     case TYPE_1:
-        /* FIXME (xref PR 229127): Ib vs c1: if say "1, OPSZ_1" will NOT match c1 and
+        /* XXX (xref PR 229127): Ib vs c1: if say "1, OPSZ_1" will NOT match c1 and
          * will get the Ib version: do we want to match c1?  What if they really want
          * an immed byte in the encoding?  OTOH, we do match constant registers
          * automatically w/ no control from the user.
@@ -1270,10 +1629,10 @@ opnd_type_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/, opn
         return (opnd_is_immed_int(opnd) && opnd_get_immed_int(opnd) == 1 &&
                 size_ok(di, opnd_get_size(opnd), opsize, false /*!addr*/));
     case TYPE_FLOATCONST:
-        return (opnd_is_immed_float(opnd)); /* FIXME: is actual float const decoded? */
+        return (opnd_is_immed_float(opnd)); /* XXX: is actual float const decoded? */
     case TYPE_J:
-        /* FIXME PR 225937: support 16-bit data16 immediates */
-        /* FIXME: need relative pc offset to test immed_size_ok, but all we have
+        /* XXX PR 225937: support 16-bit data16 immediates */
+        /* XXX: need relative pc offset to test immed_size_ok, but all we have
          * here is absolute pc or instr: but we don't auto-select opcode, and opcode
          * selects immed size (except for data16 which we don't support),
          * so we don't need to choose among templates now: we'll complain
@@ -1372,7 +1731,7 @@ opnd_type_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/, opn
         /* far_ ok */
         return (opnd_is_base_disp(opnd) && opnd_get_base(opnd) == opsize &&
                 opnd_get_index(opnd) == REG_NULL && opnd_get_disp(opnd) == 0 &&
-                /* FIXME: how know data size?  for now just use reg size... */
+                /* XXX: how know data size?  for now just use reg size... */
                 size_ok(di, opnd_get_size(opnd), reg_get_size(opsize), false /*!addr*/));
     case TYPE_INDIR_VAR_XREG:         /* indirect reg that varies by ss only, base is 4x8,
                                        * opsize that varies by data16 */
@@ -1461,6 +1820,11 @@ opnd_type_ok(decode_info_t *di /*prefixes field is IN/OUT; x86_mode is IN*/, opn
         return (opnd_is_reg(opnd) &&
                 reg_size_ok(di, opnd_get_reg(opnd), optype, opsize, false /*!addr*/) &&
                 reg_is_bnd(opnd_get_reg(opnd)));
+    case TYPE_G_ES_VAR_REG_SIZE:
+        return (opnd_is_far_base_disp(opnd) && opnd_get_segment(opnd) == DR_SEG_ES &&
+                opnd_get_disp(opnd) == 0 && opnd_get_index(opnd) == REG_NULL &&
+                reg_is_gpr(opnd_get_base(opnd)) &&
+                reg_size_ok(di, opnd_get_base(opnd), optype, OPSZ_addr, true /*addr*/));
     default:
         CLIENT_ASSERT(false, "encode error: type ok: unknown operand type");
         return false;
@@ -1520,7 +1884,7 @@ encoding_meets_hints(instr_t *instr, const instr_info_t *info)
 }
 
 /* May be called a 2nd time to check size prefix consistency.
- * FIXME optimization: in 2nd pass we only need to call opnd_type_ok()
+ * XXX optimization: in 2nd pass we only need to call opnd_type_ok()
  * and don't need to check reg, modrm, numbers, etc.
  */
 static bool
@@ -2332,7 +2696,7 @@ encode_operand(decode_info_t *di, int optype, opnd_size_t opsize, opnd_t opnd)
 
     case TYPE_L: {
         reg_id_t reg = opnd_get_reg(opnd);
-        CLIENT_ASSERT(!reg_is_strictly_zmm(reg), "FIXME i#1312: unsupported.");
+        CLIENT_ASSERT(!reg_is_strictly_zmm(reg), "XXX i#1312: unsupported.");
         ptr_int_t immed =
             (reg_is_strictly_ymm(reg) ? (reg - REG_START_YMM) : (reg - REG_START_XMM));
         immed = (immed << 4);
@@ -2382,6 +2746,24 @@ encode_operand(decode_info_t *di, int optype, opnd_size_t opsize, opnd_t opnd)
         di->evex_aaa = (byte)(reg - DR_REG_START_OPMASK);
         return;
     }
+    case TYPE_G_ES_VAR_REG_SIZE:
+        CLIENT_ASSERT(opnd_is_memory_reference(opnd),
+                      "encode error: operand must be a memory reference");
+        CLIENT_ASSERT(opnd_is_far_base_disp(opnd),
+                      "encode error: operand must be a far base disp");
+        /* NB: We don't actually set di->seg_override because the ES segment is
+         * inherent to the operand type.
+         */
+        CLIENT_ASSERT(opnd_get_segment(opnd) == DR_SEG_ES,
+                      "encode error: operand must be ES-relative");
+        CLIENT_ASSERT(opnd_get_disp(opnd) == 0, "encode error: operand must have 0 disp");
+        CLIENT_ASSERT(opnd_get_index(opnd) == REG_NULL,
+                      "encode error: operand must not have an index");
+        reg_id_t reg = opnd_get_base(opnd);
+        CLIENT_ASSERT(reg_is_gpr(reg), "encode error: base reg must be GPR");
+        encode_reg_ext_prefixes(di, reg, PREFIX_REX_R);
+        di->reg = reg_get_bits(reg);
+        return;
 
     default: CLIENT_ASSERT(false, "encode error: unknown operand type");
     }
@@ -2630,7 +3012,7 @@ encode_cti(instr_t *instr, byte *copy_pc, byte *final_pc,
         CLIENT_ASSERT(!instr_is_cti_short_rewrite(instr, NULL),
                       "encode_cti error: jecxz/loop already mangled");
         /* offset is from start of next instr */
-        offset = target - ((ptr_int_t)(pc + 1 - copy_pc + final_pc));
+        offset = target - (pc + 1 - copy_pc + (ptr_uint_t)final_pc);
         if (check_reachable && !(offset >= INT8_MIN && offset <= INT8_MAX)) {
             CLIENT_ASSERT(!assert_reachable,
                           "encode_cti error: target beyond 8-bit reach");
@@ -2641,7 +3023,7 @@ encode_cti(instr_t *instr, byte *copy_pc, byte *final_pc,
     } else {
         /* 32-bit offset */
         /* offset is from start of next instr */
-        ptr_int_t offset = target - ((ptr_int_t)(pc + 4 - copy_pc + final_pc));
+        ptr_int_t offset = target - (pc + 4 - copy_pc + (ptr_uint_t)final_pc);
 #ifdef X64
         if (check_reachable && !REL32_REACHABLE_OFFS(offset)) {
             CLIENT_ASSERT(!assert_reachable,
@@ -2848,7 +3230,7 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
                 LOG(THREAD, LOG_EMIT, 1, "\n");
             });
             CLIENT_ASSERT(false, "instr_encode error: no encoding found (see log)");
-            /* FIXME: since labels (case 4468) have a legal length 0
+            /* XXX: since labels (case 4468) have a legal length 0
              * we may want to return a separate status code for failure.
              */
             return NULL;

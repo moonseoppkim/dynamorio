@@ -24,16 +24,17 @@ Please also answer these questions:
  - What happens when you run without any client?
  - What happens when you run with debug build ("-debug" flag to drrun/drconfig/drinject)?
 
+Please provide a symbolized callstack of any crash or assert so we do not have to speculate or guess as to where it is occurring (see our [Linux gdb instructions](https://dynamorio.org/page_debugging.html#autotoc_md146) and [Windows windbg instructions](https://dynamorio.org/page_debugging.html#autotoc_md157) to see how to load DynamoRIO symbols for a callstack).
+
 **Expected behavior**
 A clear and concise description of what you expected to happen.
 
 **Screenshots or Pasted Text**
 If applicable, add screenshots to help explain your problem.  For text, please cut and paste the text here, delimited by lines consisting of three backtics to render it verbatim, like this:
-<pre>
+
 ```
 paste output here
 ```
-</pre>
 
 **Versions**
  - What version of DynamoRIO are you using?

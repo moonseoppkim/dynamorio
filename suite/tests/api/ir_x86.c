@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2024 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -328,18 +328,60 @@ test_all_opcodes_3_avx512_vex(void *dc)
 #    undef INCLUDE_NAME
 }
 
+/* Part A: Split up to avoid VS running out of memory (i#3992,i#4610). */
 static void
-test_all_opcodes_3_avx512_evex_mask(void *dc)
+test_all_opcodes_3_avx512_evex_mask_A(void *dc)
 {
-#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask.h"
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_A.h"
 #    include "ir_x86_all_opc.h"
 #    undef INCLUDE_NAME
 }
 
+/* Part B: Split up to avoid VS running out of memory (i#3992,i#4610). */
 static void
-test_all_opcodes_3_avx512_evex_mask_scaled_disp8(void *dc)
+test_all_opcodes_3_avx512_evex_mask_B(void *dc)
 {
-#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask.h"
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_B.h"
+#    include "ir_x86_all_opc.h"
+#    undef INCLUDE_NAME
+}
+
+/* Part C: Split up to avoid VS running out of memory (i#3992,i#4610). */
+static void
+test_all_opcodes_3_avx512_evex_mask_C(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_C.h"
+#    include "ir_x86_all_opc.h"
+#    undef INCLUDE_NAME
+}
+
+/* Part A: Split up to avoid VS running out of memory (i#3992,i#4610). */
+static void
+test_all_opcodes_3_avx512_evex_mask_scaled_disp8_A(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_A.h"
+    memarg_disp = EVEX_SCALABLE_DISP;
+#    include "ir_x86_all_opc.h"
+    memarg_disp = DEFAULT_DISP;
+#    undef INCLUDE_NAME
+}
+
+/* Part B: Split up to avoid VS running out of memory (i#3992,i#4610). */
+static void
+test_all_opcodes_3_avx512_evex_mask_scaled_disp8_B(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_B.h"
+    memarg_disp = EVEX_SCALABLE_DISP;
+#    include "ir_x86_all_opc.h"
+    memarg_disp = DEFAULT_DISP;
+#    undef INCLUDE_NAME
+}
+
+/* Part C: Split up to avoid VS running out of memory (i#3992,i#4610). */
+static void
+test_all_opcodes_3_avx512_evex_mask_scaled_disp8_C(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_3args_avx512_evex_mask_C.h"
     memarg_disp = EVEX_SCALABLE_DISP;
 #    include "ir_x86_all_opc.h"
     memarg_disp = DEFAULT_DISP;
@@ -483,6 +525,17 @@ test_all_opcodes_4_avx512_evex_mask_C(void *dc)
 #    undef INCLUDE_NAME
 }
 
+/* Part D: Split up to avoid VS running out of memory (i#3992,i#4610).
+ * (The _scaled_disp8 versions are what hit the OOM but we split this one too.)
+ */
+static void
+test_all_opcodes_4_avx512_evex_mask_D(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_4args_avx512_evex_mask_D.h"
+#    include "ir_x86_all_opc.h"
+#    undef INCLUDE_NAME
+}
+
 /* Part A: Split up to avoid VS running out of memory (i#3992,i#4610). */
 static void
 test_all_opcodes_4_avx512_evex_mask_scaled_disp8_A(void *dc)
@@ -510,6 +563,17 @@ static void
 test_all_opcodes_4_avx512_evex_mask_scaled_disp8_C(void *dc)
 {
 #    define INCLUDE_NAME "ir_x86_4args_avx512_evex_mask_C.h"
+    memarg_disp = EVEX_SCALABLE_DISP;
+#    include "ir_x86_all_opc.h"
+    memarg_disp = DEFAULT_DISP;
+#    undef INCLUDE_NAME
+}
+
+/* Part D: Split up to avoid VS running out of memory (i#3992,i#4610). */
+static void
+test_all_opcodes_4_avx512_evex_mask_scaled_disp8_D(void *dc)
+{
+#    define INCLUDE_NAME "ir_x86_4args_avx512_evex_mask_D.h"
     memarg_disp = EVEX_SCALABLE_DISP;
 #    include "ir_x86_all_opc.h"
     memarg_disp = DEFAULT_DISP;
@@ -914,7 +978,8 @@ test_cti_prefixes(void *dc)
 }
 
 static void
-test_cti_predicate(void *dc, byte *data, uint len, int opcode, dr_pred_type_t pred)
+test_predicate(void *dc, byte *data, uint len, int opcode, dr_pred_type_t pred,
+               uint eflags)
 {
     instr_t *instr = instr_create(dc);
     byte *end = decode(dc, data, instr);
@@ -922,6 +987,7 @@ test_cti_predicate(void *dc, byte *data, uint len, int opcode, dr_pred_type_t pr
     ASSERT(instr_get_opcode(instr) == opcode);
     ASSERT(instr_is_predicated(instr));
     ASSERT(instr_get_predicate(instr) == pred);
+    ASSERT(instr_get_opcode_eflags(opcode) == eflags);
     instr_destroy(dc, instr);
 }
 
@@ -936,9 +1002,32 @@ test_cti_predicates(void *dc)
         // 0f 44 c2             cmovbe %edx,%eax
         { 0x0f, 0x46, 0xc2 },
     };
-    test_cti_predicate(dc, data[0], 2, OP_jle_short, DR_PRED_LE);
-    test_cti_predicate(dc, data[1], 6, OP_je, DR_PRED_EQ);
-    test_cti_predicate(dc, data[2], 3, OP_cmovbe, DR_PRED_BE);
+    test_predicate(dc, data[0], 2, OP_jle_short, DR_PRED_LE,
+                   EFLAGS_READ_SF | EFLAGS_READ_OF | EFLAGS_READ_ZF);
+    test_predicate(dc, data[1], 6, OP_je, DR_PRED_EQ, EFLAGS_READ_ZF);
+    test_predicate(dc, data[2], 3, OP_cmovbe, DR_PRED_BE,
+                   EFLAGS_READ_CF | EFLAGS_READ_ZF);
+}
+
+static void
+test_rep_predicates(void *dc)
+{
+    byte data[][16] = {
+        // f3 6c                rep ins
+        { 0xf3, 0x6c },
+        // f3 a4                rep movs
+        { 0xf3, 0xa4 },
+        // f3 a6                rep cmps
+        { 0xf3, 0xa6 },
+        // f2 af                repne scas
+        { 0xf2, 0xaf },
+    };
+    test_predicate(dc, data[0], 2, OP_rep_ins, DR_PRED_COMPLEX, EFLAGS_READ_DF);
+    test_predicate(dc, data[1], 2, OP_rep_movs, DR_PRED_COMPLEX, EFLAGS_READ_DF);
+    test_predicate(dc, data[2], 2, OP_rep_cmps, DR_PRED_COMPLEX,
+                   EFLAGS_WRITE_6 | EFLAGS_READ_DF | EFLAGS_READ_ZF);
+    test_predicate(dc, data[3], 2, OP_repne_scas, DR_PRED_COMPLEX,
+                   EFLAGS_WRITE_6 | EFLAGS_READ_DF | EFLAGS_READ_ZF);
 }
 
 static void
@@ -1268,9 +1357,10 @@ test_hint_nops(void *dc)
     /* other types of hintable nop [eax] */
     buf[2] = 0x00;
     for (buf[1] = 0x19; buf[1] <= 0x1f; buf[1]++) {
-        /* Intel is using these encodings now for the MPX instructions bndldx and bndstx.
+        /* Intel is using these encodings now for the MPX instructions bndldx and bndstx,
+         * and cldemote.
          */
-        if (buf[1] == 0x1a || buf[1] == 0x1b)
+        if (buf[1] == 0x1a || buf[1] == 0x1b || buf[1] == 0x1c)
             continue;
         pc = decode(dc, buf, instr);
         ASSERT(instr_get_opcode(instr) == OP_nop_modrm);
@@ -2845,6 +2935,8 @@ main(int argc, char *argv[])
 #else
     void *dcontext = dr_standalone_init();
 
+    ASSERT(!dr_running_under_dynamorio());
+
     /* simple test of deadlock_avoidance, etc. being disabled in standalone */
     void *x = dr_mutex_create();
     dr_mutex_lock(x);
@@ -2869,6 +2961,8 @@ main(int argc, char *argv[])
     test_cti_prefixes(dcontext);
 
     test_cti_predicates(dcontext);
+
+    test_rep_predicates(dcontext);
 
 #ifndef X64
     test_modrm16(dcontext);
@@ -2936,12 +3030,15 @@ main(int argc, char *argv[])
     test_all_opcodes_2_avx512_vex(dcontext);
     test_all_opcodes_3_avx512_vex(dcontext);
     test_opmask_disas_avx512(dcontext);
-    test_all_opcodes_3_avx512_evex_mask(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_A(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_B(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_C(dcontext);
     test_disas_3_avx512_evex_mask(dcontext);
     test_all_opcodes_5_avx512_evex_mask(dcontext);
     test_all_opcodes_4_avx512_evex_mask_A(dcontext);
     test_all_opcodes_4_avx512_evex_mask_B(dcontext);
     test_all_opcodes_4_avx512_evex_mask_C(dcontext);
+    test_all_opcodes_4_avx512_evex_mask_D(dcontext);
     test_all_opcodes_4_avx512_evex(dcontext);
     test_all_opcodes_3_avx512_evex(dcontext);
     test_all_opcodes_2_avx512_evex(dcontext);
@@ -2950,11 +3047,14 @@ main(int argc, char *argv[])
      * default displacement. The default displacement will become a full 32-bit
      * displacement, while the scalable displacement will get compressed to 8-bit.
      */
-    test_all_opcodes_3_avx512_evex_mask_scaled_disp8(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_scaled_disp8_A(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_scaled_disp8_B(dcontext);
+    test_all_opcodes_3_avx512_evex_mask_scaled_disp8_C(dcontext);
     test_all_opcodes_5_avx512_evex_mask_scaled_disp8(dcontext);
     test_all_opcodes_4_avx512_evex_mask_scaled_disp8_A(dcontext);
     test_all_opcodes_4_avx512_evex_mask_scaled_disp8_B(dcontext);
     test_all_opcodes_4_avx512_evex_mask_scaled_disp8_C(dcontext);
+    test_all_opcodes_4_avx512_evex_mask_scaled_disp8_D(dcontext);
     test_all_opcodes_4_avx512_evex_scaled_disp8(dcontext);
     test_all_opcodes_3_avx512_evex_scaled_disp8(dcontext);
     test_all_opcodes_2_avx512_evex_scaled_disp8(dcontext);

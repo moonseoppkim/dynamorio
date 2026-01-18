@@ -54,7 +54,7 @@ static void
 event_exit(void);
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data);
+                 bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void *user_data);
@@ -76,7 +76,7 @@ dr_init(client_id_t id)
     drmgr_init();
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_bb_insert, NULL, &priority);
@@ -101,7 +101,7 @@ event_exit(void)
 
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data)
+                 bool translating, DR_PARAM_OUT void **user_data)
 {
     drreg_status_t res =
         drreg_set_bb_properties(drcontext, DRREG_USER_RESTORES_AT_BB_END);

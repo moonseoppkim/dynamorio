@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -118,7 +118,7 @@ typedef struct _pe_symbol_export_iterator_t {
  * from pc to pc+size-1 are readable and that reading from there won't
  * generate an exception.  this is a stronger check than
  * !not_readable() below.
- * FIXME : beware of multi-thread races, just because this returns true,
+ * XXX : beware of multi-thread races, just because this returns true,
  * doesn't mean another thread can't make the region unreadable between the
  * check here and the actual read later.  See d_r_safe_read() as an alt.
  */
@@ -160,7 +160,7 @@ is_readable_without_exception(const byte *pc, size_t size)
  * Handles both 32-bit and 64-bit remote processes.
  */
 uint64
-get_remote_process_entry(HANDLE process_handle, OUT bool *x86_code)
+get_remote_process_entry(HANDLE process_handle, DR_PARAM_OUT bool *x86_code)
 {
     uint64 peb_base;
     /* Handle the two possible widths of peb.ImageBaseAddress: */
@@ -334,12 +334,13 @@ get_module_exports_directory_check_common(app_pc base_addr,
  * Only one of name and ordinal should be specified: the other should be
  * NULL (name) or UINT_MAX (ordinal).
  * NOTE - will return NULL for forwarded exports, exports pointing outside of
- * the module and for exports not in a code section (FIXME - is this the
+ * the module and for exports not in a code section (XXX - is this the
  * behavior we want?). Name is case insensitive.
  */
 static generic_func_t
 get_proc_address_common(module_base_t lib, const char *name,
-                        uint ordinal _IF_NOT_X64(bool ldr64), const char **forwarder OUT)
+                        uint ordinal _IF_NOT_X64(bool ldr64),
+                        const char **forwarder DR_PARAM_OUT)
 {
     app_pc module_base;
     size_t exports_size;
@@ -367,7 +368,7 @@ get_proc_address_common(module_base_t lib, const char *name,
         /* avoid non-core issues: we don't have get_allocation_size or is_readable_pe_base
          */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
-    /* FIXME - get_allocation_size and is_readable_pe_base are expensive
+    /* XXX - get_allocation_size and is_readable_pe_base are expensive
      * operations, we could put the onus on the caller to only pass in a
      * valid module_handle_t/pe_base and just assert instead if performance of
      * this routine becomes a concern, esp. since the caller has likely
@@ -433,7 +434,7 @@ get_proc_address_common(module_base_t lib, const char *name,
          */
         ord -= exports->Base;
     } else {
-        /* FIXME - linear walk, if this routine becomes performance critical we
+        /* XXX - linear walk, if this routine becomes performance critical we
          * we should use a binary search. */
         bool match = false;
         for (i = 0; i < exports->NumberOfNames; i++) {
@@ -441,7 +442,7 @@ get_proc_address_common(module_base_t lib, const char *name,
             ASSERT_CURIOSITY((app_pc)export_name > module_base && /* sanity check */
                                  (app_pc)export_name < module_base + module_size ||
                              EXEMPT_TEST("win32.partial_map.exe"));
-            /* FIXME - xref case 9717, we haven't verified that export_name string is
+            /* XXX - xref case 9717, we haven't verified that export_name string is
              * safely readable (might not be the case for improperly formed or partially
              * mapped module) and the try will only protect us if we have a thread_private
              * dcontext. Could use is_string_readable_without_exception(), but that may be
@@ -479,7 +480,7 @@ get_proc_address_common(module_base_t lib, const char *name,
     /* avoid non-core issues: we don't have module_size */
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
     if (func < module_base || func >= module_base + module_size) {
-        /* FIXME - export isn't in the module, should we still return
+        /* XXX - export isn't in the module, should we still return
          * it?  Will shimeng.dll or the like ever do this to replace
          * a function?  For now we return NULL. Xref case 9717, can also
          * happen for a partial map in which case NULL is the right thing
@@ -500,7 +501,7 @@ get_proc_address_common(module_base_t lib, const char *name,
     }
 #endif
     if (func >= (app_pc)exports && func < (app_pc)exports + exports_size) {
-        /* FIXME - is forwarded function, should we still return it
+        /* XXX - is forwarded function, should we still return it
          * or return the target? Check - what does GetProcAddress do?
          * For now we return NULL. Looking up the target would require
          * a get_module_handle call which might not be safe here.
@@ -548,14 +549,16 @@ d_r_get_proc_address(module_base_t lib, const char *name)
 
 /* could be linked w/ non-core but only used by loader.c so far */
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, const char **forwarder OUT)
+get_proc_address_ex(module_base_t lib, const char *name,
+                    const char **forwarder DR_PARAM_OUT)
 {
     return get_proc_address_common(lib, name, UINT_MAX _IF_NOT_X64(false), forwarder);
 }
 
 /* could be linked w/ non-core but only used by loader.c so far */
 generic_func_t
-get_proc_address_by_ordinal(module_base_t lib, uint ordinal, const char **forwarder OUT)
+get_proc_address_by_ordinal(module_base_t lib, uint ordinal,
+                            const char **forwarder DR_PARAM_OUT)
 {
     return get_proc_address_common(lib, NULL, ordinal _IF_NOT_X64(false), forwarder);
 }
@@ -710,7 +713,7 @@ dr_symbol_export_iterator_stop(dr_symbol_export_iterator_t *dr_iter)
  * get_ldr_module_by_pc in module.c for code to grab the ldr lock (which is
  * also unsafe).  Here we presume that we already own the ldr lock and that
  * the ldr list is consistent, which should be the case for preinject (the only
- * user).  FIXME stick this in module.c with get_ldr_module_by_pc, would need
+ * user).  XXX stick this in module.c with get_ldr_module_by_pc, would need
  * to get module.c compiled into preinjector which is a significant hassle.
  */
 LDR_MODULE *
@@ -980,7 +983,7 @@ get_ldr_module_64(const wchar_t *name, uint64 base, LDR_MODULE_64 *out)
  * get_ldr_module_by_pc in module.c for code to grab the ldr lock (which is
  * also unsafe).  Here we presume that we already own the ldr lock and that
  * the ldr list is consistent, which should be the case for preinject (the only
- * user).  FIXME stick this in module.c with get_ldr_module_by_pc, would need
+ * user).  XXX stick this in module.c with get_ldr_module_by_pc, would need
  * to get module.c compiled into preinjector which is a significant hassle.
  *
  * This is now used by more than just preinjector, and it's up to the caller
@@ -1142,10 +1145,10 @@ load_library_64(const char *path)
             /* The WOW64 x64 loader on Vista+ does not seem to
              * call any entry points so we do so here.
              *
-             * FIXME i#979: we should walk the Ldr list afterward to see what
+             * XXX i#979: we should walk the Ldr list afterward to see what
              * dependent libs were loaded so we can call their entry points.
              *
-             * FIXME i#979: we should check for the Ldr entry existing already to
+             * XXX i#979: we should check for the Ldr entry existing already to
              * avoid calling the entry point twice!
              */
             LDR_MODULE_64 mod;
@@ -1466,8 +1469,8 @@ get_remote_proc_address(HANDLE process, uint64 remote_base, const char *name)
 
 /* Handles 32-bit or 64-bit remote processes. */
 bool
-get_remote_dll_short_name(HANDLE process, uint64 remote_base, OUT char *name,
-                          size_t name_len, OUT bool *is_64)
+get_remote_dll_short_name(HANDLE process, uint64 remote_base, DR_PARAM_OUT char *name,
+                          size_t name_len, DR_PARAM_OUT bool *is_64)
 {
     uint64 lib = remote_base;
     size_t exports_size;

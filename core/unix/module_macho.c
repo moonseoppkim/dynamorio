@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2013-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.  All rights reserved.
  * *******************************************************************************/
 
 /*
@@ -33,7 +33,7 @@
 /*
  * module_macho.c - Mach-O file parsing support
  *
- * FIXME i#58: NYI (see comments below as well):
+ * TODO i#58: NYI (see comments below as well):
  * + export iterator and forwarded exports (i#1360)
  * + imports
  * + relocations
@@ -78,16 +78,17 @@ module_file_has_module_header(const char *filename)
 bool
 module_is_partial_map(app_pc base, size_t size, uint memprot)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return false;
 }
 
 bool
 module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn_reloc,
-                            OUT app_pc *out_base /* relative pc */,
-                            OUT app_pc *out_first_end /* relative pc */,
-                            OUT app_pc *out_max_end /* relative pc */,
-                            OUT char **out_soname, OUT os_module_data_t *out_data)
+                            DR_PARAM_OUT app_pc *out_base /* relative pc */,
+                            DR_PARAM_OUT app_pc *out_first_end /* relative pc */,
+                            DR_PARAM_OUT app_pc *out_max_end /* relative pc */,
+                            DR_PARAM_OUT char **out_soname,
+                            DR_PARAM_OUT os_module_data_t *out_data)
 {
     mach_header_t *hdr = (mach_header_t *)base;
     struct load_command *cmd, *cmd_stop;
@@ -235,7 +236,7 @@ module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn
                 }
                 cmd = (struct load_command *)((byte *)cmd + cmd->cmdsize);
             }
-            /* FIXME i#58: we need to fill in more of out_data, like preferred
+            /* XXX i#58: we need to fill in more of out_data, like preferred
              * base.  For alignment: it's per-section, so we pass the max.
              */
             out_data->base_address = seg_min_start;
@@ -253,17 +254,18 @@ module_walk_program_headers(app_pc base, size_t view_size, bool at_map, bool dyn
 uint
 module_num_program_headers(app_pc base)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return 0;
 }
 
 bool
 module_read_program_header(app_pc base, uint segment_num,
-                           OUT app_pc *segment_base /* relative pc */,
-                           OUT app_pc *segment_end /* relative pc */,
-                           OUT uint *segment_prot, OUT size_t *segment_align)
+                           DR_PARAM_OUT app_pc *segment_base /* relative pc */,
+                           DR_PARAM_OUT app_pc *segment_end /* relative pc */,
+                           DR_PARAM_OUT uint *segment_prot,
+                           DR_PARAM_OUT size_t *segment_align)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return false;
 }
 
@@ -333,7 +335,7 @@ module_is_executable(app_pc base)
  * another byte of data to add to the integer represented.
  */
 static ptr_uint_t
-read_uleb128(byte *start, byte *max, byte **next_entry OUT)
+read_uleb128(byte *start, byte *max, byte **next_entry DR_PARAM_OUT)
 {
     ptr_uint_t val = 0;
     uint shift = 0;
@@ -357,7 +359,7 @@ read_uleb128(byte *start, byte *max, byte **next_entry OUT)
 
 app_pc
 get_proc_address_from_os_data(os_module_data_t *os_data, ptr_int_t load_delta,
-                              const char *name, OUT bool *is_indirect_code)
+                              const char *name, DR_PARAM_OUT bool *is_indirect_code)
 {
     /* Walk the Mach-O export trie.  We don't support < 10.6 which is when
      * they put this scheme in place.
@@ -440,7 +442,7 @@ get_proc_address_from_os_data(os_module_data_t *os_data, ptr_int_t load_delta,
             if (forw_name[0] == '\0') /* see if has different name */
                 forw_name = name;
             LOG(GLOBAL, LOG_SYMBOLS, 4, "\tforwarder %s\n", forw_name);
-            /* FIXME i#1360: handle forwards */
+            /* XXX i#1360: handle forwards */
         } else if (TEST(EXPORT_SYMBOL_FLAGS_STUB_AND_RESOLVER, flags)) {
             /* Lazy or non-lazy pointer */
             DEBUG_DECLARE(size_t stub_offs =)
@@ -462,7 +464,8 @@ get_proc_address_from_os_data(os_module_data_t *os_data, ptr_int_t load_delta,
 }
 
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, bool *is_indirect_code OUT)
+get_proc_address_ex(module_base_t lib, const char *name,
+                    bool *is_indirect_code DR_PARAM_OUT)
 {
     app_pc res = NULL;
     module_area_t *ma;
@@ -493,29 +496,29 @@ d_r_get_proc_address(module_base_t lib, const char *name)
 size_t
 module_get_header_size(app_pc module_base)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return 0;
 }
 
 bool
 module_has_text_relocs(app_pc base, bool at_map)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return false;
 }
 
 bool
 module_has_text_relocs_ex(app_pc base, os_privmod_data_t *pd)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return false;
 }
 
 bool
-module_read_os_data(app_pc base, bool dyn_reloc, OUT ptr_int_t *load_delta,
-                    OUT os_module_data_t *os_data, OUT char **soname)
+module_read_os_data(app_pc base, bool dyn_reloc, DR_PARAM_OUT ptr_int_t *load_delta,
+                    DR_PARAM_OUT os_module_data_t *os_data, DR_PARAM_OUT char **soname)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return false;
 }
 
@@ -532,9 +535,9 @@ get_shared_lib_name(app_pc map)
 
 void
 module_get_os_privmod_data(app_pc base, size_t size, bool dyn_reloc,
-                           OUT os_privmod_data_t *pd)
+                           DR_PARAM_OUT os_privmod_data_t *pd)
 {
-    pd->load_delta = 0; /* FIXME i#58: need preferred base */
+    pd->load_delta = 0; /* XXX i#58: need preferred base */
     module_walk_program_headers(base, size, false,
                                 true, /* i#1589: ld.so relocated .dynamic */
                                 NULL, NULL, NULL, &pd->soname, NULL);
@@ -555,12 +558,12 @@ module_dynamorio_lib_base(void)
 ptr_uint_t
 module_get_text_section(app_pc file_map, size_t file_size)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#58: implement MachO support */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#58: implement MachO support */
     return 0;
 }
 
 bool
-module_dyld_shared_region(app_pc *start OUT, app_pc *end OUT)
+module_dyld_shared_region(app_pc *start DR_PARAM_OUT, app_pc *end DR_PARAM_OUT)
 {
     uint64 cache_start;
     struct dyld_cache_header *hdr;

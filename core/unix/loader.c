@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * *******************************************************************************/
 
@@ -40,6 +40,7 @@
 #include "../module_shared.h"
 #include "os_private.h"
 #include "../ir/instr.h" /* SEG_GS/SEG_FS */
+#include "decode.h"
 #include "module.h"
 #include "module_private.h"
 #include "../heap.h" /* HEAPACCT */
@@ -67,7 +68,7 @@ extern size_t
 wcslen(const wchar_t *str); /* in string.c */
 
 /* Written during initialization only */
-/* FIXME: i#460, the path lookup itself is a complicated process,
+/* XXX: i#460, the path lookup itself is a complicated process,
  * so we just list possible common but in-complete paths for now.
  */
 #define SYSTEM_LIBRARY_PATH_VAR "LD_LIBRARY_PATH"
@@ -81,6 +82,11 @@ static const char *const system_lib_paths[] = {
     "/usr/local/lib", /* Ubuntu: /etc/ld.so.conf.d/libc.conf */
 #ifdef ANDROID
     "/system/lib",
+#    ifdef ANDROID64
+    "/system/lib64",
+#    elif defined(ANDROID32)
+    "/system/lib32",
+#    endif
 #endif
 #ifndef X64
     "/usr/lib32",
@@ -150,13 +156,14 @@ static void
 privload_init_search_paths(void);
 
 static bool
-privload_locate(const char *name, privmod_t *dep, char *filename OUT, bool *client OUT);
+privload_locate(const char *name, privmod_t *dep, char *filename DR_PARAM_OUT,
+                bool *client DR_PARAM_OUT);
 
 static privmod_t *
 privload_locate_and_load(const char *impname, privmod_t *dependent, bool reachable);
 
 static void
-privload_call_lib_func(fp_t func);
+privload_call_lib_func(dcontext_t *dcontext, privmod_t *privmod, fp_t func);
 
 static void
 privload_relocate_mod(privmod_t *mod);
@@ -167,10 +174,10 @@ privload_create_os_privmod_data(privmod_t *privmod, bool dyn_reloc);
 static void
 privload_delete_os_privmod_data(privmod_t *privmod);
 
-#ifdef LINUX
 void
 privload_mod_tls_init(privmod_t *mod);
 
+#ifdef LINUX
 void
 privload_mod_tls_primary_thread_init(privmod_t *mod);
 #endif
@@ -188,7 +195,7 @@ dr_gdb_add_symbol_file(const char *filename, app_pc textaddr)
     /* Do nothing.  If gdb is attached with libdynamorio.so-gdb.py loaded, it
      * will stop here and lift the argument values.
      */
-    /* FIXME: This only passes the text section offset.  gdb can accept
+    /* XXX: This only passes the text section offset.  gdb can accept
      * additional "-s<section> <address>" arguments to locate data sections.
      * This would be useful for setting watchpoints on client global variables.
      */
@@ -301,7 +308,7 @@ os_loader_init_epilogue(void)
      * We have to do it in a single syslog so they can be copy pasted.
      * For non-internal builds, or for private libs loaded after this point,
      * the user must look at the global gdb_priv_cmds buffer in gdb.
-     * FIXME i#531: Support attaching from the gdb script.
+     * XXX i#531: Support attaching from the gdb script.
      */
     ASSERT(!printed_gdb_commands);
     printed_gdb_commands = true;
@@ -443,7 +450,7 @@ privload_unmap_file(privmod_t *privmod)
 bool
 privload_unload_imports(privmod_t *privmod)
 {
-    /* FIXME: i#474 unload dependent libraries if necessary */
+    /* XXX: i#474 unload dependent libraries if necessary */
     return true;
 }
 
@@ -477,15 +484,44 @@ privload_check_new_map_bounds(elf_loader_t *elf, byte *map_base, byte *map_end)
 }
 #endif
 
+#ifdef LINUX
+/* XXX i#7192: Consider making this an os.h API, like the related os_map_file and
+ * os_unmap_file.
+ */
+static byte *
+overlap_map_file_func(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                      uint prot, map_flags_t map_flags)
+{
+    /* This works only if the user wants the new mapping only at the given addr,
+     * and it is acceptable to unmap any mapping already existing there.
+     */
+    ASSERT(TEST(MAP_FILE_FIXED, map_flags));
+    if (DYNAMO_OPTION(vm_reserve) && is_vmm_reserved_address(addr, *size, NULL, NULL)) {
+        /* If the initially reserved address was from our vmm range, we need to
+         * use os_unmap_file to make sure we perform our heap bookkeeping.
+         * In this case os_unmap_file does not do any munmap syscall, so there
+         * is not really any unmap-to-map race with other threads.
+         */
+        os_unmap_file(addr, *size);
+    }
+    /* MAP_FILE_FIXED (which is MAP_FIXED in the mmap syscall) will cause the
+     * overlapping region to automatically and atomically get unmapped.
+     */
+    return os_map_file(f, size, offs, addr, prot, map_flags);
+}
+#endif
+
 /* This only maps, as relocation for ELF requires processing imports first,
  * which we have to delay at init time at least.
  */
 app_pc
-privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_t flags)
+privload_map_and_relocate(const char *filename, size_t *size DR_PARAM_OUT,
+                          modload_flags_t flags)
 {
 #ifdef LINUX
     map_fn_t map_func;
     unmap_fn_t unmap_func;
+    overlap_map_fn_t overlap_map_func;
     prot_fn_t prot_func;
     app_pc base = NULL;
     elf_loader_t loader;
@@ -498,10 +534,17 @@ privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_
     if (dynamo_heap_initialized && !standalone_library) {
         map_func = d_r_map_file;
         unmap_func = d_r_unmap_file;
+        /* TODO i#7192: Implement a new d_r_overlap_map_file that performs
+         * remapping similar to overlap_map_file_func (using just a map call with
+         * MAP_FIXED, but without any explicit unmap) but also does the required
+         * bookeeping.
+         */
+        overlap_map_func = NULL;
         prot_func = set_protection;
     } else {
         map_func = os_map_file;
         unmap_func = os_unmap_file;
+        overlap_map_func = overlap_map_file_func;
         prot_func = os_set_protection;
     }
 
@@ -527,7 +570,7 @@ privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_
     }
     base = elf_loader_map_phdrs(&loader, false /* fixed */, map_func, unmap_func,
                                 prot_func, privload_check_new_map_bounds, memset,
-                                privload_map_flags(flags));
+                                privload_map_flags(flags), overlap_map_func);
     if (base != NULL) {
         if (size != NULL)
             *size = loader.image_size;
@@ -578,9 +621,9 @@ privload_process_imports(privmod_t *mod)
                     SYSLOG_INTERNAL_WARNING(
                         "private libpthread.so loaded but not fully supported (i#956)");
                 }
-                /* i#852: identify all libs that import from DR as client libs.
-                 * XXX: this code seems stale as libdynamorio.so is already loaded
-                 * (xref #3850).
+                /* i#852: Identify all libs that import from DR as client libs.
+                 * XXX i#6982: The following condition is never true as
+                 * libdynamorio.so has already been loaded (xref #3850).
                  */
                 if (impmod->base == get_dynamorio_dll_start())
                     mod->is_client = true;
@@ -616,7 +659,7 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
         if (opd->init != NULL) {
             LOG(GLOBAL, LOG_LOADER, 4, "%s: calling %s init func " PFX "\n", __FUNCTION__,
                 privmod->name, opd->init);
-            privload_call_lib_func(opd->init);
+            privload_call_lib_func(dcontext, privmod, opd->init);
         }
         if (opd->init_array != NULL) {
             uint i;
@@ -624,7 +667,7 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
                 if (opd->init_array[i] != NULL) { /* be paranoid */
                     LOG(GLOBAL, LOG_LOADER, 4, "%s: calling %s init array func " PFX "\n",
                         __FUNCTION__, privmod->name, opd->init_array[i]);
-                    privload_call_lib_func(opd->init_array[i]);
+                    privload_call_lib_func(dcontext, privmod, opd->init_array[i]);
                 }
             }
         }
@@ -646,7 +689,7 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
         if (opd->fini != NULL) {
             LOG(GLOBAL, LOG_LOADER, 4, "%s: calling %s fini func " PFX "\n", __FUNCTION__,
                 privmod->name, opd->fini);
-            privload_call_lib_func(opd->fini);
+            privload_call_lib_func(dcontext, privmod, opd->fini);
         }
         if (opd->fini_array != NULL) {
             uint i;
@@ -654,7 +697,7 @@ privload_call_entry(dcontext_t *dcontext, privmod_t *privmod, uint reason)
                 if (opd->fini_array[i] != NULL) { /* be paranoid */
                     LOG(GLOBAL, LOG_LOADER, 4, "%s: calling %s fini array func " PFX "\n",
                         __FUNCTION__, privmod->name, opd->fini_array[i]);
-                    privload_call_lib_func(opd->fini_array[i]);
+                    privload_call_lib_func(dcontext, privmod, opd->fini_array[i]);
                 }
             }
         }
@@ -721,6 +764,15 @@ privload_os_finalize(privmod_t *privmod)
     if ((ver[0] == '\0' || ver[0] < '2') || ver[1] != '.' || ver[2] < '3' ||
         (ver[2] == '3' && ver[3] < '4'))
         return;
+#    ifndef X86
+    /* XXX i#6611: We have privload_set_pthread_tls_fields() setting the pthread tid
+     * field on x86, but not other arches.  Since we have the glibc version here and
+     * believe this to be limited to 2.37 we warn about it here.
+     */
+    if (ver[2] == '3' && ver[3] >= '7') {
+        SYSLOG_INTERNAL_WARNING("glibc 2.37+ i#6611 pthread tid fix NYI for non-x86");
+    }
+#    endif
     if (privmod_ld_linux == NULL) {
         SYSLOG_INTERNAL_WARNING("glibc 2.34+ i#5437 workaround failed: missed ld");
         return;
@@ -732,16 +784,84 @@ privload_os_finalize(privmod_t *privmod)
         SYSLOG_INTERNAL_WARNING("glibc 2.34+ i#5437 workaround failed: missed glro");
         return;
     }
-#    ifdef X64
-    const int GLRO_dl_tls_static_size_OFFS = 0x2a8;
-    const int GLRO_dl_tls_static_align_OFFS = 0x2b0;
-#    else
-    // The offsets changed between 2.35 and 2.36.
-    const int GLRO_dl_tls_static_size_OFFS =
-        (ver[2] == '3' && ver[3] == '5') ? 0x328 : 0x31c;
-    const int GLRO_dl_tls_static_align_OFFS =
-        (ver[2] == '3' && ver[3] == '5') ? 0x32c : 0x320;
+
+    int GLRO_dl_tls_static_size_OFFS = 0;
+    int GLRO_dl_tls_static_align_OFFS = 0;
+#    ifdef X86
+    /* Look for this pattern:
+     *    0x00007ffff7759d62 <+98>:    mov    0x2b0(%rax),%rsi
+     *    0x00007ffff7759d69 <+105>:   mov    0x2a8(%rax),%rbx
+     *    0x00007ffff7759d70 <+112>:   mov    0x18(%rax),%rcx
+     *    0x00007ffff7759d74 <+116>:   add    %rsi,%rbx
+     *    0x00007ffff7759d77 <+119>:   mov    %rbx,%rax
+     *    0x00007ffff7759d7a <+122>:   mov    %rcx,0xa7daf(%rip)        # 0x7ffff7801b30
+     *    0x00007ffff7759d81 <+129>:   sub    $0x1,%rax
+     *    0x00007ffff7759d85 <+133>:   div    %rsi
+     * We want the 0x2b0 and 0x2a8 offests prior to the OP_div.
+     * They're always pointer-sized apart; there's never a div before this in the
+     * function.  Naturally this is fragile, but it is better than updating hardcoded
+     * offsets with each release. See i#5437 for discussion of long-term possible
+     * solutions.
+     */
+    instr_noalloc_t noalloc;
+    instr_noalloc_init(GLOBAL_DCONTEXT, &noalloc);
+    instr_t *instr = instr_from_noalloc(&noalloc);
+    byte *pc = (byte *)libc_early_init;
+    int last_large_load_offs = 0;
+    const int MIN_LOAD_OFFS = 0x100;
+    const int MAX_INSTRS = 64;
+    int instr_count = 0;
+    do {
+        instr_reset(GLOBAL_DCONTEXT, instr);
+        pc = decode(GLOBAL_DCONTEXT, pc, instr);
+        if (instr_get_opcode(instr) == OP_mov_ld &&
+            opnd_is_base_disp(instr_get_src(instr, 0))) {
+            int disp = opnd_get_disp(instr_get_src(instr, 0));
+            if (disp > MIN_LOAD_OFFS)
+                last_large_load_offs = disp;
+        }
+        if (++instr_count > MAX_INSTRS)
+            break;
+    } while (instr_get_opcode(instr) != OP_div);
+    if (instr_get_opcode(instr) == OP_div && last_large_load_offs > 0) {
+        GLRO_dl_tls_static_size_OFFS = last_large_load_offs;
+        GLRO_dl_tls_static_align_OFFS = last_large_load_offs + sizeof(void *);
+        LOG(GLOBAL, LOG_LOADER, 2,
+            "%s: for glibc 2.34+ workaround found offsets 0x%x 0x%x for glro %p\n",
+            __FUNCTION__, GLRO_dl_tls_static_size_OFFS, GLRO_dl_tls_static_align_OFFS,
+            glro);
+    }
 #    endif
+    if (GLRO_dl_tls_static_size_OFFS == 0) {
+        // We have some versions hardcoded.
+#    ifdef ARM
+        // These are the numbers for glibc 2.35.
+        GLRO_dl_tls_static_size_OFFS = 368;
+        GLRO_dl_tls_static_align_OFFS = GLRO_dl_tls_static_size_OFFS + 4;
+#    else
+#        ifdef X64
+        // The offsets changed between 2.38 and 2.39.
+        if (ver[2] == '3' && ver[3] < '9') {
+            GLRO_dl_tls_static_size_OFFS = 0x2a8;
+            GLRO_dl_tls_static_align_OFFS = 0x2b0;
+        } else {
+            GLRO_dl_tls_static_size_OFFS = 0x2c8;
+            GLRO_dl_tls_static_align_OFFS = 0x2d0;
+        }
+#        else
+        if (ver[2] == '3' && ver[3] >= '8') {
+            GLRO_dl_tls_static_size_OFFS = 0x320;
+            GLRO_dl_tls_static_align_OFFS = 0x324;
+        } else {
+            // The offsets changed between 2.35 and 2.36.
+            GLRO_dl_tls_static_size_OFFS =
+                (ver[2] == '3' && ver[3] == '5') ? 0x328 : 0x31c;
+            GLRO_dl_tls_static_align_OFFS =
+                (ver[2] == '3' && ver[3] == '5') ? 0x32c : 0x320;
+        }
+#        endif
+#    endif
+    }
     size_t val = 4096, written;
     if (!safe_write_ex(glro + GLRO_dl_tls_static_size_OFFS, sizeof(val), &val,
                        &written) ||
@@ -754,7 +874,8 @@ privload_os_finalize(privmod_t *privmod)
         LOG(GLOBAL, LOG_LOADER, 2, "%s: glibc 2.34+ workaround succeeded\n",
             __FUNCTION__);
     }
-    LOG(GLOBAL, LOG_LOADER, 2, "%s: calling %s\n", __FUNCTION__, LIBC_EARLY_INIT_NAME);
+    LOG(GLOBAL, LOG_LOADER, 2, "%s: calling %s @%p\n", __FUNCTION__, LIBC_EARLY_INIT_NAME,
+        libc_early_init);
     (*libc_early_init)(true);
 #endif /* LINUX */
 }
@@ -801,7 +922,7 @@ privload_load_finalized(privmod_t *mod)
 /* If runpath, then DT_RUNPATH is searched; else, DT_RPATH. */
 static bool
 privload_search_rpath(privmod_t *mod, bool runpath, const char *name,
-                      char *filename OUT /* buffer size is MAXIMUM_PATH */)
+                      char *filename DR_PARAM_OUT /* buffer size is MAXIMUM_PATH */)
 {
 #ifdef LINUX
     os_privmod_data_t *opd;
@@ -900,8 +1021,8 @@ privload_search_rpath(privmod_t *mod, bool runpath, const char *name,
 
 static bool
 privload_locate(const char *name, privmod_t *dep,
-                char *filename OUT /* buffer size is MAXIMUM_PATH */,
-                bool *reachable INOUT)
+                char *filename DR_PARAM_OUT /* buffer size is MAXIMUM_PATH */,
+                bool *reachable DR_PARAM_OUT)
 {
     uint i;
     char *lib_paths;
@@ -913,7 +1034,7 @@ privload_locate(const char *name, privmod_t *dep,
         return true;
     }
 
-    /* FIXME: We have a simple implementation of library search.
+    /* XXX: We have a simple implementation of library search.
      * libc implementation can be found at elf/dl-load.c:_dl_map_object.
      */
     /* the loader search order: */
@@ -1062,11 +1183,11 @@ get_private_library_address(app_pc modbase, const char *name)
 }
 
 static void
-privload_call_lib_func(fp_t func)
+privload_call_lib_func(dcontext_t *dcontext, privmod_t *privmod, fp_t func)
 {
     char dummy_str[] = "dummy";
     char *dummy_argv[2];
-    /* FIXME: i#475
+    /* XXX: i#475
      * The regular loader always passes argc, argv and env to libaries,
      * (see libc code elf/dl-init.c), which might be ignored by those
      * routines.
@@ -1074,11 +1195,17 @@ privload_call_lib_func(fp_t func)
      */
     dummy_argv[0] = dummy_str;
     dummy_argv[1] = NULL;
-    func(1, dummy_argv, our_environ);
+    TRY_EXCEPT_ALLOW_NO_DCONTEXT(
+        dcontext, { func(1, dummy_argv, our_environ); },
+        { /* EXCEPT */
+          SYSLOG_INTERNAL_ERROR("Private library %s init/fini func " PFX " crashed",
+                                privmod->name, func);
+        });
 }
 
 bool
-get_private_library_bounds(IN app_pc modbase, OUT byte **start, OUT byte **end)
+get_private_library_bounds(DR_PARAM_IN app_pc modbase, DR_PARAM_OUT byte **start,
+                           DR_PARAM_OUT byte **end)
 {
     privmod_t *mod;
     bool found = false;
@@ -1134,8 +1261,8 @@ privload_relocate_symbol(ELF_REL_TYPE *rel, os_privmod_data_t *opd, bool is_rela
     uint r_type;
     reg_t addend;
 
-    /* XXX: we assume ELF_REL_TYPE and ELF_RELA_TYPE only differ at the end,
-     * i.e. with or without r_addend.
+    /* ELF_REL_TYPE and ELF_RELA_TYPE differ in where the addend comes from:
+     * stored in the target location, or in rel->r_addend.
      */
     if (is_rela)
         addend = ((ELF_RELA_TYPE *)rel)->r_addend;
@@ -1279,8 +1406,8 @@ privload_relocate_os_privmod_data(os_privmod_data_t *opd, byte *mod_base)
 static void
 privload_relocate_mod(privmod_t *mod)
 {
-#ifdef LINUX
     os_privmod_data_t *opd = (os_privmod_data_t *)mod->os_privmod_data;
+#ifdef LINUX
 
     ASSERT_OWN_RECURSIVE_LOCK(true, &privload_lock);
 
@@ -1301,7 +1428,8 @@ privload_relocate_mod(privmod_t *mod)
     if (opd->tls_block_size != 0)
         privload_mod_tls_primary_thread_init(mod);
 #else
-    /* XXX i#1285: implement MacOS private loader */
+    if (opd->tls_block_size != 0)
+        privload_mod_tls_init(mod);
 #endif
 }
 
@@ -1343,9 +1471,10 @@ privload_delete_os_privmod_data(privmod_t *privmod)
  * not being relocated for priv libs).
  */
 bool
-privload_fill_os_module_info(app_pc base, OUT app_pc *out_base /* relative pc */,
-                             OUT app_pc *out_max_end /* relative pc */,
-                             OUT char **out_soname, OUT os_module_data_t *out_data)
+privload_fill_os_module_info(app_pc base, DR_PARAM_OUT app_pc *out_base /* relative pc */,
+                             DR_PARAM_OUT app_pc *out_max_end /* relative pc */,
+                             DR_PARAM_OUT char **out_soname,
+                             DR_PARAM_OUT os_module_data_t *out_data)
 {
     bool res = false;
     privmod_t *privmod;
@@ -1528,8 +1657,8 @@ static const redirect_import_t redirect_imports[] = {
      * + C++ operators in case they don't just call libc malloc?
      */
     /* We redirect these for fd isolation. */
-    { "open", (app_pc)os_open_protected },
-    { "close", (app_pc)os_close_protected },
+    { "open", (app_pc)redirect_open },
+    { "close", (app_pc)redirect_close },
     /* These libc routines can call pthread functions and cause hangs (i#4928) so
      * we use our syscall wrappers instead.
      */
@@ -1569,6 +1698,10 @@ static const redirect_import_t redirect_imports[] = {
     { "memset_chk", (app_pc)memset },
     { "memmove_chk", (app_pc)memmove },
     { "strncpy_chk", (app_pc)strncpy },
+    { "__memcpy_chk", (app_pc)memcpy },
+    { "__memset_chk", (app_pc)memset },
+    { "__memmove_chk", (app_pc)memmove },
+    { "__strncpy_chk", (app_pc)strncpy },
 };
 #define REDIRECT_IMPORTS_NUM (sizeof(redirect_imports) / sizeof(redirect_imports[0]))
 
@@ -1748,8 +1881,8 @@ reserve_brk(app_pc post_app)
 }
 
 byte *
-map_exe_file_and_brk(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
-                     map_flags_t map_flags)
+map_exe_file_and_brk(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                     uint prot, map_flags_t map_flags)
 {
     /* A little hacky: we assume the MEMPROT_NONE is the overall mmap for the whole
      * region, where our goal is to push it back for top-down PIE filling to leave
@@ -1774,7 +1907,7 @@ map_exe_file_and_brk(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uin
  * Return true if relocation is required.
  */
 static bool
-privload_get_os_privmod_data(app_pc base, OUT os_privmod_data_t *opd)
+privload_get_os_privmod_data(app_pc base, DR_PARAM_OUT os_privmod_data_t *opd)
 {
     app_pc mod_base, mod_end;
     ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)base;
@@ -2004,9 +2137,10 @@ reload_dynamorio(void **init_sp, app_pc conflict_start, app_pc conflict_end)
     }
 
     /* Now load the 2nd libdynamorio.so */
-    dr_map = elf_loader_map_phdrs(&dr_ld, false /*!fixed*/, os_map_file, os_unmap_file,
-                                  os_set_protection, privload_check_new_map_bounds,
-                                  memset, privload_map_flags(0 /*!reachable*/));
+    dr_map =
+        elf_loader_map_phdrs(&dr_ld, false /*!fixed*/, os_map_file, os_unmap_file,
+                             os_set_protection, privload_check_new_map_bounds, memset,
+                             privload_map_flags(0 /*!reachable*/), overlap_map_file_func);
     ASSERT(dr_map != NULL);
     ASSERT(is_elf_so_header(dr_map, 0));
 
@@ -2164,7 +2298,8 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
                                    /* ensure there's space for the brk */
                                    map_exe_file_and_brk, os_unmap_file, os_set_protection,
                                    privload_check_new_map_bounds, memset,
-                                   privload_map_flags(MODLOAD_IS_APP /*!reachable*/));
+                                   privload_map_flags(MODLOAD_IS_APP /*!reachable*/),
+                                   NULL /*overlap_map_func*/);
     apicheck(exe_map != NULL,
              "Failed to load application.  "
              "Check path and architecture.");
@@ -2224,7 +2359,7 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
         interp_map = elf_loader_map_phdrs(
             &interp_ld, false /* fixed */, os_map_file, os_unmap_file, os_set_protection,
             privload_check_new_map_bounds, memset,
-            privload_map_flags(MODLOAD_IS_APP /*!reachable*/));
+            privload_map_flags(MODLOAD_IS_APP /*!reachable*/), overlap_map_file_func);
         apicheck(interp_map != NULL && is_elf_so_header(interp_map, 0),
                  "Failed to map ELF interpreter.");
         /* On Android, the system loader /system/bin/linker sets itself
@@ -2276,7 +2411,7 @@ privload_early_inject(void **sp, byte *old_libdr_base, size_t old_libdr_size)
             :
             : "r"(sp), "r"(entry));
 #        elif defined(ARM)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         ASSERT_NOT_REACHED();
 #        endif
     }

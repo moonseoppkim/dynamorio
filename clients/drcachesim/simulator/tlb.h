@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,7 +34,10 @@
  */
 
 #ifndef _TLB_H_
-#define _TLB_H_ 1
+#define _TLB_H_
+
+#include <optional>
+#include <random>
 
 #include "caching_device.h"
 #include "memref.h"
@@ -46,6 +49,8 @@ namespace drmemtrace {
 
 class tlb_t : public caching_device_t {
 public:
+    tlb_t(const std::string &name = "tlb");
+
     void
     request(const memref_t &memref) override;
 
@@ -56,7 +61,6 @@ public:
 protected:
     void
     init_blocks() override;
-
     // Optimization: remember last pid in addition to last tag
     memref_pid_t last_pid_;
 };

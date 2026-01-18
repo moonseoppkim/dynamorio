@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2022 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -31,7 +31,7 @@
 
 # i#277/PR 540817: DynamoRIO Extensions support
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 include(../make/policies.cmake NO_POLICY_SCOPE)
 
@@ -61,8 +61,12 @@ add_dr_defines()
 
 # This lets us share common code among all extensions.  We use a macro to
 # avoid scope issues and avoid having to call configure_DynamoRIO_global().
-macro(configure_extension target is_static)
-  configure_DynamoRIO_client(${target})
+macro(configure_extension target is_static static_DR)
+  if (${static_DR})
+    configure_DynamoRIO_static_client(${target})
+  else ()
+    configure_DynamoRIO_client(${target})
+  endif ()
 
   # ensure we rebuild if includes change
   add_dependencies(${target} api_headers)
@@ -100,6 +104,39 @@ macro(install_ext_header header)
   configure_file(${header} ${PROJECT_BINARY_DIR}/ext/include/${header} COPYONLY)
 endmacro()
 
+macro(add_ext_asm_target asm_file_arm asm_file_aarch64 asm_file_riscv64 asm_file_x86
+  asm_src asm_tgt)
+  # for cpp2asm_defines.h
+  include_directories(${DynamoRIO_DIR})
+  # we aren't using DR's configure.h so we have to set defines:
+  if (UNIX)
+    if (APPLE AND NOT AARCH64)
+      set(asm_defs ${asm_defs} -DASSEMBLE_WITH_NASM)
+    else (APPLE AND NOT AARCH64)
+      set(asm_defs ${asm_defs} -DASSEMBLE_WITH_GAS)
+    endif (APPLE AND NOT AARCH64)
+  else (UNIX)
+    set(asm_defs ${asm_defs} -DASSEMBLE_WITH_MASM)
+  endif (UNIX)
+
+  get_DynamoRIO_defines(DR_DEFINES OFF)
+  # We need defines to be a list to pass as separate args to custom command.
+  # We assume none have spaces inside them which seems reasonable.
+  string(REPLACE " " ";" DR_DEFINES "${DR_DEFINES}")
+  set(asm_flags ${asm_defs} ${DR_DEFINES} -I "${DynamoRIO_DIR}")
+  set(asm_deps "${DynamoRIO_DIR}/cpp2asm_defines.h")
+  if (DR_HOST_ARM)
+    set(asm_file ${asm_file_arm})
+  elseif (DR_HOST_AARCH64)
+    set(asm_file ${asm_file_aarch64})
+  elseif (DR_HOST_RISCV64)
+    set(asm_file ${asm_file_riscv64})
+  else ()
+    set(asm_file ${asm_file_x86})
+  endif ()
+  add_asm_target(${asm_file} ${asm_src} ${asm_tgt} "" "${asm_flags}" "${asm_deps}")
+endmacro()
+
 add_subdirectory(drcontainers)
 if (NOT ANDROID AND NOT ARM AND NOT AARCH64)
   # XXX i#1701: fails to build on Android.  May not be worth porting.
@@ -117,6 +154,7 @@ add_subdirectory(drutil)
 add_subdirectory(droption)
 add_subdirectory(drcovlib)
 add_subdirectory(drstatecmp)
+add_subdirectory(drsyscall)
 if (BUILD_PT_TRACER)
   add_subdirectory(drpttracer)
 endif (BUILD_PT_TRACER)

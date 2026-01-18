@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,7 +34,9 @@
  */
 
 #ifndef _CACHING_DEVICE_STATS_H_
-#define _CACHING_DEVICE_STATS_H_ 1
+#define _CACHING_DEVICE_STATS_H_
+
+#define NOMINMAX // Avoid windows.h messing up std::max.
 
 #include <stdint.h>
 #ifdef HAS_ZLIB
@@ -55,9 +57,28 @@
 namespace dynamorio {
 namespace drmemtrace {
 
+/**
+ * Enumerates the different types of cache line invalidation events that
+ * may be seen by a cache.
+ */
 enum invalidation_type_t {
+    /**
+     * Invalidation performed to maintain inclusivity of the parent cache,
+     * which evicted a cache line due to its replacement policy, or to
+     * maintain its own parent's inclusivity. Inclusive caches also
+     * propagate this events to their children.
+     */
     INVALIDATION_INCLUSIVE,
+    /**
+     * Invalidation performed to honor cache coherence protocols. This
+     * is also propagated to the cache's children.
+     */
     INVALIDATION_COHERENCE,
+    /**
+     * Invalidation performed when a line is moved to a child cache of
+     * an exclusive cache.
+     */
+    INVALIDATION_EXCLUSIVE,
 };
 
 enum class metric_name_t {
@@ -70,6 +91,7 @@ enum class metric_name_t {
     CHILD_HITS_AT_RESET,
     INCLUSIVE_INVALIDATES,
     COHERENCE_INVALIDATES,
+    EXCLUSIVE_INVALIDATES,
     PREFETCH_HITS,
     PREFETCH_MISSES,
     FLUSHES
@@ -104,7 +126,9 @@ public:
 
         // Detect the overflow and assign maximum possible value to the addr_end.
         if (addr_beg > addr_end) {
-            addr_end = std::numeric_limits<addr_t>::max();
+            // Wrap max in parens to work around Visual Studio compiler issues with the
+            // max macro (even despite NOMINMAX defined above).
+            addr_end = (std::numeric_limits<addr_t>::max)();
         }
 
         std::map<addr_t, addr_t>::reverse_iterator prev_it(next_it);
@@ -245,6 +269,7 @@ protected:
 
     int64_t num_inclusive_invalidates_;
     int64_t num_coherence_invalidates_;
+    int64_t num_exclusive_invalidates_;
 
     // Stats saved when the last reset was called. This helps us get insight
     // into what the stats were when the cache was warmed up.

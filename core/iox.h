@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -261,7 +261,7 @@ TNAME(d_r_vsnprintf_float)(double val, const TCHAR *c,
     }
 
     if (is_g)
-        decimal--; /* g/G precision is number of signifigant digits */
+        decimal--; /* g/G precision is number of significant digits */
     if (is_g && exp >= -4 && exp <= decimal) {
         /* exp is small enough for f, print without exponent */
         str = TNAME(double_to_str)(val, decimal, buf, pound_flag, !pound_flag);
@@ -528,7 +528,7 @@ TNAME(d_r_vsnprintf)(TCHAR *s, size_t max, const TCHAR *fmt, va_list ap)
                 break;
             }
             case _T('c'):
-                /* FIXME: using int instead of char seems to work for RH7.2 as
+                /* XXX: using int instead of char seems to work for RH7.2 as
                  * well as 8.0, but using char crashes 8.0 but not 7.2
                  */
 #ifdef VA_ARG_CHAR2INT
@@ -586,7 +586,7 @@ TNAME(d_r_vsnprintf)(TCHAR *s, size_t max, const TCHAR *fmt, va_list ap)
                 str = buf;
                 break;
             }
-                /* FIXME : support the following? */
+                /* XXX : support the following? */
             case _T('a'):
             case _T('A'):
             default: ASSERT_NOT_REACHED();
@@ -706,9 +706,7 @@ TNAME(d_r_vsnprintf)(TCHAR *s, size_t max, const TCHAR *fmt, va_list ap)
             c++;
         } else {
             const TCHAR *cstart = c;
-            int nbytes = 0;
             while (*c && *c != _T('%')) {
-                nbytes++;
                 c++;
             }
             while (cstart < c) {

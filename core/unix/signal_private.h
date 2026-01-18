@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,7 +37,7 @@
  */
 
 #ifndef _SIGNAL_PRIVATE_H_
-#define _SIGNAL_PRIVATE_H_ 1
+#define _SIGNAL_PRIVATE_H_
 
 /* We have an ordering issue so we split out LINUX from globals.h */
 #include "configure.h"
@@ -137,7 +137,9 @@ struct _prev_sigaction_t {
 #endif
 
 #ifdef LINUX
+#    ifndef ANDROID64
 typedef unsigned int old_sigset_t;
+#    endif
 
 struct _old_sigaction_t {
     handler_t handler;
@@ -214,7 +216,11 @@ typedef _STRUCT_UCONTEXT /* == __darwin_ucontext */ kernel_ucontext_t;
  * (these are from /usr/src/linux/arch/i386/kernel/signal.c for kernel 2.4.17)
  */
 
-#    define RETCODE_SIZE 8
+#    if defined(X86)
+#        define RETCODE_SIZE 8
+#    elif defined(ARM)
+#        define RETCODE_SIZE 16
+#    endif
 
 typedef struct sigframe {
 #    ifdef X86
@@ -231,7 +237,7 @@ typedef struct sigframe {
     kernel_ucontext_t uc;
     char retcode[RETCODE_SIZE];
 #    endif
-    /* FIXME: this is a field I added, so our frame looks different from
+    /* XXX: this is a field I added, so our frame looks different from
      * the kernel's...but where else can I store sig where the app won't
      * clobber it?
      * WARNING: our handler receives only rt frames, and we construct
@@ -280,11 +286,9 @@ typedef struct rt_sigframe {
 #    elif defined(AARCHXX)
     kernel_siginfo_t info;
     kernel_ucontext_t uc;
-    char retcode[RETCODE_SIZE];
 #    elif defined(RISCV64)
     kernel_siginfo_t info;
     kernel_ucontext_t uc;
-    char retcode[RETCODE_SIZE];
 #    endif
 
 #elif defined(MACOS)
@@ -418,7 +422,7 @@ typedef struct _sighand_info_t {
 } sighand_info_t;
 
 typedef struct _thread_sig_info_t {
-    /* A pointer to handler info shared in a CLONG_SIGHAND group. */
+    /* A pointer to handler info shared in a CLONE_SIGHAND group. */
     sighand_info_t *sighand;
 
     /* We save the old sigaction across a sigaction syscall so we can return it
@@ -613,7 +617,7 @@ static inline bool
 libc_sigismember(const sigset_t *set, int _sig)
 {
     int sig = _sig - 1; /* go to 0-based */
-#if defined(MACOS) || defined(ANDROID)
+#if defined(MACOS) || defined(ANDROID32)
     /* sigset_t is just a uint32 */
     return TEST(1UL << sig, *set);
 #else
@@ -642,6 +646,10 @@ sigaction_syscall(int sig, kernel_sigaction_t *act, kernel_sigaction_t *oact);
 
 void
 set_handler_sigact(kernel_sigaction_t *act, int sig, handler_t handler);
+
+int
+sigprocmask_syscall(int how, kernel_sigset_t *set, kernel_sigset_t *oset,
+                    size_t sigsetsize);
 
 /***************************************************************************
  * OS-SPECIFIC ROUTINES (in signal_<os>.c)

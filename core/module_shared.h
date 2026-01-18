@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -256,7 +256,7 @@ module_copy_os_data(os_module_data_t *dst, os_module_data_t *src);
  * Should clean up and see if these can be shared/obsoleted by the os shared mod list. */
 bool
 os_get_module_info_all_names(const app_pc pc,
-                             /* FIXME PR 215890: does ELF64 use 64-bit timestamp
+                             /* XXX PR 215890: does ELF64 use 64-bit timestamp
                               * or checksum?
                               */
                              uint *checksum, uint *timestamp, size_t *size,
@@ -279,14 +279,17 @@ d_r_get_proc_address(module_base_t lib, const char *name);
  * and use it here
  */
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, bool *is_indirect_code OUT);
+get_proc_address_ex(module_base_t lib, const char *name,
+                    bool *is_indirect_code DR_PARAM_OUT);
 #else /* WINDOWS */
 
 generic_func_t
-get_proc_address_ex(module_base_t lib, const char *name, const char **forwarder OUT);
+get_proc_address_ex(module_base_t lib, const char *name,
+                    const char **forwarder DR_PARAM_OUT);
 
 generic_func_t
-get_proc_address_by_ordinal(module_base_t lib, uint ordinal, const char **forwarder OUT);
+get_proc_address_by_ordinal(module_base_t lib, uint ordinal,
+                            const char **forwarder DR_PARAM_OUT);
 
 generic_func_t
 get_proc_address_resolve_forward(module_base_t lib, const char *name);
@@ -295,7 +298,7 @@ get_proc_address_resolve_forward(module_base_t lib, const char *name);
 
 #ifdef WINDOWS
 uint64
-get_remote_process_entry(HANDLE process_handle, OUT bool *x86_code);
+get_remote_process_entry(HANDLE process_handle, DR_PARAM_OUT bool *x86_code);
 #endif
 
 void
@@ -372,12 +375,12 @@ typedef struct {
      * specified by aslr_short_digest */
     byte short_MD5[MD5_RAW_BYTES];
 
-    /* FIXME: case 4678 about possible NYI subregion checksums
+    /* TODO: case 4678 about possible NYI subregion checksums
      * amenable to lazy evaluation.  Such digests which will be of
      * dynamic size and file offset which will have to be specified
      * here. */
 } module_digest_t;
-/* FIXME: rename since being used for module-independent purposes? */
+/* XXX: rename since being used for module-independent purposes? */
 
 void
 module_calculate_digest(/*OUT*/ module_digest_t *digest, app_pc module_base,
@@ -410,7 +413,9 @@ typedef struct _privmod_t {
     char path[MAXIMUM_PATH];
     uint ref_count;
     bool externally_loaded;
-    bool is_client; /* or Extension */
+    /* XXX i#6982: Perhaps replace is_client with is_top_level_client. */
+    bool is_top_level_client; /* set for command-line clients */
+    bool is_client;           /* set for command-line client or extension */
     bool called_proc_entry;
     bool called_proc_exit;
     struct _privmod_t *next;
@@ -468,7 +473,8 @@ typedef enum {
 
 /* This function is used for loading non-private libs as well as private. */
 app_pc
-privload_map_and_relocate(const char *filename, size_t *size OUT, modload_flags_t flags);
+privload_map_and_relocate(const char *filename, size_t *size DR_PARAM_OUT,
+                          modload_flags_t flags);
 
 /* returns whether they all fit */
 bool
@@ -544,9 +550,10 @@ privmod_t *
 privload_first_module(void);
 
 bool
-privload_fill_os_module_info(app_pc base, OUT app_pc *out_base /* relative pc */,
-                             OUT app_pc *out_max_end /* relative pc */,
-                             OUT char **out_soname, OUT os_module_data_t *out_data);
+privload_fill_os_module_info(app_pc base, DR_PARAM_OUT app_pc *out_base /* relative pc */,
+                             DR_PARAM_OUT app_pc *out_max_end /* relative pc */,
+                             DR_PARAM_OUT char **out_soname,
+                             DR_PARAM_OUT os_module_data_t *out_data);
 
 /* os specific loader initialization prologue before finalize the load,
  * will also acquire privload_lock.

@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2012-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -58,7 +58,7 @@ typedef union _elf_generic_header_t {
 static bool
 is_elf_so_header_common(app_pc base, size_t size, bool memory)
 {
-    /* FIXME We could check more fields in the header just as the
+    /* XXX We could check more fields in the header just as the
      * dlopen() does. */
     static const unsigned char ei_expected[SELFMAG] = {
         [EI_MAG0] = ELFMAG0, [EI_MAG1] = ELFMAG1, [EI_MAG2] = ELFMAG2, [EI_MAG3] = ELFMAG3
@@ -121,7 +121,7 @@ is_elf_so_header_common(app_pc base, size_t size, bool memory)
 #endif
              ))
             return false;
-        /* FIXME - should we add any of these to the check? For real
+        /* XXX - should we add any of these to the check? For real
          * modules all of these should hold. */
         ASSERT_CURIOSITY(elf_header.e_version == 1);
         ASSERT_CURIOSITY(!memory || elf_header.e_ehsize == sizeof(ELF_HEADER_TYPE));
@@ -172,7 +172,8 @@ module_segment_prot_to_osprot(ELF_PROGRAM_HEADER_TYPE *prog_hdr)
  */
 app_pc
 module_vaddr_from_prog_header(app_pc prog_header, uint num_segments,
-                              OUT app_pc *out_first_end, OUT app_pc *out_max_end)
+                              DR_PARAM_OUT app_pc *out_first_end,
+                              DR_PARAM_OUT app_pc *out_max_end)
 {
     uint i;
     app_pc min_vaddr = (app_pc)POINTER_MAX;
@@ -197,7 +198,7 @@ module_vaddr_from_prog_header(app_pc prog_header, uint num_segments,
             min_vaddr =
                 MIN(min_vaddr, (app_pc)ALIGN_BACKWARD(prog_hdr->p_vaddr, PAGE_SIZE));
             if (min_vaddr == (app_pc)prog_hdr->p_vaddr)
-                first_end = (app_pc)prog_hdr->p_vaddr + prog_hdr->p_memsz;
+                first_end = (app_pc)(prog_hdr->p_vaddr + prog_hdr->p_memsz);
             max_end = MAX(
                 max_end,
                 (app_pc)ALIGN_FORWARD(prog_hdr->p_vaddr + prog_hdr->p_memsz, PAGE_SIZE));
@@ -228,6 +229,13 @@ module_get_platform(file_t f, dr_platform_t *platform, dr_platform_t *alt_platfo
 #endif
         *platform = DR_PLATFORM_64BIT;
         break;
+    case EM_RISCV:
+        switch (elf_header.elf64.e_ident[EI_CLASS]) {
+        case ELFCLASS32: *platform = DR_PLATFORM_32BIT; break;
+        case ELFCLASS64: *platform = DR_PLATFORM_64BIT; break;
+        default: return false;
+        }
+        break;
     case EM_386:
     case EM_ARM: *platform = DR_PLATFORM_32BIT; break;
     default: return false;
@@ -238,7 +246,7 @@ module_get_platform(file_t f, dr_platform_t *platform, dr_platform_t *alt_platfo
 /* Get the module text section from the mapped image file,
  * Note that it must be the image file, not the loaded module.
  */
-ELF_ADDR
+ptr_uint_t
 module_get_text_section(app_pc file_map, size_t file_size)
 {
     ELF_HEADER_TYPE *elf_hdr = (ELF_HEADER_TYPE *)file_map;
@@ -379,7 +387,7 @@ app_pc
 elf_loader_map_phdrs(elf_loader_t *elf, bool fixed, map_fn_t map_func,
                      unmap_fn_t unmap_func, prot_fn_t prot_func,
                      check_bounds_fn_t check_bounds_func, memset_fn_t memset_func,
-                     modload_flags_t flags)
+                     modload_flags_t flags, overlap_map_fn_t overlap_map_func)
 {
     app_pc lib_base, lib_end, last_end;
     ELF_HEADER_TYPE *elf_hdr = elf->ehdr;
@@ -455,7 +463,7 @@ elf_loader_map_phdrs(elf_loader_t *elf, bool fixed, map_fn_t map_func,
              * (notably some kernels) seem to ignore it.  These corner cases are left
              * as unsolved for now.
              */
-            seg_base = (app_pc)ALIGN_BACKWARD(prog_hdr->p_vaddr, PAGE_SIZE) + delta;
+            seg_base = (app_pc)(ALIGN_BACKWARD(prog_hdr->p_vaddr, PAGE_SIZE) + delta);
             seg_end =
                 (app_pc)ALIGN_FORWARD(prog_hdr->p_vaddr + prog_hdr->p_filesz, PAGE_SIZE) +
                 delta;
@@ -479,29 +487,49 @@ elf_loader_map_phdrs(elf_loader_t *elf, bool fixed, map_fn_t map_func,
                 do_mmap = false;
                 elf->image_size = last_end - lib_base;
             }
-            /* XXX:
-             * This function can be called after dynamo_heap_initialized,
-             * and we will use map_file instead of os_map_file.
-             * However, map_file does not allow mmap with overlapped memory,
-             * so we have to unmap the old memory first.
-             * This might be a problem, e.g.
-             * one thread unmaps the memory and before mapping the actual file,
-             * another thread requests memory via mmap takes the memory here,
-             * a racy condition.
-             */
             if (seg_size > 0) { /* i#1872: handle empty segments */
                 if (do_mmap) {
-                    (*unmap_func)(seg_base, seg_size);
-                    map = (*map_func)(
-                        elf->fd, &seg_size, pg_offs, seg_base /* base */,
-                        seg_prot | MEMPROT_WRITE /* prot */,
-                        MAP_FILE_COPY_ON_WRITE /*writes should not change file*/ |
-                            MAP_FILE_IMAGE |
-                            /* we don't need MAP_FILE_REACHABLE b/c we're fixed */
-                            MAP_FILE_FIXED);
+                    if (overlap_map_func != NULL) {
+                        /* The relevant part of the anonymous map obtained above is
+                         * expected to automatically and atomically get unmapped because
+                         * we use overlap_map_func (which requires MAP_FILE_FIXED).
+                         */
+                        map = (*overlap_map_func)(
+                            elf->fd, &seg_size, pg_offs, seg_base /* base */,
+                            seg_prot | MEMPROT_WRITE /* prot */,
+                            MAP_FILE_COPY_ON_WRITE /*writes should not change file*/ |
+                                MAP_FILE_IMAGE |
+                                /* we don't need MAP_FILE_REACHABLE b/c we're fixed */
+                                MAP_FILE_FIXED);
+                    } else {
+                        /* TODO i#7192:
+                         * This function can be called after dynamo_heap_initialized,
+                         * and we will use d_r_map_file instead of os_map_file.
+                         * However, d_r_map_file performs memory bookkeeping which needs
+                         * to be first updated using an explicit d_r_unmap_file operation.
+                         *
+                         * This might be a problem, e.g. one thread unmaps the memory and
+                         * before mapping the actual file, another thread requests memory
+                         * via mmap takes the memory here, a racy condition. This can be
+                         * solved by adding a new d_r_overlap_map_file that avoids
+                         * actually unmapping the range and atomically replaces it with
+                         * the new mapping using MAP_FIXED, and additionally performs the
+                         * required bookkeeping. When available, specify
+                         * d_r_overlap_map_file as the overlap_map_func in callers of this
+                         * function that use d_r_map_file and d_r_unmap_file.
+                         */
+                        (*unmap_func)(seg_base, seg_size);
+                        map = (*map_func)(
+                            elf->fd, &seg_size, pg_offs, seg_base /* base */,
+                            seg_prot | MEMPROT_WRITE /* prot */,
+                            MAP_FILE_COPY_ON_WRITE /*writes should not change file*/ |
+                                MAP_FILE_IMAGE |
+                                /* we don't need MAP_FILE_REACHABLE b/c we're fixed */
+                                MAP_FILE_FIXED);
+                    }
                     ASSERT(map != NULL);
                     /* fill zeros at extend size */
-                    file_end = (app_pc)prog_hdr->p_vaddr + prog_hdr->p_filesz;
+                    file_end = (app_pc)(prog_hdr->p_vaddr + prog_hdr->p_filesz);
                     if (seg_end > file_end + delta) {
                         /* There is typically one RW PT_LOAD segment for .data and
                          * .bss.  If .data ends and .bss starts before filesz bytes,
@@ -521,7 +549,7 @@ elf_loader_map_phdrs(elf_loader_t *elf, bool fixed, map_fn_t map_func,
         }
     }
     ASSERT(last_end == lib_end);
-    /* FIXME: recover from map failure rather than relying on asserts. */
+    /* XXX: recover from map failure rather than relying on asserts. */
 
     return lib_base;
 }

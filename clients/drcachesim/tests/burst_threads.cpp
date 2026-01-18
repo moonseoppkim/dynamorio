@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,6 +34,7 @@
  * a "burst" of execution in the middle of the application.  It then detaches.
  */
 
+#include "test_helpers.h"
 /* We deliberately do not include configure.h here to simulate what an
  * actual app will look like.  configure_DynamoRIO_static sets DR_APP_EXPORTS
  * for us.
@@ -107,7 +108,7 @@ void *
 #    define ALT_STACK_SIZE (SIGSTKSZ * 2)
     sigstack.ss_sp = (char *)malloc(ALT_STACK_SIZE);
     sigstack.ss_size = ALT_STACK_SIZE;
-    sigstack.ss_flags = SS_ONSTACK;
+    sigstack.ss_flags = 0;
     int res = sigaltstack(&sigstack, NULL);
     assert(res == 0);
 #endif
@@ -194,13 +195,22 @@ test_main(int argc, const char *argv[])
     // merged result several GB's: too much for a test.  We thus cap each thread.
     // We set -disable_traces to help stress state recreation
     // in drbbdup with prefixes on every block.
-    std::string ops = std::string(
-        "-stderr_mask 0xc -disable_traces -client_lib ';;-offline -align_endpoints "
-        "-max_trace_size 256K ");
-    /* Support passing in extra tracer options. */
-    for (int i = 1; i < argc; ++i)
-        ops += std::string(argv[i]) + " ";
-    ops += "'";
+    std::string dr_ops("-stderr_mask 0xc -disable_traces ");
+    std::string tracer_ops("-offline -align_endpoints -max_trace_size 256K ");
+    /* Support passing in extra DR and tracer options. */
+    bool next_dr = false;
+    for (int i = 1; i < argc; ++i) {
+        std::string arg(argv[i]);
+        if (next_dr) {
+            dr_ops += arg + " ";
+            next_dr = false;
+        } else if (arg == "-dr") {
+            next_dr = true;
+        } else {
+            tracer_ops += arg + " ";
+        }
+    }
+    std::string ops = dr_ops + " -client_lib ';;" + tracer_ops + "'";
     if (!my_setenv("DYNAMORIO_OPTIONS", ops.c_str()))
         std::cerr << "failed to set env var!\n";
 

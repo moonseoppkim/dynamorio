@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2022-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2022-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _CACHE_FILTER_H_
-#define _CACHE_FILTER_H_ 1
+#define _CACHE_FILTER_H_
 
 #include "memtrace_stream.h"
 #include "record_filter.h"
@@ -55,7 +55,9 @@ public:
     parallel_shard_init(memtrace_stream_t *shard_stream,
                         bool partial_trace_filter) override;
     bool
-    parallel_shard_filter(trace_entry_t &entry, void *shard_data) override;
+    parallel_shard_filter(
+        trace_entry_t &entry, void *shard_data,
+        record_filter_t::record_filter_info_t &record_filter_info) override;
     bool
     parallel_shard_exit(void *shard_data) override;
 

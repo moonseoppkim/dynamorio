@@ -1,4 +1,5 @@
 /* **********************************************************
+ * Copyright (c) 2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2022 Arm Limited   All rights reserved.
  * **********************************************************/
 
@@ -89,12 +90,14 @@ insert_get_addr(void *drcontext, instrlist_t *ilist, instr_t *instr, opnd_t mref
     }
 
     /* Look for the precise stolen register cases in the test app. */
-    if (opnd_get_base(mref) == DR_REG_X0 &&
-        (opnd_get_index(mref) == dr_get_stolen_reg() ||
-         opnd_get_index(mref) == DR_REG_W28 && opnd_get_base(mref) == DR_REG_X0)) {
+    if (opnd_get_base(mref) == dr_get_stolen_reg() ||
+        (opnd_get_base(mref) == DR_REG_X0 &&
+         reg_to_pointer_sized(opnd_get_index(mref)) == dr_get_stolen_reg())) {
         /* Call out to confirm we got the right address.
          * DR's clean call args only support pointer-sized so we
-         * deconstruct the opnd_t.
+         * deconstruct the opnd_t, which works if it fits in our 2 args
+         * as we pass it to ourselves so we know the layout is identical
+         * for the reading code.
          */
         DR_ASSERT(sizeof(mref) <= 2 * sizeof(ptr_uint_t));
         ptr_uint_t opnd_top = *(((ptr_uint_t *)&mref) + 1);
@@ -113,6 +116,15 @@ insert_get_addr(void *drcontext, instrlist_t *ilist, instr_t *instr, opnd_t mref
     return true;
 }
 
+static bool
+prev_is_mov_0(instr_t *inst, reg_id_t dst_reg)
+{
+    instr_t *prev = instr_get_prev(inst);
+    ptr_int_t value = ~0;
+    return prev != NULL && instr_is_mov_constant(prev, &value) && value == 0 &&
+        opnd_get_reg(instr_get_dst(prev, 0)) == dst_reg;
+}
+
 static dr_emit_flags_t
 event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst,
                       bool for_trace, bool translating, void *user_data)
@@ -128,10 +140,19 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     if (instr_writes_memory(inst)) {
         opnd = instr_get_dst(inst, 0);
         if (opnd_is_memory_reference(opnd) && opnd_is_base_disp(opnd)) {
-            if (opnd_get_index(opnd) == stolen && opnd_get_base(opnd) == DR_REG_X0)
+            if (opnd_get_index(opnd) == stolen && opnd_get_base(opnd) == DR_REG_X0 &&
+                prev_is_mov_0(inst, stolen))
                 dr_printf("store memref with index reg X28\n");
-            if (opnd_get_index(opnd) == DR_REG_W28 && opnd_get_base(opnd) == DR_REG_X0)
+            if (opnd_get_index(opnd) == DR_REG_W28 && opnd_get_base(opnd) == DR_REG_X0 &&
+                prev_is_mov_0(inst, DR_REG_W28))
                 dr_printf("store memref with index reg W28\n");
+            if (insert_get_addr(drcontext, bb, inst, opnd))
+                return DR_EMIT_DEFAULT;
+            else
+                DR_ASSERT(false);
+        } else if (opnd_is_memory_reference(opnd) && opnd_is_base_disp(opnd) &&
+                   opnd_get_base(opnd) == dr_get_stolen_reg()) {
+            /* Go ahead and translate all all base-stolen addresses. */
             if (insert_get_addr(drcontext, bb, inst, instr_get_dst(inst, 0)))
                 return DR_EMIT_DEFAULT;
             else
@@ -145,11 +166,20 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     if (instr_reads_memory(inst)) {
         opnd = instr_get_src(inst, 0);
         if (opnd_is_memory_reference(opnd) && opnd_is_base_disp(opnd)) {
-            if (opnd_get_index(opnd) == stolen && opnd_get_base(opnd) == DR_REG_X0)
+            if (opnd_get_index(opnd) == stolen && opnd_get_base(opnd) == DR_REG_X0 &&
+                prev_is_mov_0(inst, stolen))
                 dr_printf("load memref with index reg X28\n");
-            if (opnd_get_index(opnd) == DR_REG_W28 && opnd_get_base(opnd) == DR_REG_X0)
+            if (opnd_get_index(opnd) == DR_REG_W28 && opnd_get_base(opnd) == DR_REG_X0 &&
+                prev_is_mov_0(inst, DR_REG_W28))
                 dr_printf("load memref with index reg W28\n");
-            if (insert_get_addr(drcontext, bb, inst, instr_get_src(inst, 0)))
+            if (insert_get_addr(drcontext, bb, inst, opnd))
+                return DR_EMIT_DEFAULT;
+            else
+                DR_ASSERT(false);
+        } else if (opnd_is_memory_reference(opnd) && opnd_is_base_disp(opnd) &&
+                   opnd_get_base(opnd) == dr_get_stolen_reg()) {
+            /* Go ahead and translate all all base-stolen addresses. */
+            if (insert_get_addr(drcontext, bb, inst, opnd))
                 return DR_EMIT_DEFAULT;
             else
                 DR_ASSERT(false);
@@ -167,7 +197,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
     CHECK(dr_get_stolen_reg() == TEST_REG_STOLEN, "stolen reg doesn't match");
 
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         DR_ASSERT(false);
 }

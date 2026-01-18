@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -82,9 +82,9 @@
  * It could change without warning with a new version of Windows.
  */
 
-/* FIXME : combine NTPRINT with NTLOG */
+/* XXX : combine NTPRINT with NTLOG */
 /* must turn on VERBOSE in inject_shared.c as well since we're now
- * using display_verbose_message() -- FIXME: link them automatically */
+ * using display_verbose_message() -- XXX: link them automatically */
 #if defined(NOT_DYNAMORIO_CORE_PROPER) || defined(NOT_DYNAMORIO_CORE)
 #    define VERBOSE 0
 #else
@@ -153,7 +153,7 @@ static enum {
         GET_NTDLL(Nt##name, (__VA_ARGS__)); \
         typedef NTSTATUS name##_type(int sysnum, __VA_ARGS__)
 
-/* FIXME - since it doesn't vary we could have a variable to store the dr
+/* XXX - since it doesn't vary we could have a variable to store the dr
  * syscall routine to use, but would be yet another function pointer in
  * our data segment... */
 /* We use the wrappers till the native_exec Nt hooks go in (at which point
@@ -206,7 +206,7 @@ static enum {
 #    define ALLOW_HOOKER(pc)                           \
         (*(unsigned char *)(pc) == JMP_REL32_OPCODE || \
          *(unsigned char *)(pc) == CALL_REL32_OPCODE)
-/* FIXME: we'll evaluate pc multiple times in the above macro */
+/* XXX: we'll evaluate pc multiple times in the above macro */
 
 static void
 tls_exit(void);
@@ -234,24 +234,29 @@ static PEB *own_peb = NULL;
  */
 
 GET_NTDLL(NtQueryInformationProcess,
-          (IN HANDLE ProcessHandle, IN PROCESSINFOCLASS ProcessInformationClass,
-           OUT PVOID ProcessInformation, IN ULONG ProcessInformationLength,
-           OUT PULONG ReturnLength OPTIONAL));
+          (DR_PARAM_IN HANDLE ProcessHandle,
+           DR_PARAM_IN PROCESSINFOCLASS ProcessInformationClass,
+           DR_PARAM_OUT PVOID ProcessInformation,
+           DR_PARAM_IN ULONG ProcessInformationLength,
+           DR_PARAM_OUT PULONG ReturnLength OPTIONAL));
 
 GET_NTDLL(NtQueryInformationFile,
-          (IN HANDLE FileHandle, OUT PIO_STATUS_BLOCK IoStatusBlock,
-           OUT PVOID FileInformation, IN ULONG FileInformationLength,
-           IN FILE_INFORMATION_CLASS FileInformationClass));
+          (DR_PARAM_IN HANDLE FileHandle, DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock,
+           DR_PARAM_OUT PVOID FileInformation, DR_PARAM_IN ULONG FileInformationLength,
+           DR_PARAM_IN FILE_INFORMATION_CLASS FileInformationClass));
 
 GET_NTDLL(NtQuerySection,
-          (IN HANDLE SectionHandle, IN SECTION_INFORMATION_CLASS SectionInformationClass,
-           OUT PVOID SectionInformation, IN ULONG SectionInformationLength,
-           OUT PULONG ResultLength OPTIONAL));
+          (DR_PARAM_IN HANDLE SectionHandle,
+           DR_PARAM_IN SECTION_INFORMATION_CLASS SectionInformationClass,
+           DR_PARAM_OUT PVOID SectionInformation,
+           DR_PARAM_IN ULONG SectionInformationLength,
+           DR_PARAM_OUT PULONG ResultLength OPTIONAL));
 
 GET_NTDLL(NtQueryInformationToken,
-          (IN HANDLE TokenHandle, IN TOKEN_INFORMATION_CLASS TokenInformationClass,
-           OUT PVOID TokenInformation, IN ULONG TokenInformationLength,
-           OUT PULONG ReturnLength));
+          (DR_PARAM_IN HANDLE TokenHandle,
+           DR_PARAM_IN TOKEN_INFORMATION_CLASS TokenInformationClass,
+           DR_PARAM_OUT PVOID TokenInformation, DR_PARAM_IN ULONG TokenInformationLength,
+           DR_PARAM_OUT PULONG ReturnLength));
 
 /* routines that we may hook if specified in
  * syscall_requires_action[], all new routines can use GET_SYSCALL
@@ -259,58 +264,75 @@ GET_NTDLL(NtQueryInformationToken,
  * comments in GET_SYSCALL definition.
  */
 
-GET_RAW_SYSCALL(QueryVirtualMemory, IN HANDLE ProcessHandle, IN const void *BaseAddress,
-                IN MEMORY_INFORMATION_CLASS MemoryInformationClass,
-                OUT PVOID MemoryInformation, IN SIZE_T MemoryInformationLength,
-                OUT PSIZE_T ReturnLength OPTIONAL);
+GET_RAW_SYSCALL(QueryVirtualMemory, DR_PARAM_IN HANDLE ProcessHandle,
+                DR_PARAM_IN const void *BaseAddress,
+                DR_PARAM_IN MEMORY_INFORMATION_CLASS MemoryInformationClass,
+                DR_PARAM_OUT PVOID MemoryInformation,
+                DR_PARAM_IN SIZE_T MemoryInformationLength,
+                DR_PARAM_OUT PSIZE_T ReturnLength OPTIONAL);
 
-GET_RAW_SYSCALL(UnmapViewOfSection, IN HANDLE ProcessHandle, IN PVOID BaseAddress);
+GET_RAW_SYSCALL(UnmapViewOfSection, DR_PARAM_IN HANDLE ProcessHandle,
+                DR_PARAM_IN PVOID BaseAddress);
 
-GET_RAW_SYSCALL(CreateSection, OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
-                IN POBJECT_ATTRIBUTES ObjectAttributes,
-                IN PLARGE_INTEGER SectionSize OPTIONAL, IN ULONG Protect,
-                IN ULONG Attributes, IN HANDLE FileHandle);
+GET_RAW_SYSCALL(CreateSection, DR_PARAM_OUT PHANDLE SectionHandle,
+                DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+                DR_PARAM_IN PLARGE_INTEGER SectionSize OPTIONAL,
+                DR_PARAM_IN ULONG Protect, DR_PARAM_IN ULONG Attributes,
+                DR_PARAM_IN HANDLE FileHandle);
 
-GET_RAW_SYSCALL(OpenSection, OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
-                IN POBJECT_ATTRIBUTES ObjectAttributes);
+GET_RAW_SYSCALL(OpenSection, DR_PARAM_OUT PHANDLE SectionHandle,
+                DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes);
 
-GET_RAW_SYSCALL(AllocateVirtualMemory, IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress,
-                IN ULONG ZeroBits, IN OUT PSIZE_T AllocationSize, IN ULONG AllocationType,
-                IN ULONG Protect);
+GET_RAW_SYSCALL(AllocateVirtualMemory, DR_PARAM_IN HANDLE ProcessHandle,
+                DR_PARAM_INOUT PVOID *BaseAddress, DR_PARAM_IN ULONG ZeroBits,
+                DR_PARAM_INOUT PSIZE_T AllocationSize, DR_PARAM_IN ULONG AllocationType,
+                DR_PARAM_IN ULONG Protect);
 
-GET_RAW_SYSCALL(FreeVirtualMemory, IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress,
-                IN OUT PSIZE_T FreeSize, IN ULONG FreeType);
+GET_RAW_SYSCALL(FreeVirtualMemory, DR_PARAM_IN HANDLE ProcessHandle,
+                DR_PARAM_INOUT PVOID *BaseAddress, DR_PARAM_INOUT PSIZE_T FreeSize,
+                DR_PARAM_IN ULONG FreeType);
 
-GET_RAW_SYSCALL(ProtectVirtualMemory, IN HANDLE ProcessHandle, IN OUT PVOID *BaseAddress,
-                IN OUT PSIZE_T ProtectSize, IN ULONG NewProtect, OUT PULONG OldProtect);
+GET_RAW_SYSCALL(ProtectVirtualMemory, DR_PARAM_IN HANDLE ProcessHandle,
+                DR_PARAM_INOUT PVOID *BaseAddress, DR_PARAM_INOUT PSIZE_T ProtectSize,
+                DR_PARAM_IN ULONG NewProtect, DR_PARAM_OUT PULONG OldProtect);
 
-GET_RAW_SYSCALL(QueryInformationThread, IN HANDLE ThreadHandle,
-                IN THREADINFOCLASS ThreadInformationClass, OUT PVOID ThreadInformation,
-                IN ULONG ThreadInformationLength, OUT PULONG ReturnLength OPTIONAL);
+GET_RAW_SYSCALL(QueryInformationThread, DR_PARAM_IN HANDLE ThreadHandle,
+                DR_PARAM_IN THREADINFOCLASS ThreadInformationClass,
+                DR_PARAM_OUT PVOID ThreadInformation,
+                DR_PARAM_IN ULONG ThreadInformationLength,
+                DR_PARAM_OUT PULONG ReturnLength OPTIONAL);
 
 /* CreateFile is defined CreateFileW (Unicode) or CreateFileA (ANSI),
  * undefine here for system call.
  */
 #undef CreateFile
-GET_RAW_SYSCALL(CreateFile, OUT PHANDLE FileHandle, IN ACCESS_MASK DesiredAccess,
-                IN POBJECT_ATTRIBUTES ObjectAttributes,
-                OUT PIO_STATUS_BLOCK IoStatusBlock,
-                IN PLARGE_INTEGER AllocationSize OPTIONAL, IN ULONG FileAttributes,
-                IN ULONG ShareAccess, IN ULONG CreateDisposition, IN ULONG CreateOptions,
-                IN PVOID EaBuffer OPTIONAL, IN ULONG EaLength);
+GET_RAW_SYSCALL(CreateFile, DR_PARAM_OUT PHANDLE FileHandle,
+                DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+                DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock,
+                DR_PARAM_IN PLARGE_INTEGER AllocationSize OPTIONAL,
+                DR_PARAM_IN ULONG FileAttributes, DR_PARAM_IN ULONG ShareAccess,
+                DR_PARAM_IN ULONG CreateDisposition, DR_PARAM_IN ULONG CreateOptions,
+                DR_PARAM_IN PVOID EaBuffer OPTIONAL, DR_PARAM_IN ULONG EaLength);
 
-GET_RAW_SYSCALL(CreateKey, OUT PHANDLE KeyHandle, IN ACCESS_MASK DesiredAccess,
-                IN POBJECT_ATTRIBUTES ObjectAttributes, IN ULONG TitleIndex,
-                IN PUNICODE_STRING Class OPTIONAL, IN ULONG CreateOptions,
-                OUT PULONG Disposition OPTIONAL);
+GET_RAW_SYSCALL(CreateKey, DR_PARAM_OUT PHANDLE KeyHandle,
+                DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+                DR_PARAM_IN ULONG TitleIndex, DR_PARAM_IN PUNICODE_STRING Class OPTIONAL,
+                DR_PARAM_IN ULONG CreateOptions,
+                DR_PARAM_OUT PULONG Disposition OPTIONAL);
 
-GET_RAW_SYSCALL(OpenKey, OUT PHANDLE KeyHandle, IN ACCESS_MASK DesiredAccess,
-                IN POBJECT_ATTRIBUTES ObjectAttributes);
+GET_RAW_SYSCALL(OpenKey, DR_PARAM_OUT PHANDLE KeyHandle,
+                DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes);
 
-GET_RAW_SYSCALL(SetInformationFile, IN HANDLE FileHandle,
-                OUT PIO_STATUS_BLOCK IoStatusBlock, IN PVOID FileInformation,
-                IN ULONG FileInformationLength,
-                IN FILE_INFORMATION_CLASS FileInformationClass);
+GET_RAW_SYSCALL(SetInformationFile, DR_PARAM_IN HANDLE FileHandle,
+                DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock,
+                DR_PARAM_IN PVOID FileInformation,
+                DR_PARAM_IN ULONG FileInformationLength,
+                DR_PARAM_IN FILE_INFORMATION_CLASS FileInformationClass);
 
 /* the same structure as _CONTEXT_EX in winnt.h */
 typedef struct _context_chunk_t {
@@ -397,7 +419,7 @@ syscalls_init()
     /* Determine which syscall routine to use
      * We don't have heap available yet (no syscalls yet!) so
      * we can't decode easily.
-     * FIXME: for app syscalls, we wait until we see one so we know
+     * XXX: for app syscalls, we wait until we see one so we know
      * the method being used -- should we move that decision up, since
      * we're checking here for DR?
      */
@@ -641,7 +663,7 @@ syscalls_init()
 bool
 use_ki_syscall_routines()
 {
-    /* FIXME - two ways to do this.  We could use the byte matching above in
+    /* XXX - two ways to do this.  We could use the byte matching above in
      * syscalls_init to match call edx vs call [edx] or we could check for the
      * existence of the Ki*SystemCall* routines.  We do the latter and have
      * syscalls_init assert that the two methods agree. */
@@ -684,7 +706,7 @@ nt_init_dynamic_syscall_wrappers(app_pc base)
 void
 ntdll_init()
 {
-    /* FIXME: decode kernel32!TlsGetValue and get the real offset
+    /* XXX: decode kernel32!TlsGetValue and get the real offset
      * from there?
      */
     ASSERT(offsetof(TEB, TlsSlots) == TEB_TLS64_OFFSET);
@@ -761,15 +783,15 @@ query_win32_start_addr(HANDLE hthread, PVOID start_addr)
  * system call.
  */
 NTSTATUS
-query_system_info(IN SYSTEM_INFORMATION_CLASS info_class, IN int info_size,
-                  OUT PVOID info)
+query_system_info(DR_PARAM_IN SYSTEM_INFORMATION_CLASS info_class,
+                  DR_PARAM_IN int info_size, DR_PARAM_OUT PVOID info)
 {
     NTSTATUS result;
     ULONG bytes_received = 0;
 
     GET_NTDLL(NtQuerySystemInformation,
-              (IN SYSTEM_INFORMATION_CLASS info_class, OUT PVOID info, IN ULONG info_size,
-               OUT PULONG bytes_received));
+              (DR_PARAM_IN SYSTEM_INFORMATION_CLASS info_class, DR_PARAM_OUT PVOID info,
+               DR_PARAM_IN ULONG info_size, DR_PARAM_OUT PULONG bytes_received));
 
     result = NtQuerySystemInformation(info_class, info, info_size, &bytes_received);
 
@@ -1225,7 +1247,7 @@ void
 context_to_mcontext(priv_mcontext_t *mcontext, CONTEXT *cxt)
 {
     /* i#437: cxt might come from kernel where XSTATE is not set */
-    /* FIXME: This opens us up to a bug in DR where DR requests a CONTEXT but
+    /* XXX: This opens us up to a bug in DR where DR requests a CONTEXT but
      * forgets to set XSTATE even though app has used it and we then mess up
      * the app's ymm state. Any way we can detect that?
      * One way is to pass a flag to indicate if the context is from kernel or
@@ -1359,7 +1381,7 @@ mcontext_to_context(CONTEXT *cxt, priv_mcontext_t *mcontext, bool set_cur_seg)
 
 /****************************************************************************/
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
-/* avoid needing x86_code.c from x86.asm from get_own_context_helper(),
+/* avoid needing asm_aux.c from x86.asm from get_own_context_helper(),
 
 /* unstatic for use by GET_OWN_CONTEXT macro */
 void
@@ -1371,7 +1393,7 @@ get_own_context_integer_control(CONTEXT *cxt, reg_t cs, reg_t ss, priv_mcontext_
      */
     DEBUG_DECLARE(uint origflags = cxt->ContextFlags;)
     IF_X64(ASSERT_TRUNCATE(cxt->SegCs, short, cs));
-    cxt->SegCs = (WORD)cs; /* FIXME : need to sanitize? */
+    cxt->SegCs = (WORD)cs; /* XXX : need to sanitize? */
     IF_X64(ASSERT_TRUNCATE(cxt->SegSs, short, ss));
     cxt->SegSs = (WORD)ss;
     /* avoid assert in mcontext_to_context about not having xmm flags.
@@ -1389,7 +1411,7 @@ get_own_context(CONTEXT *cxt)
     if (TEST(CONTEXT_SEGMENTS, cxt->ContextFlags)) {
         get_segments_defg(&cxt->SegDs, &cxt->SegEs, &cxt->SegFs, &cxt->SegGs);
     }
-    /* FIXME : do we want CONTEXT_DEBUG_REGISTERS or CONTEXT_FLOATING_POINT
+    /* XXX : do we want CONTEXT_DEBUG_REGISTERS or CONTEXT_FLOATING_POINT
      * or CONTEXT_EXTENDED_REGISTERS at some point?
      * Especially in light of PR 264138.  However, no current uses need
      * to get our own xmm registers.
@@ -1592,7 +1614,7 @@ bitmap_find_free_sequence(byte *rtl_bitmap, int bitmap_size, int num_requested_s
             if (contig == 0) {
                 /* check whether first element will be aligned */
                 /* don't bother starting if not */
-                /* FIXME: could add an argument which slot should be aligned here  */
+                /* XXX: could add an argument which slot should be aligned here  */
                 int proposed_align_slot = /* first */
                     (top_down ? i - (num_requested_slots - 1) : i) + align_which_slot;
                 /* ALIGNED doesn't work for 0 so we have to special-case it */
@@ -1701,7 +1723,7 @@ tls_alloc_helper(int synch, uint *teb_offs /* OUT */, int num_slots, uint alignm
 
     if (peb->TlsBitmap == NULL) {
         /* Not initialized yet so use a temp struct to point at the real bits.
-         * FIXME i#812: ensure our bits here don't get zeroed when ntdll is initialized
+         * XXX i#812: ensure our bits here don't get zeroed when ntdll is initialized
          */
         ASSERT(dr_earliest_injected);
         using_local_bitmap = true;
@@ -1742,7 +1764,7 @@ tls_alloc_helper(int synch, uint *teb_offs /* OUT */, int num_slots, uint alignm
         /* we only fill from the front - and taking all up to the top isn't nice */
         ASSERT(!TEST(TLS_FLAG_BITMAP_TOP_DOWN, tls_flags));
         ASSERT_NOT_IMPLEMENTED(false);
-        /* FIXME: need to save first slot, so we can free the
+        /* XXX: need to save first slot, so we can free the
          * filled slots on exit */
     }
 
@@ -1752,7 +1774,7 @@ tls_alloc_helper(int synch, uint *teb_offs /* OUT */, int num_slots, uint alignm
     /* TLS_FLAG_CACHE_LINE_START - will align the first entry,
      * otherwise align either first or last since we only care to fit
      * on a line */
-    /* FIXME: align at specific element - not necessary since not
+    /* XXX: align at specific element - not necessary since not
      * aligning at all works well for our current choice
      */
 
@@ -1781,7 +1803,7 @@ tls_alloc_helper(int synch, uint *teb_offs /* OUT */, int num_slots, uint alignm
      *  cache line.
      */
 
-    /* FIXME: cache line front, otherwise should retry when either
+    /* XXX: cache line front, otherwise should retry when either
      * start or end is fine, and choose closest to desired end of
      * bitmap */
     start = bitmap_find_free_sequence(peb->TlsBitmap->BitMapBuffer,
@@ -1823,7 +1845,7 @@ tls_alloc_helper(int synch, uint *teb_offs /* OUT */, int num_slots, uint alignm
 
     bitmap_mark_taken_sequence(peb->TlsBitmap->BitMapBuffer, peb->TlsBitmap->SizeOfBitMap,
                                start,
-                               /* FIXME: TLS_FLAG_BITMAP_FILL should use first_to_fill */
+                               /* XXX: TLS_FLAG_BITMAP_FILL should use first_to_fill */
                                start + num_slots);
 
     if (teb_offs != NULL) {
@@ -1866,7 +1888,7 @@ tls_alloc_exit:
 
     /* ntdll seems to grab slot 0 of the TlsBitmap before loading
      * kernel32, see if early injection gets us before that if we go
-     * bottom up, FIXME: if hit change interface, since 0 is returned
+     * bottom up, XXX: if hit change interface, since 0 is returned
      * on error
      */
     ASSERT_CURIOSITY(start != 0);
@@ -1905,7 +1927,7 @@ tls_free_helper(int synch, uint teb_offs, int num)
     uint *p;
 
     NTSTATUS res;
-    GET_NTDLL(RtlTryEnterCriticalSection, (IN OUT RTL_CRITICAL_SECTION * crit));
+    GET_NTDLL(RtlTryEnterCriticalSection, (DR_PARAM_INOUT RTL_CRITICAL_SECTION * crit));
 
     if (DYNAMO_OPTION(alt_teb_tls) && alt_tls_release(teb_offs, num))
         return true;
@@ -2097,7 +2119,7 @@ is_32bit_process(HANDLE h)
 }
 
 NTSTATUS
-nt_get_drive_map(HANDLE process, PROCESS_DEVICEMAP_INFORMATION *map OUT)
+nt_get_drive_map(HANDLE process, PROCESS_DEVICEMAP_INFORMATION *map DR_PARAM_OUT)
 {
     ULONG len = 0;
     return NtQueryInformationProcess(process, ProcessDeviceMap, map, sizeof(*map), &len);
@@ -2121,7 +2143,7 @@ nt_remote_allocate_virtual_memory(HANDLE process, void **base, size_t size, uint
         /* Let caller decide whether to retry or not. */
     }
 
-    /* FIXME: alert caller if sz > size? only happens if size not PAGE_SIZE multiple */
+    /* XXX: alert caller if sz > size? only happens if size not PAGE_SIZE multiple */
     NTPRINT("NtAllocateVirtualMemory: asked for %d bytes, got %d bytes at " PFX "\n",
             size, sz, *base);
     ASSERT(sz >= size);
@@ -2200,7 +2222,7 @@ nt_free_virtual_memory(void *base)
     return res;
 }
 
-/* FIXME: change name to nt_protect_virtual_memory() and use
+/* XXX: change name to nt_protect_virtual_memory() and use
  * nt_remote_protect_virtual_memory(), or maybe just change callers to
  * pass NT_CURRENT_PROCESS to nt_remote_protect_virtual_memory()
  * instead to avoid the extra function call, especially with self-protection on
@@ -2306,8 +2328,9 @@ nt_raw_read_virtual_memory(HANDLE process, const void *base, void *buffer,
 {
     NTSTATUS res;
     GET_NTDLL(NtReadVirtualMemory,
-              (IN HANDLE ProcessHandle, IN const void *BaseAddress, OUT PVOID Buffer,
-               IN SIZE_T BufferLength, OUT PSIZE_T ReturnLength OPTIONAL));
+              (DR_PARAM_IN HANDLE ProcessHandle, DR_PARAM_IN const void *BaseAddress,
+               DR_PARAM_OUT PVOID Buffer, DR_PARAM_IN SIZE_T BufferLength,
+               DR_PARAM_OUT PSIZE_T ReturnLength OPTIONAL));
     res = NtReadVirtualMemory(process, base, buffer, buffer_length, (SIZE_T *)bytes_read);
     return res;
 }
@@ -2325,9 +2348,10 @@ nt_raw_write_virtual_memory(HANDLE process, void *base, const void *buffer,
                             size_t buffer_length, size_t *bytes_written)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(WriteVirtualMemory, IN HANDLE ProcessHandle, IN PVOID BaseAddress,
-                    IN const void *Buffer, IN SIZE_T BufferLength,
-                    OUT PSIZE_T ReturnLength OPTIONAL);
+    GET_RAW_SYSCALL(WriteVirtualMemory, DR_PARAM_IN HANDLE ProcessHandle,
+                    DR_PARAM_IN PVOID BaseAddress, DR_PARAM_IN const void *Buffer,
+                    DR_PARAM_IN SIZE_T BufferLength,
+                    DR_PARAM_OUT PSIZE_T ReturnLength OPTIONAL);
     res = NT_SYSCALL(WriteVirtualMemory, process, base, buffer, buffer_length,
                      (SIZE_T *)bytes_written);
     return res;
@@ -2345,7 +2369,8 @@ nt_write_virtual_memory(HANDLE process, void *base, const void *buffer,
 void
 nt_continue(CONTEXT *cxt)
 {
-    GET_RAW_SYSCALL(Continue, IN PCONTEXT Context, IN BOOLEAN TestAlert);
+    GET_RAW_SYSCALL(Continue, DR_PARAM_IN PCONTEXT Context,
+                    DR_PARAM_IN BOOLEAN TestAlert);
     NT_SYSCALL(Continue, cxt, 0 /* don't change APC status */);
     /* should not get here */
     ASSERT_NOT_REACHED();
@@ -2354,7 +2379,8 @@ nt_continue(CONTEXT *cxt)
 NTSTATUS
 nt_get_context(HANDLE hthread, CONTEXT *cxt)
 {
-    GET_RAW_SYSCALL(GetContextThread, IN HANDLE ThreadHandle, OUT PCONTEXT Context);
+    GET_RAW_SYSCALL(GetContextThread, DR_PARAM_IN HANDLE ThreadHandle,
+                    DR_PARAM_OUT PCONTEXT Context);
     /* PR 263338: we get STATUS_DATATYPE_MISALIGNMENT if not aligned */
     IF_X64(ASSERT(ALIGNED(cxt, 16)));
     return NT_SYSCALL(GetContextThread, hthread, cxt);
@@ -2377,7 +2403,8 @@ nt_get_context(HANDLE hthread, CONTEXT *cxt)
 NTSTATUS
 nt_set_context(HANDLE hthread, CONTEXT *cxt)
 {
-    GET_RAW_SYSCALL(SetContextThread, IN HANDLE ThreadHandle, IN PCONTEXT Context);
+    GET_RAW_SYSCALL(SetContextThread, DR_PARAM_IN HANDLE ThreadHandle,
+                    DR_PARAM_IN PCONTEXT Context);
     /* PR 263338: we get STATUS_DATATYPE_MISALIGNMENT if not aligned */
     IF_X64(ASSERT(ALIGNED(cxt, 16)));
     return NT_SYSCALL(SetContextThread, hthread, cxt);
@@ -2388,8 +2415,8 @@ nt_is_thread_terminating(HANDLE hthread)
 {
     ULONG previous_suspend_count;
     NTSTATUS res;
-    GET_RAW_SYSCALL(SuspendThread, IN HANDLE ThreadHandle,
-                    OUT PULONG PreviousSuspendCount OPTIONAL);
+    GET_RAW_SYSCALL(SuspendThread, DR_PARAM_IN HANDLE ThreadHandle,
+                    DR_PARAM_OUT PULONG PreviousSuspendCount OPTIONAL);
     res = NT_SYSCALL(SuspendThread, hthread, &previous_suspend_count);
     if (NT_SUCCESS(res)) {
         nt_thread_resume(hthread, (int *)&previous_suspend_count);
@@ -2402,8 +2429,8 @@ bool
 nt_thread_suspend(HANDLE hthread, int *previous_suspend_count)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(SuspendThread, IN HANDLE ThreadHandle,
-                    OUT PULONG PreviousSuspendCount OPTIONAL);
+    GET_RAW_SYSCALL(SuspendThread, DR_PARAM_IN HANDLE ThreadHandle,
+                    DR_PARAM_OUT PULONG PreviousSuspendCount OPTIONAL);
     res = NT_SYSCALL(SuspendThread, hthread, (ULONG *)previous_suspend_count);
     /* Don't assert here -- let the caller do so if it expects a particular value.
      * If we asserted here when an ldmp is being generated, we could prevent
@@ -2417,8 +2444,8 @@ bool
 nt_thread_resume(HANDLE hthread, int *previous_suspend_count)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(ResumeThread, IN HANDLE ThreadHandle,
-                    OUT PULONG PreviousSuspendCount OPTIONAL);
+    GET_RAW_SYSCALL(ResumeThread, DR_PARAM_IN HANDLE ThreadHandle,
+                    DR_PARAM_OUT PULONG PreviousSuspendCount OPTIONAL);
     res = NT_SYSCALL(ResumeThread, hthread, (ULONG *)previous_suspend_count);
     return NT_SUCCESS(res);
 }
@@ -2438,8 +2465,8 @@ bool
 nt_terminate_thread(HANDLE hthread, NTSTATUS exit_code)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(TerminateThread, IN HANDLE ThreadHandle OPTIONAL,
-                    IN NTSTATUS ExitStatus);
+    GET_RAW_SYSCALL(TerminateThread, DR_PARAM_IN HANDLE ThreadHandle OPTIONAL,
+                    DR_PARAM_IN NTSTATUS ExitStatus);
     /* hthread == 0 means current thread, match kernel32 TerminateThread which
      * disallows null to avoid bugs in our code (we should always be passing
      * a valid handle or NT_CURRENT_THREAD) */
@@ -2453,8 +2480,8 @@ bool
 nt_terminate_process(HANDLE hprocess, NTSTATUS exit_code)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(TerminateProcess, IN HANDLE ProcessHandle OPTIONAL,
-                    IN NTSTATUS ExitStatus);
+    GET_RAW_SYSCALL(TerminateProcess, DR_PARAM_IN HANDLE ProcessHandle OPTIONAL,
+                    DR_PARAM_IN NTSTATUS ExitStatus);
     /* hprocess == 0 has special meaning (terminate all threads but this one),
      * kernel32!TerminateProcess disallows it and we currently don't use
      * that functionality */
@@ -2467,8 +2494,8 @@ nt_terminate_process(HANDLE hprocess, NTSTATUS exit_code)
 NTSTATUS
 nt_terminate_process_for_app(HANDLE hprocess, NTSTATUS exit_code)
 {
-    GET_RAW_SYSCALL(TerminateProcess, IN HANDLE ProcessHandle OPTIONAL,
-                    IN NTSTATUS ExitStatus);
+    GET_RAW_SYSCALL(TerminateProcess, DR_PARAM_IN HANDLE ProcessHandle OPTIONAL,
+                    DR_PARAM_IN NTSTATUS ExitStatus);
     /* we allow any argument or result values */
     return NT_SYSCALL(TerminateProcess, hprocess, exit_code);
 }
@@ -2477,8 +2504,9 @@ NTSTATUS
 nt_set_information_process_for_app(HANDLE hprocess, PROCESSINFOCLASS class, void *info,
                                    ULONG info_len)
 {
-    GET_RAW_SYSCALL(SetInformationProcess, IN HANDLE hprocess, IN PROCESSINFOCLASS class,
-                    INOUT void *info, IN ULONG info_len);
+    GET_RAW_SYSCALL(SetInformationProcess, DR_PARAM_IN HANDLE hprocess,
+                    DR_PARAM_IN PROCESSINFOCLASS class, DR_PARAM_INOUT void *info,
+                    DR_PARAM_IN ULONG info_len);
     /* We allow any argument or result value. */
     return NT_SYSCALL(SetInformationProcess, hprocess, class, info, info_len);
 }
@@ -2512,18 +2540,19 @@ nt_create_and_set_timer(PLARGE_INTEGER due_time, LONG period)
     enum { NotificationTimer, SynchronizationTimer };
 
     GET_NTDLL(NtCreateTimer,
-              (OUT PHANDLE TimerHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes, IN DWORD TimerType /* TIMER_TYPE */
+              (DR_PARAM_OUT PHANDLE TimerHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+               DR_PARAM_IN DWORD TimerType /* TIMER_TYPE */
                ));
     res = NtCreateTimer(&htimer, TIMER_ALL_ACCESS, NULL /* no name */,
                         SynchronizationTimer);
     ASSERT(NT_SUCCESS(res));
     {
         GET_NTDLL(NtSetTimer,
-                  (IN HANDLE TimerHandle, IN PLARGE_INTEGER DueTime,
-                   IN PVOID TimerApcRoutine, /* PTIMER_APC_ROUTINE */
-                   IN PVOID TimerContext, IN BOOLEAN Resume, IN LONG Period,
-                   OUT PBOOLEAN PreviousState));
+                  (DR_PARAM_IN HANDLE TimerHandle, DR_PARAM_IN PLARGE_INTEGER DueTime,
+                   DR_PARAM_IN PVOID TimerApcRoutine, /* PTIMER_APC_ROUTINE */
+                   DR_PARAM_IN PVOID TimerContext, DR_PARAM_IN BOOLEAN Resume,
+                   DR_PARAM_IN LONG Period, DR_PARAM_OUT PBOOLEAN PreviousState));
         res = NtSetTimer(htimer, due_time, NULL, NULL, false, period, NULL);
         ASSERT(NT_SUCCESS(res));
     }
@@ -2534,7 +2563,8 @@ bool
 nt_sleep(PLARGE_INTEGER due_time)
 {
     NTSTATUS res;
-    GET_NTDLL(NtDelayExecution, (IN BOOLEAN Alertable, IN PLARGE_INTEGER Interval));
+    GET_NTDLL(NtDelayExecution,
+              (DR_PARAM_IN BOOLEAN Alertable, DR_PARAM_IN PLARGE_INTEGER Interval));
     res = NtDelayExecution(false, /* non alertable sleep */
                            due_time);
     return NT_SUCCESS(res);
@@ -2593,7 +2623,7 @@ get_section_attributes(HANDLE h, uint *section_attributes /* OUT */,
 NTSTATUS
 nt_raw_close(HANDLE h)
 {
-    GET_RAW_SYSCALL(Close, IN HANDLE Handle);
+    GET_RAW_SYSCALL(Close, DR_PARAM_IN HANDLE Handle);
     return NT_SYSCALL(Close, h);
 }
 
@@ -2609,19 +2639,22 @@ duplicate_handle(HANDLE source_process, HANDLE source, HANDLE target_process,
                  HANDLE *target, ACCESS_MASK access, uint attributes, uint options)
 {
     NTSTATUS res;
-    GET_RAW_SYSCALL(DuplicateObject, IN HANDLE SourceProcessHandle,
-                    IN HANDLE SourceHandle, IN HANDLE TargetProcessHandle,
-                    OUT PHANDLE TargetHandle OPTIONAL, IN ACCESS_MASK DesiredAcess,
-                    IN ULONG Atrributes, IN ULONG options_t);
+    GET_RAW_SYSCALL(
+        DuplicateObject, DR_PARAM_IN HANDLE SourceProcessHandle,
+        DR_PARAM_IN HANDLE SourceHandle, DR_PARAM_IN HANDLE TargetProcessHandle,
+        DR_PARAM_OUT PHANDLE TargetHandle OPTIONAL, DR_PARAM_IN ACCESS_MASK DesiredAcess,
+        DR_PARAM_IN ULONG Atrributes, DR_PARAM_IN ULONG options_t);
     res = NT_SYSCALL(DuplicateObject, source_process, source, target_process, target,
                      access, attributes, options);
     return res;
 }
 
 GET_NTDLL(NtQueryObject,
-          (IN HANDLE ObjectHandle, IN OBJECT_INFORMATION_CLASS ObjectInformationClass,
-           OUT PVOID ObjectInformation, IN ULONG ObjectInformationLength,
-           OUT PULONG ReturnLength OPTIONAL));
+          (DR_PARAM_IN HANDLE ObjectHandle,
+           DR_PARAM_IN OBJECT_INFORMATION_CLASS ObjectInformationClass,
+           DR_PARAM_OUT PVOID ObjectInformation,
+           DR_PARAM_IN ULONG ObjectInformationLength,
+           DR_PARAM_OUT PULONG ReturnLength OPTIONAL));
 
 ACCESS_MASK
 nt_get_handle_access_rights(HANDLE handle)
@@ -2653,7 +2686,8 @@ wchar_to_unicode(PUNICODE_STRING dst, PCWSTR src)
 {
     NTSTATUS res;
     GET_NTDLL(RtlInitUnicodeString,
-              (IN OUT PUNICODE_STRING DestinationString, IN PCWSTR SourceString));
+              (DR_PARAM_INOUT PUNICODE_STRING DestinationString,
+               DR_PARAM_IN PCWSTR SourceString));
     res = RtlInitUnicodeString(dst, src);
     return res;
 }
@@ -2671,8 +2705,9 @@ char_to_unicode(PUNICODE_STRING dst, PCSTR src, PWSTR buf, size_t buflen)
 static void
 char_to_ansi(PANSI_STRING dst, const char *str)
 {
-    GET_NTDLL(RtlInitAnsiString,
-              (IN OUT PANSI_STRING DestinationString, IN PCSTR SourceString));
+    GET_NTDLL(
+        RtlInitAnsiString,
+        (DR_PARAM_INOUT PANSI_STRING DestinationString, DR_PARAM_IN PCSTR SourceString));
     RtlInitAnsiString(dst, str);
 }
 
@@ -2681,7 +2716,8 @@ char_to_ansi(PANSI_STRING dst, const char *str)
  * (Using bool is problematic for non-core users.)
  */
 bool
-query_full_attributes_file(IN PCWSTR filename, OUT PFILE_NETWORK_OPEN_INFORMATION info)
+query_full_attributes_file(DR_PARAM_IN PCWSTR filename,
+                           DR_PARAM_OUT PFILE_NETWORK_OPEN_INFORMATION info)
 {
     NTSTATUS result;
     OBJECT_ATTRIBUTES attributes;
@@ -2697,14 +2733,15 @@ query_full_attributes_file(IN PCWSTR filename, OUT PFILE_NETWORK_OPEN_INFORMATIO
 }
 
 NTSTATUS
-nt_query_value_key(IN HANDLE key, IN PUNICODE_STRING value_name,
-                   IN KEY_VALUE_INFORMATION_CLASS class, OUT PVOID info,
-                   IN ULONG info_length, OUT PULONG res_length)
+nt_query_value_key(DR_PARAM_IN HANDLE key, DR_PARAM_IN PUNICODE_STRING value_name,
+                   DR_PARAM_IN KEY_VALUE_INFORMATION_CLASS class, DR_PARAM_OUT PVOID info,
+                   DR_PARAM_IN ULONG info_length, DR_PARAM_OUT PULONG res_length)
 {
     GET_NTDLL(NtQueryValueKey,
-              (IN HANDLE KeyHandle, IN PUNICODE_STRING ValueName,
-               IN KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
-               OUT PVOID KeyValueInformation, IN ULONG Length, OUT PULONG ResultLength));
+              (DR_PARAM_IN HANDLE KeyHandle, DR_PARAM_IN PUNICODE_STRING ValueName,
+               DR_PARAM_IN KEY_VALUE_INFORMATION_CLASS KeyValueInformationClass,
+               DR_PARAM_OUT PVOID KeyValueInformation, DR_PARAM_IN ULONG Length,
+               DR_PARAM_OUT PULONG ResultLength));
     return NtQueryValueKey(key, value_name, class, info, info_length, res_length);
 }
 
@@ -2739,8 +2776,9 @@ reg_open_key(PCWSTR keyname, ACCESS_MASK rights)
     HANDLE hkey;
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING objname;
-    GET_RAW_SYSCALL(OpenKey, OUT PHANDLE KeyHandle, IN ACCESS_MASK DesiredAccess,
-                    IN POBJECT_ATTRIBUTES ObjectAttributes);
+    GET_RAW_SYSCALL(OpenKey, DR_PARAM_OUT PHANDLE KeyHandle,
+                    DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                    DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes);
     res = wchar_to_unicode(&objname, keyname);
     if (!NT_SUCCESS(res)) {
         NTPRINT("Error in wchar to unicode\n");
@@ -2766,7 +2804,7 @@ bool
 reg_delete_key(HANDLE hkey)
 {
     NTSTATUS res;
-    GET_NTDLL(NtDeleteKey, (IN HANDLE KeyHandle));
+    GET_NTDLL(NtDeleteKey, (DR_PARAM_IN HANDLE KeyHandle));
     res = NtDeleteKey(hkey);
     NTPRINT("Got %d for deleting key\n", res);
     return NT_SUCCESS(res);
@@ -2784,9 +2822,10 @@ reg_delete_key(HANDLE hkey)
  * then check for null and skip over it if nec. to find the data start.
  */
 reg_query_value_result_t
-reg_query_value(IN PCWSTR keyname, IN PCWSTR subkeyname,
-                IN KEY_VALUE_INFORMATION_CLASS info_class, OUT PVOID info,
-                IN ULONG info_size, IN ACCESS_MASK rights)
+reg_query_value(DR_PARAM_IN PCWSTR keyname, DR_PARAM_IN PCWSTR subkeyname,
+                DR_PARAM_IN KEY_VALUE_INFORMATION_CLASS info_class,
+                DR_PARAM_OUT PVOID info, DR_PARAM_IN ULONG info_size,
+                DR_PARAM_IN ACCESS_MASK rights)
 {
     int res;
     ULONG outlen = 0;
@@ -2814,9 +2853,10 @@ reg_query_value(IN PCWSTR keyname, IN PCWSTR subkeyname,
     return NT_SUCCESS(res) ? REG_QUERY_SUCCESS : REG_QUERY_FAILURE;
 }
 
-GET_RAW_SYSCALL(SetValueKey, IN HANDLE KeyHandle, IN PUNICODE_STRING ValueName,
-                IN ULONG TitleIndex OPTIONAL, IN ULONG Type, IN PVOID Data,
-                IN ULONG DataSize);
+GET_RAW_SYSCALL(SetValueKey, DR_PARAM_IN HANDLE KeyHandle,
+                DR_PARAM_IN PUNICODE_STRING ValueName,
+                DR_PARAM_IN ULONG TitleIndex OPTIONAL, DR_PARAM_IN ULONG Type,
+                DR_PARAM_IN PVOID Data, DR_PARAM_IN ULONG DataSize);
 
 bool
 reg_set_key_value(HANDLE hkey, PCWSTR subkey, PCWSTR val)
@@ -2858,7 +2898,7 @@ bool
 reg_flush_key(HANDLE hkey)
 {
     NTSTATUS res;
-    GET_NTDLL(NtFlushKey, (IN HANDLE KeyHandle));
+    GET_NTDLL(NtFlushKey, (DR_PARAM_IN HANDLE KeyHandle));
     res = NtFlushKey(hkey);
     return NT_SUCCESS(res);
 }
@@ -2877,16 +2917,18 @@ reg_flush_key(HANDLE hkey)
  * Returns 1 on success, 0 otherwise.
  */
 bool
-reg_enum_key(IN PCWSTR keyname, IN ULONG index, IN KEY_INFORMATION_CLASS info_class,
-             OUT PVOID key_info, IN ULONG key_info_size)
+reg_enum_key(DR_PARAM_IN PCWSTR keyname, DR_PARAM_IN ULONG index,
+             DR_PARAM_IN KEY_INFORMATION_CLASS info_class, DR_PARAM_OUT PVOID key_info,
+             DR_PARAM_IN ULONG key_info_size)
 {
     NTSTATUS result;
     ULONG received = 0;
     HANDLE hkey = reg_open_key(keyname, KEY_READ);
 
     GET_NTDLL(NtEnumerateKey,
-              (IN HANDLE hkey, IN ULONG index, IN KEY_INFORMATION_CLASS info_class,
-               OUT PVOID key_info, IN ULONG key_info_size, OUT PULONG bytes_received));
+              (DR_PARAM_IN HANDLE hkey, DR_PARAM_IN ULONG index,
+               DR_PARAM_IN KEY_INFORMATION_CLASS info_class, DR_PARAM_OUT PVOID key_info,
+               DR_PARAM_IN ULONG key_info_size, DR_PARAM_OUT PULONG bytes_received));
 
     if (hkey == NULL)
         return false;
@@ -2910,17 +2952,19 @@ reg_enum_key(IN PCWSTR keyname, IN ULONG index, IN KEY_INFORMATION_CLASS info_cl
  * Returns 1 on success, 0 otherwise.
  */
 bool
-reg_enum_value(IN PCWSTR keyname, IN ULONG index,
-               IN KEY_VALUE_INFORMATION_CLASS info_class, OUT PVOID key_info,
-               IN ULONG key_info_size)
+reg_enum_value(DR_PARAM_IN PCWSTR keyname, DR_PARAM_IN ULONG index,
+               DR_PARAM_IN KEY_VALUE_INFORMATION_CLASS info_class,
+               DR_PARAM_OUT PVOID key_info, DR_PARAM_IN ULONG key_info_size)
 {
     NTSTATUS result;
     ULONG bytes_received = 0;
     HANDLE hkey = reg_open_key(keyname, KEY_READ);
 
     GET_NTDLL(NtEnumerateValueKey,
-              (IN HANDLE hKey, IN ULONG index, IN KEY_VALUE_INFORMATION_CLASS info_class,
-               OUT PVOID key_info, IN ULONG key_info_size, OUT PULONG bytes_received));
+              (DR_PARAM_IN HANDLE hKey, DR_PARAM_IN ULONG index,
+               DR_PARAM_IN KEY_VALUE_INFORMATION_CLASS info_class,
+               DR_PARAM_OUT PVOID key_info, DR_PARAM_IN ULONG key_info_size,
+               DR_PARAM_OUT PULONG bytes_received));
 
     if (hkey == NULL)
         return false;
@@ -3034,7 +3078,7 @@ NTSTATUS
 get_current_user_SID(PWSTR sid_string, USHORT buffer_length)
 {
     GET_NTDLL(RtlConvertSidToUnicodeString,
-              (OUT PUNICODE_STRING UnicodeString, IN PSID Sid,
+              (DR_PARAM_OUT PUNICODE_STRING UnicodeString, DR_PARAM_IN PSID Sid,
                BOOLEAN AllocateDestinationString));
     NTSTATUS res;
     UNICODE_STRING ustr;
@@ -3079,9 +3123,9 @@ get_process_primary_SID()
 
 /* based on RtlpQuerySecurityDescriptorPointers from reactos/0.2.9/lib/rtl/sd.c */
 static void
-get_sd_pointers(IN PISECURITY_DESCRIPTOR SecurityDescriptor, OUT PSID *Owner OPTIONAL,
-                OUT PSID *Group OPTIONAL, OUT PACL *Sacl OPTIONAL,
-                OUT PACL *Dacl OPTIONAL)
+get_sd_pointers(DR_PARAM_IN PISECURITY_DESCRIPTOR SecurityDescriptor,
+                DR_PARAM_OUT PSID *Owner OPTIONAL, DR_PARAM_OUT PSID *Group OPTIONAL,
+                DR_PARAM_OUT PACL *Sacl OPTIONAL, DR_PARAM_OUT PACL *Dacl OPTIONAL)
 {
     /* we usually deal with self-relative SIDs as returned by NtQuerySecurityObject */
     if (TEST(SE_SELF_RELATIVE, SecurityDescriptor->Control)) {
@@ -3126,7 +3170,7 @@ get_sd_pointers(IN PISECURITY_DESCRIPTOR SecurityDescriptor, OUT PSID *Owner OPT
 }
 
 bool
-get_owner_sd(PISECURITY_DESCRIPTOR SecurityDescriptor, OUT PSID *Owner)
+get_owner_sd(PISECURITY_DESCRIPTOR SecurityDescriptor, DR_PARAM_OUT PSID *Owner)
 {
     /* RtlGetOwnerSecurityDescriptor is clean enough, so could be used
      * without reentrancy risks instead of writing ours here
@@ -3183,7 +3227,7 @@ set_owner_sd(PISECURITY_DESCRIPTOR SecurityDescriptor, PSID Owner)
 }
 
 static int
-length_sid(IN PSID Sid_)
+length_sid(DR_PARAM_IN PSID Sid_)
 {
     PISID Sid = Sid_;
     /* we only know about usable length of SID */
@@ -3191,7 +3235,7 @@ length_sid(IN PSID Sid_)
 }
 
 bool
-equal_sid(IN PSID Sid1_, IN PSID Sid2_)
+equal_sid(DR_PARAM_IN PSID Sid1_, DR_PARAM_IN PSID Sid2_)
 {
     PISID Sid1 = Sid1_;
     PISID Sid2 = Sid2_;
@@ -3312,14 +3356,14 @@ get_application_cmdline(void)
 LONGLONG
 query_time_100ns()
 {
-    /* FIXME: we could use KUSER_SHARED_DATA here, but it's too volatile
+    /* XXX: we could use KUSER_SHARED_DATA here, but it's too volatile
      * since we can't programmatically grab its address (all we know is
      * 0x7ffe0000) and it changed on win2003 (tickcount deprecated, e.g.).
      * Since these time routines aren't currently on critical path we just
      * use the more-stable syscalls.
      */
     LARGE_INTEGER systime;
-    GET_NTDLL(NtQuerySystemTime, (IN PLARGE_INTEGER SystemTime));
+    GET_NTDLL(NtQuerySystemTime, (DR_PARAM_IN PLARGE_INTEGER SystemTime));
     NtQuerySystemTime(&systime);
     return systime.QuadPart;
 }
@@ -3352,7 +3396,7 @@ query_time_seconds()
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
 /* note that ntdll!RtlTimeToTimeFields has this same functionality */
 void
-convert_100ns_to_system_time(uint64 time_in_100ns, SYSTEMTIME *st OUT)
+convert_100ns_to_system_time(uint64 time_in_100ns, SYSTEMTIME *st DR_PARAM_OUT)
 {
     LONGLONG time = time_in_100ns / TIMER_UNITS_PER_MILLISECOND;
     dr_time_t dr_time;
@@ -3368,7 +3412,7 @@ convert_100ns_to_system_time(uint64 time_in_100ns, SYSTEMTIME *st OUT)
 }
 
 void
-convert_system_time_to_100ns(const SYSTEMTIME *st, uint64 *time_in_100ns OUT)
+convert_system_time_to_100ns(const SYSTEMTIME *st, uint64 *time_in_100ns DR_PARAM_OUT)
 {
     uint64 time;
     dr_time_t dr_time;
@@ -3385,7 +3429,7 @@ convert_system_time_to_100ns(const SYSTEMTIME *st, uint64 *time_in_100ns OUT)
 }
 
 void
-query_system_time(SYSTEMTIME *st OUT)
+query_system_time(SYSTEMTIME *st DR_PARAM_OUT)
 {
     convert_100ns_to_system_time(query_time_100ns(), st);
 }
@@ -3410,13 +3454,13 @@ set_primary_user_owner(PSECURITY_DESCRIPTOR psd)
     ASSERT(ok);
     if (!ok)
         return NULL;
-    /* FIXME: (not verified) note that even if we set owner, we may
+    /* XXX: (not verified) note that even if we set owner, we may
      * not be allowed to use it as an owner it it is not present in
      * the current token.
      */
 
     /* we rely on the correct DACL to be provided through inheritance */
-    /* FIXME: we don't specify primary Group, we may end up with no primary group,
+    /* XXX: we don't specify primary Group, we may end up with no primary group,
      * which should be OK too */
     return psd; /* use the constructed security descriptor */
 }
@@ -3431,7 +3475,7 @@ set_primary_user_owner(PSECURITY_DESCRIPTOR psd)
  * disposition FILE_DISPOSITION_SET_OWNER.
  */
 NTSTATUS
-nt_create_file(OUT HANDLE *file_handle, const wchar_t *filename,
+nt_create_file(DR_PARAM_OUT HANDLE *file_handle, const wchar_t *filename,
                HANDLE dir_handle OPTIONAL, size_t alloc_size, ACCESS_MASK rights,
                uint attributes, uint sharing, uint create_disposition,
                uint create_options)
@@ -3470,7 +3514,7 @@ nt_create_file(OUT HANDLE *file_handle, const wchar_t *filename,
 }
 
 /* For ordinary use of NtCreateFile */
-/* FIXME : can't simultaneously have GENERIC_READ, GENERIC_WRITE and SYNCH_IO
+/* XXX : can't simultaneously have GENERIC_READ, GENERIC_WRITE and SYNCH_IO
  * get invalid parameter error, but any two succeeds, makes sense because
  * <speculation> SYNCH_IO tells the io system to keep track of the
  * current file postion which should start at 0 for read and end of file for
@@ -3487,7 +3531,7 @@ create_file(PCWSTR filename, bool is_dir, ACCESS_MASK rights, uint sharing,
                       FILE_GENERIC_WRITE | FILE_GENERIC_EXECUTE;)
     DEBUG_DECLARE(static const uint dir_access_allow = READ_CONTROL | 0;)
 
-    /* FIXME : only support these possibilities for access mask for now
+    /* XXX : only support these possibilities for access mask for now
      * should be all we need unless we decide to export more functionality
      * from os_open/write/read */
     ASSERT((synch &&
@@ -3502,7 +3546,7 @@ create_file(PCWSTR filename, bool is_dir, ACCESS_MASK rights, uint sharing,
                           * there is a F_ATTRIB_DIR as well */
                          FILE_ATTRIBUTE_NORMAL, sharing, create_disposition,
                          (synch ? FILE_SYNCHRONOUS_IO_NONALERT : 0) |
-                             /* FIXME: MSDN instructs to use FILE_FLAG_BACKUP_SEMANTICS
+                             /* XXX: MSDN instructs to use FILE_FLAG_BACKUP_SEMANTICS
                               * for opening a dir handle but we don't seem to need it */
                              (is_dir ? FILE_DIRECTORY_FILE | FILE_OPEN_FOR_BACKUP_INTENT
                                      : FILE_NON_DIRECTORY_FILE));
@@ -3514,8 +3558,8 @@ create_file(PCWSTR filename, bool is_dir, ACCESS_MASK rights, uint sharing,
 
 #if !defined(NOT_DYNAMORIO_CORE_PROPER) && !defined(NOT_DYNAMORIO_CORE)
 NTSTATUS
-nt_open_file(HANDLE *handle OUT, PCWSTR filename, ACCESS_MASK rights, uint sharing,
-             uint options)
+nt_open_file(HANDLE *handle DR_PARAM_OUT, PCWSTR filename, ACCESS_MASK rights,
+             uint sharing, uint options)
 {
     NTSTATUS res;
     OBJECT_ATTRIBUTES oa;
@@ -3557,7 +3601,7 @@ nt_delete_file(PCWSTR nt_filename)
                               * than its target, and avoid other reparse code.
                               * Otherwise the FILE_DELETE_ON_CLOSE would cause
                               * us to delete the target of a symlink!
-                              * FIXME: fully test this: case 10067
+                              * XXX: fully test this: case 10067
                               */
                              | FILE_OPEN_REPARSE_POINT);
     if (!NT_SUCCESS(res))
@@ -3576,15 +3620,17 @@ nt_flush_file_buffers(HANDLE file_handle)
 {
     IO_STATUS_BLOCK ret;
 
-    GET_NTDLL(NtFlushBuffersFile,
-              (IN HANDLE FileHandle, OUT PIO_STATUS_BLOCK IoStatusBlock));
+    GET_NTDLL(
+        NtFlushBuffersFile,
+        (DR_PARAM_IN HANDLE FileHandle, DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock));
 
     return NtFlushBuffersFile(file_handle, &ret);
 }
 
 bool
 read_file(HANDLE file_handle, void *buffer, uint num_bytes_to_read,
-          IN uint64 *file_byte_offset OPTIONAL, OUT size_t *num_bytes_read)
+          DR_PARAM_IN uint64 *file_byte_offset OPTIONAL,
+          DR_PARAM_OUT size_t *num_bytes_read)
 {
     NTSTATUS res;
     IO_STATUS_BLOCK ret = { 0 };
@@ -3608,7 +3654,7 @@ read_file(HANDLE file_handle, void *buffer, uint num_bytes_to_read,
 
 bool
 write_file(HANDLE file_handle, const void *buffer, uint num_bytes_to_write,
-           OPTIONAL uint64 *file_byte_offset, OUT size_t *num_bytes_written)
+           OPTIONAL uint64 *file_byte_offset, DR_PARAM_OUT size_t *num_bytes_written)
 {
     NTSTATUS res;
     IO_STATUS_BLOCK ret = { 0 };
@@ -3644,13 +3690,14 @@ create_iocompletion()
     HANDLE hiocompletion;
 
     GET_NTDLL(NtCreateIoCompletion,
-              (OUT PHANDLE IoCompletionHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes,
-               IN ULONG NumberOfConcurrentThreads));
+              (DR_PARAM_OUT PHANDLE IoCompletionHandle,
+               DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+               DR_PARAM_IN ULONG NumberOfConcurrentThreads));
 
     res = NtCreateIoCompletion(&hiocompletion, EVENT_ALL_ACCESS /* 0x1f0003 */,
                                NULL /* no name */,
-                               0 /* FIXME: 0 observed, shouldn't it be 1? */);
+                               0 /* XXX: 0 observed, shouldn't it be 1? */);
 
     if (!NT_SUCCESS(res)) {
         NTPRINT("Error 0x%x in create IoCompletion \n", res);
@@ -3684,11 +3731,11 @@ open_pipe(PCWSTR pipename, HANDLE hsync)
                     FILE_OPEN, false);
     if (h == INVALID_FILE)
         return NULL;
-    /* FIXME: call nt_set_file_info */
+    /* XXX: call nt_set_file_info */
     res = NT_SYSCALL(SetInformationFile, h, &iob, &pipeinfo, sizeof(pipeinfo),
                      FilePipeInformation);
     if (!NT_SUCCESS(res)) {
-        /* FIXME: get __FUNCTION__ working for windows */
+        /* XXX: get __FUNCTION__ working for windows */
         NTPRINT("Error 0x%x in %s:%d\n", res, __FILE__, __LINE__);
         return NULL;
     }
@@ -3697,10 +3744,10 @@ open_pipe(PCWSTR pipename, HANDLE hsync)
        then we'd skip this step, (yet we fail with FILE_SYNCHRONOUS_IO_NONALERT) */
 
     /* set FileCompletionInformation just like RegisterSource does
-       FIXME: The problem is that the IoCompletion that is used here is not created
+       XXX: The problem is that the IoCompletion that is used here is not created
        by RegisterSource and instead an earlier one is used.
 
-       FIXME: There is a NtCreateEvent call, but that is what should go in
+       XXX: There is a NtCreateEvent call, but that is what should go in
        NtFsControlFile calls, and I can't match how that handle gets used either.
     */
     if (hsync) {
@@ -3708,11 +3755,11 @@ open_pipe(PCWSTR pipename, HANDLE hsync)
         completioninfo.IoCompletionHandle = hsync;
         completioninfo.CompletionKey = 0xffff0000; /* observed key */
 
-        /* FIXME: call nt_set_file_info */
+        /* XXX: call nt_set_file_info */
         res = NT_SYSCALL(SetInformationFile, h, &iob, &completioninfo,
                          sizeof(completioninfo), FileCompletionInformation);
         if (!NT_SUCCESS(res)) {
-            /* FIXME: get __FUNCTION__ working for windows */
+            /* XXX: get __FUNCTION__ working for windows */
             NTPRINT("Error 0x%x in %s:%d\n", res, __FILE__, __LINE__);
             return NULL;
         }
@@ -3765,11 +3812,11 @@ nt_messagebox(const wchar_t *msg, const wchar_t *title)
     UNICODE_STRING m, t;
     NTSTATUS res;
     GET_NTDLL(NtRaiseHardError,
-              (IN NTSTATUS ErrorStatus, IN ULONG NumberOfArguments,
-               /* FIXME: ReactOS claims this is a PUNICODE_STRING */
-               IN ULONG UnicodeStringArgumentsMask, IN PVOID Arguments,
-               IN ULONG MessageBoxType, /* HARDERROR_RESPONSE_OPTION */
-               OUT PULONG MessageBoxResult));
+              (DR_PARAM_IN NTSTATUS ErrorStatus, DR_PARAM_IN ULONG NumberOfArguments,
+               /* XXX: ReactOS claims this is a PUNICODE_STRING */
+               DR_PARAM_IN ULONG UnicodeStringArgumentsMask, DR_PARAM_IN PVOID Arguments,
+               DR_PARAM_IN ULONG MessageBoxType, /* HARDERROR_RESPONSE_OPTION */
+               DR_PARAM_OUT PULONG MessageBoxResult));
 
     /* the 0xfff... is only for XP, win2k has three element args array, its
      * function is unknown (doesn't seem to matter what is there) */
@@ -3805,8 +3852,8 @@ nt_raise_exception(EXCEPTION_RECORD *pexcrec, CONTEXT *pcontext)
 {
     NTSTATUS res;
     GET_NTDLL(NtRaiseException,
-              (IN PEXCEPTION_RECORD ExceptionRecord, IN PCONTEXT Context,
-               IN BOOLEAN SearchFrames));
+              (DR_PARAM_IN PEXCEPTION_RECORD ExceptionRecord,
+               DR_PARAM_IN PCONTEXT Context, DR_PARAM_IN BOOLEAN SearchFrames));
 
     res = NtRaiseException(pexcrec, pcontext, true);
 
@@ -3823,9 +3870,9 @@ nt_create_event(EVENT_TYPE event_type)
     HANDLE hevent;
 
     GET_NTDLL(NtCreateEvent,
-              (OUT PHANDLE EventHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes, IN EVENT_TYPE EventType,
-               IN BOOLEAN InitialState));
+              (DR_PARAM_OUT PHANDLE EventHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+               DR_PARAM_IN EVENT_TYPE EventType, DR_PARAM_IN BOOLEAN InitialState));
 
     res = NtCreateEvent(&hevent, EVENT_ALL_ACCESS, NULL /* no name */, event_type,
                         0 /* start non-signaled */);
@@ -3853,8 +3900,8 @@ nt_wait_event_with_timeout(HANDLE hevent, PLARGE_INTEGER timeout)
      * avoid a double takeover on a race between intercept_new_thread() and
      * os_take_over_all_unknown_threads().
      */
-    GET_RAW_SYSCALL(WaitForSingleObject, IN HANDLE ObjectHandle, IN BOOLEAN Alertable,
-                    IN PLARGE_INTEGER TimeOut);
+    GET_RAW_SYSCALL(WaitForSingleObject, DR_PARAM_IN HANDLE ObjectHandle,
+                    DR_PARAM_IN BOOLEAN Alertable, DR_PARAM_IN PLARGE_INTEGER TimeOut);
     res = NT_SYSCALL(WaitForSingleObject, hevent, false /* not alertable */, timeout);
     if (!NT_SUCCESS(res))
         return WAIT_ERROR;
@@ -3866,7 +3913,9 @@ nt_wait_event_with_timeout(HANDLE hevent, PLARGE_INTEGER timeout)
 void
 nt_set_event(HANDLE hevent)
 {
-    GET_NTDLL(NtSetEvent, (IN HANDLE EventHandle, OUT PLONG PreviousState OPTIONAL));
+    GET_NTDLL(
+        NtSetEvent,
+        (DR_PARAM_IN HANDLE EventHandle, DR_PARAM_OUT PLONG PreviousState OPTIONAL));
     NTSTATUS res;
 
     res = NtSetEvent(hevent, NULL /* no previous */);
@@ -3891,7 +3940,7 @@ nt_set_event(HANDLE hevent)
 void
 nt_clear_event(HANDLE hevent)
 {
-    GET_NTDLL(NtClearEvent, (IN HANDLE EventHandle));
+    GET_NTDLL(NtClearEvent, (DR_PARAM_IN HANDLE EventHandle));
     NTSTATUS res;
 
     res = NtClearEvent(hevent);
@@ -3906,8 +3955,8 @@ void
 nt_signal_and_wait(HANDLE hevent_to_signal, HANDLE hevent_to_wait)
 {
     GET_NTDLL(NtSignalAndWaitForSingleObject,
-              (IN HANDLE ObjectToSignal, IN HANDLE WaitableObject, IN BOOLEAN Alertable,
-               IN PLARGE_INTEGER Time OPTIONAL));
+              (DR_PARAM_IN HANDLE ObjectToSignal, DR_PARAM_IN HANDLE WaitableObject,
+               DR_PARAM_IN BOOLEAN Alertable, DR_PARAM_IN PLARGE_INTEGER Time OPTIONAL));
     NTSTATUS res;
 
     res =
@@ -3924,8 +3973,8 @@ void
 nt_query_performance_counter(PLARGE_INTEGER counter, PLARGE_INTEGER frequency)
 {
     GET_NTDLL(NtQueryPerformanceCounter,
-              (OUT PLARGE_INTEGER PerformanceCount,
-               OUT PLARGE_INTEGER PerformanceFrequency OPTIONAL));
+              (DR_PARAM_OUT PLARGE_INTEGER PerformanceCount,
+               DR_PARAM_OUT PLARGE_INTEGER PerformanceFrequency OPTIONAL));
     NTSTATUS res;
     res = NtQueryPerformanceCounter(counter, frequency);
 #if VERBOSE
@@ -3977,7 +4026,7 @@ nt_pipe_transceive(HANDLE hpipe, void *input, uint input_size, void *output,
     /* NOTE use an event => asynch IO, if event caller will be notified
      * that routine finishes by signaling the event */
 
-    /* FIXME shared utility for this style of computation,
+    /* XXX shared utility for this style of computation,
      * is used in several places in os.c */
     liDueTime.QuadPart = -((int)timeout_ms * TIMER_UNITS_PER_MILLISECOND);
 
@@ -4007,7 +4056,8 @@ nt_pipe_transceive(HANDLE hpipe, void *input, uint input_size, void *output,
                  * asynch IO though this appears to work. */
                 /* pipe == file */
                 GET_NTDLL(NtCancelIoFile,
-                          (IN HANDLE FileHandle, OUT PIO_STATUS_BLOCK IoStatusBlock));
+                          (DR_PARAM_IN HANDLE FileHandle,
+                           DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock));
                 IO_STATUS_BLOCK cancel_iob;
                 NTLOG(GLOBAL, LOG_NT, 1, "pipe transceive timed out\n");
                 NTLOG(THREAD_GET, LOG_NT, 1, "pipe transceive timed out\n");
@@ -4062,10 +4112,10 @@ nt_pipe_transceive(HANDLE hpipe, void *input, uint input_size, void *output,
 
 #ifdef PURE_NTDLL
 
-/* FIXME: The following should be pure ntdll.dll replacements of kernel32.dll */
+/* XXX: The following should be pure ntdll.dll replacements of kernel32.dll */
 
-/* FIXME: Currently kernel32 counterparts are used */
-/* FIXME: Impersonation needs to be handled */
+/* XXX: Currently kernel32 counterparts are used */
+/* XXX: Impersonation needs to be handled */
 
 typedef struct _THREAD_IMPERSONATION_INFORMATION {
     HANDLE ThreadImpersonationToken;
@@ -4119,11 +4169,13 @@ nt_create_profile(HANDLE process_handle, void *start, uint size, uint *buffer,
     HANDLE prof_handle;
 
     GET_NTDLL(NtCreateProfile,
-              (OUT PHANDLE ProfileHandle, IN HANDLE ProcessHandle, IN PVOID Base,
-               IN ULONG Size, IN ULONG BucketShift, IN PULONG Buffer,
-               IN ULONG BufferLength, IN KPROFILE_SOURCE Source, IN ULONG ProcessorMask));
+              (DR_PARAM_OUT PHANDLE ProfileHandle, DR_PARAM_IN HANDLE ProcessHandle,
+               DR_PARAM_IN PVOID Base, DR_PARAM_IN ULONG Size,
+               DR_PARAM_IN ULONG BucketShift, DR_PARAM_IN PULONG Buffer,
+               DR_PARAM_IN ULONG BufferLength, DR_PARAM_IN KPROFILE_SOURCE Source,
+               DR_PARAM_IN ULONG ProcessorMask));
 
-    /* there are restrictions on shift, check FIXME */
+    /* there are restrictions on shift, check XXX */
 
     res = NtCreateProfile(&prof_handle, process_handle, start, size, shift,
                           (ULONG *)buffer, buffer_size, ProfileTime, 0);
@@ -4138,7 +4190,8 @@ nt_set_profile_interval(uint nanoseconds)
 {
     NTSTATUS res;
 
-    GET_NTDLL(NtSetIntervalProfile, (IN ULONG Interval, IN KPROFILE_SOURCE Source));
+    GET_NTDLL(NtSetIntervalProfile,
+              (DR_PARAM_IN ULONG Interval, DR_PARAM_IN KPROFILE_SOURCE Source));
 
     res = NtSetIntervalProfile(nanoseconds, ProfileTime);
 
@@ -4151,7 +4204,8 @@ nt_query_profile_interval()
     NTSTATUS res;
     ULONG interval;
 
-    GET_NTDLL(NtQueryIntervalProfile, (IN KPROFILE_SOURCE Source, OUT PULONG Interval));
+    GET_NTDLL(NtQueryIntervalProfile,
+              (DR_PARAM_IN KPROFILE_SOURCE Source, DR_PARAM_OUT PULONG Interval));
 
     res = NtQueryIntervalProfile(ProfileTime, &interval);
 
@@ -4165,7 +4219,7 @@ nt_start_profile(HANDLE profile_handle)
 {
     NTSTATUS res;
 
-    GET_NTDLL(NtStartProfile, (IN HANDLE ProfileHandle));
+    GET_NTDLL(NtStartProfile, (DR_PARAM_IN HANDLE ProfileHandle));
 
     res = NtStartProfile(profile_handle);
 
@@ -4177,7 +4231,7 @@ nt_stop_profile(HANDLE profile_handle)
 {
     NTSTATUS res;
 
-    GET_NTDLL(NtStopProfile, (IN HANDLE ProfileHandle));
+    GET_NTDLL(NtStopProfile, (DR_PARAM_IN HANDLE ProfileHandle));
 
     res = NtStopProfile(profile_handle);
 
@@ -4214,7 +4268,8 @@ static int
 inform_csrss(HANDLE hProcess, HANDLE hthread, process_id_t pid, thread_id_t tid)
 {
     GET_NTDLL(CsrClientCallServer,
-              (IN OUT PVOID Message, IN PVOID, IN ULONG Opcode, IN ULONG Size));
+              (DR_PARAM_INOUT PVOID Message, DR_PARAM_IN PVOID, DR_PARAM_IN ULONG Opcode,
+               DR_PARAM_IN ULONG Size));
     /* We pass a layered message with two headers to csrss.
      * However, the two headers, PORT_MESSAGE and CSRSS_MESSAGE, are OUT values,
      * not IN at all.  CsrClientCallServer fills in the first 4 fields of
@@ -4296,14 +4351,18 @@ create_process_parameters(HANDLE hProcess, PEB *peb, UNICODE_STRING *imagefile,
     SIZE_T n;
     void *p;
     GET_NTDLL(RtlCreateProcessParameters,
-              (OUT PRTL_USER_PROCESS_PARAMETERS * ProcParams,
-               IN PUNICODE_STRING ImageFile, IN PUNICODE_STRING DllPath OPTIONAL,
-               IN PUNICODE_STRING CurrentDirectory OPTIONAL,
-               IN PUNICODE_STRING CommandLine OPTIONAL, IN ULONG CreationFlags,
-               IN PUNICODE_STRING WindowTitle OPTIONAL,
-               IN PUNICODE_STRING Desktop OPTIONAL, IN PUNICODE_STRING Reserved OPTIONAL,
-               IN PUNICODE_STRING Reserved2 OPTIONAL));
-    GET_NTDLL(RtlDestroyProcessParameters, (IN PRTL_USER_PROCESS_PARAMETERS ProcParams));
+              (DR_PARAM_OUT PRTL_USER_PROCESS_PARAMETERS * ProcParams,
+               DR_PARAM_IN PUNICODE_STRING ImageFile,
+               DR_PARAM_IN PUNICODE_STRING DllPath OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING CurrentDirectory OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING CommandLine OPTIONAL,
+               DR_PARAM_IN ULONG CreationFlags,
+               DR_PARAM_IN PUNICODE_STRING WindowTitle OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING Desktop OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING Reserved OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING Reserved2 OPTIONAL));
+    GET_NTDLL(RtlDestroyProcessParameters,
+              (DR_PARAM_IN PRTL_USER_PROCESS_PARAMETERS ProcParams));
 
     RtlCreateProcessParameters(&pp, imagefile, 0, 0, cmdline, 0, 0, 0, 0, 0);
     pp->Environment = copy_environment(hProcess);
@@ -4325,7 +4384,7 @@ create_process_parameters(HANDLE hProcess, PEB *peb, UNICODE_STRING *imagefile,
     return 1;
 }
 
-/* avoid needing x86_code.c from x86.asm from get_own_context_helper() */
+/* avoid needing asm_aux.c from x86.asm from get_own_context_helper() */
 #if !defined(NOT_DYNAMORIO_CORE) && !defined(NOT_DYNAMORIO_CORE_PROPER)
 /* Executable name must be in kernel object name form
  * (e.g., \SystemRoot\System32\notepad.exe, or \??\c:\foo\bar.exe)
@@ -4348,13 +4407,16 @@ create_process(wchar_t *exe, wchar_t *cmdline)
     thread_id_t tid;
     PROCESS_BASIC_INFORMATION pbi;
 
-    GET_NTDLL(NtCreateProcess,
-              (OUT PHANDLE ProcessHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes, IN HANDLE InheritFromProcessHandle,
-               IN BOOLEAN InheritHandles, IN HANDLE SectionHandle OPTIONAL,
-               IN HANDLE DebugPort OPTIONAL, IN HANDLE ExceptionPort OPTIONAL));
-    GET_NTDLL(NtTerminateProcess,
-              (IN HANDLE ProcessHandle OPTIONAL, IN NTSTATUS ExitStatus));
+    GET_NTDLL(
+        NtCreateProcess,
+        (DR_PARAM_OUT PHANDLE ProcessHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+         DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+         DR_PARAM_IN HANDLE InheritFromProcessHandle, DR_PARAM_IN BOOLEAN InheritHandles,
+         DR_PARAM_IN HANDLE SectionHandle OPTIONAL, DR_PARAM_IN HANDLE DebugPort OPTIONAL,
+         DR_PARAM_IN HANDLE ExceptionPort OPTIONAL));
+    GET_NTDLL(
+        NtTerminateProcess,
+        (DR_PARAM_IN HANDLE ProcessHandle OPTIONAL, DR_PARAM_IN NTSTATUS ExitStatus));
 
     NTPRINT("create_process starting\n");
     if (!NT_SUCCESS(wchar_to_unicode(&uexe, exe)))
@@ -4389,9 +4451,9 @@ create_process(wchar_t *exe, wchar_t *cmdline)
     close_handle(hSection);
     NTPRINT("create_process: created section and process\n");
 
-    /* FIXME : if thread returns from its EntryPoint function will crash because
+    /* XXX : if thread returns from its EntryPoint function will crash because
      * our_create_thread skips the kernel32 ThreadStartThunk */
-    /* FIXME : need to know whether target process is 32bit or 64bit, for now
+    /* XXX : need to know whether target process is 32bit or 64bit, for now
      * assume 32bit. */
     hthread = our_create_thread(hProcess, false, sii.EntryPoint, NULL, NULL, 0,
                                 sii.StackReserve, sii.StackCommit, TRUE, &tid);
@@ -4446,7 +4508,7 @@ creation_error:
  * this routine must also kill themselves as opposed to returning from their
  * start routines (we skip the kernel32 ThreadStartThunk since we can't
  * programatically get its address) and no top-level exception handler is set up
- * (again the kernel32 StartThunk does that). FIXME on Vista the StartThunk equivalent
+ * (again the kernel32 StartThunk does that). XXX on Vista the StartThunk equivalent
  * ntdll!RtlUserThreadStart is exported so we could target it on that platform.
  */
 /* If arg_buf != NULL then arg_buf_size bytes are copied from arg_buf to the new thread's
@@ -4468,17 +4530,19 @@ create_thread_common(HANDLE hProcess, bool target_64bit, void *start_addr, void 
     void *thread_arg = arg;
     ptr_uint_t final_stack = 0;
     NTSTATUS res;
-    GET_RAW_SYSCALL(CreateThread, OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess,
-                    IN POBJECT_ATTRIBUTES ObjectAttributes, IN HANDLE ProcessHandle,
-                    OUT PCLIENT_ID ClientId, IN PCONTEXT ThreadContext,
-                    IN PUSER_STACK UserStack, IN BOOLEAN CreateSuspended);
+    GET_RAW_SYSCALL(CreateThread, DR_PARAM_OUT PHANDLE ThreadHandle,
+                    DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                    DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+                    DR_PARAM_IN HANDLE ProcessHandle, DR_PARAM_OUT PCLIENT_ID ClientId,
+                    DR_PARAM_IN PCONTEXT ThreadContext, DR_PARAM_IN PUSER_STACK UserStack,
+                    DR_PARAM_IN BOOLEAN CreateSuspended);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
     /* set the context: initialize with our own
      * We need CONTEXT_CONTROL and CONTEXT_INTEGER for setting the state here.  Also,
      * on 2k3 (but not XP) we appear to need CONTEXT_SEGMENTS (xref PR 269230) as well.
-     * FIXME - on 64-bit CONTEXT_FULL includes CONTEXT_FLOATING_POINT (though not
+     * XXX - on 64-bit CONTEXT_FULL includes CONTEXT_FLOATING_POINT (though not
      * CONTEXT_SEGMENTS) so might be nice to grab that as well once PR 266070 is
      * implemented. */
     context->ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER | CONTEXT_SEGMENTS;
@@ -4557,12 +4621,15 @@ our_create_thread_ex(HANDLE hProcess, bool target_64bit, void *start_addr, void 
     NTSTATUS res;
     /* NtCreateThreadEx doesn't exist prior to Vista. */
     ASSERT(syscalls[SYS_CreateThreadEx] != SYSCALL_NOT_PRESENT);
-    GET_RAW_SYSCALL(CreateThreadEx, OUT PHANDLE ThreadHandle,
-                    IN ACCESS_MASK DesiredAccess, IN POBJECT_ATTRIBUTES ObjectAttributes,
-                    IN HANDLE ProcessHandle, IN LPTHREAD_START_ROUTINE Win32StartAddress,
-                    IN LPVOID StartParameter, IN BOOL CreateSuspended,
-                    IN uint StackZeroBits, IN SIZE_T StackCommitSize,
-                    IN SIZE_T StackReserveSize, INOUT create_thread_info_t * thread_info);
+    GET_RAW_SYSCALL(CreateThreadEx, DR_PARAM_OUT PHANDLE ThreadHandle,
+                    DR_PARAM_IN ACCESS_MASK DesiredAccess,
+                    DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes,
+                    DR_PARAM_IN HANDLE ProcessHandle,
+                    DR_PARAM_IN LPTHREAD_START_ROUTINE Win32StartAddress,
+                    DR_PARAM_IN LPVOID StartParameter, DR_PARAM_IN BOOL CreateSuspended,
+                    DR_PARAM_IN uint StackZeroBits, DR_PARAM_IN SIZE_T StackCommitSize,
+                    DR_PARAM_IN SIZE_T StackReserveSize,
+                    DR_PARAM_INOUT create_thread_info_t * thread_info);
 
     InitializeObjectAttributes(&oa, NULL, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
@@ -4743,7 +4810,7 @@ our_create_thread_have_stack(HANDLE hProcess, bool target_64bit, void *start_add
  * way). Another mystery is that LoadLibraryExW also goes to the trouble of
  * building a UNICODE_STRING version of PathToFile, but then doesn't appear to
  * use it, perhaps it is for an unusual path through the function.
- * FIXME : understand behavior more.
+ * XXX : understand behavior more.
  */
 /* returns NULL on failure */
 module_handle_t
@@ -4754,8 +4821,9 @@ load_library(wchar_t *lib_name)
     NTSTATUS res;
     ULONG flags = 0;
     GET_NTDLL(LdrLoadDll,
-              (IN PCWSTR PathToFile OPTIONAL, IN PULONG Flags OPTIONAL,
-               IN PUNICODE_STRING ModuleFileName, OUT PHANDLE ModuleHandle));
+              (DR_PARAM_IN PCWSTR PathToFile OPTIONAL, DR_PARAM_IN PULONG Flags OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING ModuleFileName,
+               DR_PARAM_OUT PHANDLE ModuleHandle));
 
     /* we CANNOT be holding any DR locks here, since we are going to
      * execute app code (we call LdrLoadDll) that may grab app locks
@@ -4776,7 +4844,7 @@ bool
 free_library(module_handle_t lib)
 {
     NTSTATUS res;
-    GET_NTDLL(LdrUnloadDll, (IN HANDLE ModuleHandle));
+    GET_NTDLL(LdrUnloadDll, (DR_PARAM_IN HANDLE ModuleHandle));
     /* we CANNOT be holding any DR locks here, since we are going to
      * execute app code (we call LdrLoadDll) that may grab app locks
      */
@@ -4785,7 +4853,7 @@ free_library(module_handle_t lib)
     return NT_SUCCESS(res);
 }
 
-/* FIXME : the following function (get_module_handle)
+/* XXX : the following function (get_module_handle)
  * should really be implemented in module.c rather than as wrappers to the
  * undocumented ntdll ldr routines.  In particular, LdrGetDllHandle does
  * allocate memory on the app's heap, so this is not fully transparent!
@@ -4807,8 +4875,9 @@ get_module_handle(const wchar_t *lib_name)
      * the load count which was my first guess). */
 #define LDR_GET_DLL_HANDLE_ARG1 ((PCWSTR)PTR_UINT_1)
     GET_NTDLL(LdrGetDllHandle,
-              (IN PCWSTR PathToFile OPTIONAL, IN ULONG Unused OPTIONAL,
-               IN PUNICODE_STRING ModuleFileName, OUT PHANDLE ModuleHandle));
+              (DR_PARAM_IN PCWSTR PathToFile OPTIONAL, DR_PARAM_IN ULONG Unused OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING ModuleFileName,
+               DR_PARAM_OUT PHANDLE ModuleHandle));
 
     /* we CANNOT be holding any DR locks here, since we are going to
      * execute app code (we call LdrLoadDll) that may grab app locks
@@ -4827,16 +4896,18 @@ get_module_handle(const wchar_t *lib_name)
  * sufficient for sharing only between processes of one user.
  */
 NTSTATUS
-nt_create_object_directory(OUT HANDLE *directory /* OUT */, PCWSTR object_directory_name,
-                           bool permanent_directory, PSECURITY_DESCRIPTOR dacl)
+nt_create_object_directory(DR_PARAM_OUT HANDLE *directory /* OUT */,
+                           PCWSTR object_directory_name, bool permanent_directory,
+                           PSECURITY_DESCRIPTOR dacl)
 {
     NTSTATUS res;
     UNICODE_STRING directory_name;
     OBJECT_ATTRIBUTES directory_attributes = { 0 };
 
     GET_NTDLL(NtCreateDirectoryObject,
-              (OUT PHANDLE DirectoryHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes));
+              (DR_PARAM_OUT PHANDLE DirectoryHandle,
+               DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes));
 
     res = wchar_to_unicode(&directory_name, object_directory_name);
     if (!NT_SUCCESS(res)) {
@@ -4886,7 +4957,7 @@ nt_initialize_shared_directory(HANDLE *shared_directory /* OUT */, bool permanen
     HANDLE basedh = INVALID_HANDLE_VALUE;
     HANDLE dh = INVALID_HANDLE_VALUE;
 
-    /* FIXME: TOFILE: need to create at least some reasonable DACL,
+    /* XXX: TOFILE: need to create at least some reasonable DACL,
      * note that NULL allows only creator to use, so it is not as bad
      * as Everyone, but then prevents lower privileged users from even
      * using this Directory
@@ -4912,7 +4983,7 @@ nt_initialize_shared_directory(HANDLE *shared_directory /* OUT */, bool permanen
     dacl = NULL;
 
     /* Create shared DLL object directory '\Determina\SharedCache' */
-    /* FIXME: we will need directories for specific SIDs, and further
+    /* XXX: we will need directories for specific SIDs, and further
      * restrict which processes can read what.  See
      * ASLR_SHARED_INITIALIZE.  Even this shared cache security
      * settings would need to be strengthened.
@@ -4924,7 +4995,7 @@ nt_initialize_shared_directory(HANDLE *shared_directory /* OUT */, bool permanen
         return res;
     }
 
-    /* FIXME: note the dual use of the permanent flag here - in
+    /* XXX: note the dual use of the permanent flag here - in
      * addition to controlling the OBJ_PERMANENT object creation
      * attribute, for INTERNAL uses when we don't have a proper
      * initializer we simulate permanence by keeping a handle open in
@@ -4955,8 +5026,9 @@ nt_open_object_directory(HANDLE *shared_directory /* OUT */, PCWSTR object_direc
     HANDLE dh = INVALID_HANDLE_VALUE;
 
     GET_NTDLL(NtOpenDirectoryObject,
-              (OUT PHANDLE DirectoryHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes));
+              (DR_PARAM_OUT PHANDLE DirectoryHandle,
+               DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes));
 
     res = wchar_to_unicode(&directory_name, object_directory_name);
     if (!NT_SUCCESS(res)) {
@@ -4981,7 +5053,7 @@ nt_open_object_directory(HANDLE *shared_directory /* OUT */, PCWSTR object_direc
         NTPRINT("nt_open_object_directory: failed to open res: %x\n", res);
         return res;
     }
-    /* FIXME: we could retry if we can't get higher permissions */
+    /* XXX: we could retry if we can't get higher permissions */
 
     *shared_directory = dh;
     return res;
@@ -4999,8 +5071,10 @@ nt_close_object_directory(HANDLE hobjdir)
  * argument setting max bytes to copy
  */
 NTSTATUS
-nt_get_symlink_target(IN HANDLE directory_handle, IN PCWSTR symlink_name,
-                      IN OUT UNICODE_STRING *target_name, OUT uint *returned_byte_length)
+nt_get_symlink_target(DR_PARAM_IN HANDLE directory_handle,
+                      DR_PARAM_IN PCWSTR symlink_name,
+                      DR_PARAM_INOUT UNICODE_STRING *target_name,
+                      DR_PARAM_OUT uint *returned_byte_length)
 {
     NTSTATUS res;
     UNICODE_STRING link_unicode_name;
@@ -5008,11 +5082,13 @@ nt_get_symlink_target(IN HANDLE directory_handle, IN PCWSTR symlink_name,
     HANDLE link_handle = INVALID_HANDLE_VALUE;
 
     GET_NTDLL(NtOpenSymbolicLinkObject,
-              (OUT PHANDLE DirectoryHandle, IN ACCESS_MASK DesiredAccess,
-               IN POBJECT_ATTRIBUTES ObjectAttributes));
+              (DR_PARAM_OUT PHANDLE DirectoryHandle,
+               DR_PARAM_IN ACCESS_MASK DesiredAccess,
+               DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes));
     GET_NTDLL(NtQuerySymbolicLinkObject,
-              (IN HANDLE DirectoryHandle, IN OUT PUNICODE_STRING TargetName,
-               OUT PULONG ReturnLength OPTIONAL));
+              (DR_PARAM_IN HANDLE DirectoryHandle,
+               DR_PARAM_INOUT PUNICODE_STRING TargetName,
+               DR_PARAM_OUT PULONG ReturnLength OPTIONAL));
 
     res = wchar_to_unicode(&link_unicode_name, symlink_name);
     if (!NT_SUCCESS(res)) {
@@ -5066,12 +5142,13 @@ nt_get_symlink_target(IN HANDLE directory_handle, IN PCWSTR symlink_name,
 
 /* complete wrapper around NtCreateSection but embeds InitializeObjectAttributes */
 NTSTATUS
-nt_create_section(OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
-                  IN PLARGE_INTEGER SectionSize OPTIONAL, IN ULONG Protect,
-                  IN ULONG section_creation_attributes, IN HANDLE FileHandle,
-                  /* object name attributes */
-                  IN PCWSTR section_name OPTIONAL, IN ULONG object_name_attributes,
-                  IN HANDLE object_directory, IN PSECURITY_DESCRIPTOR dacl)
+nt_create_section(
+    DR_PARAM_OUT PHANDLE SectionHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+    DR_PARAM_IN PLARGE_INTEGER SectionSize OPTIONAL, DR_PARAM_IN ULONG Protect,
+    DR_PARAM_IN ULONG section_creation_attributes, DR_PARAM_IN HANDLE FileHandle,
+    /* object name attributes */
+    DR_PARAM_IN PCWSTR section_name OPTIONAL, DR_PARAM_IN ULONG object_name_attributes,
+    DR_PARAM_IN HANDLE object_directory, DR_PARAM_IN PSECURITY_DESCRIPTOR dacl)
 {
     NTSTATUS res;
     UNICODE_STRING section_name_unicode;
@@ -5100,13 +5177,14 @@ nt_create_section(OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
 /* complete wrapper around NtOpenSection */
 /* note that section_name is required and is case insensitive to
  * support normal Windows case insensitivity of DLL lookup.
- * FIXME: unlikely may need to be changed for POSIX support
+ * XXX: unlikely may need to be changed for POSIX support
  */
 NTSTATUS
-nt_open_section(OUT PHANDLE SectionHandle, IN ACCESS_MASK DesiredAccess,
+nt_open_section(DR_PARAM_OUT PHANDLE SectionHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
                 /* object name attributes */
-                IN PCWSTR section_name, /* required */
-                IN ULONG object_name_attributes, IN HANDLE object_directory)
+                DR_PARAM_IN PCWSTR section_name, /* required */
+                DR_PARAM_IN ULONG object_name_attributes,
+                DR_PARAM_IN HANDLE object_directory)
 {
     NTSTATUS res;
     UNICODE_STRING section_name_unicode;
@@ -5132,13 +5210,13 @@ are_mapped_files_the_same(app_pc addr1, app_pc addr2)
 {
 #    if 0 /* NYI: case 8502 */
 
-    /* FIXME: this doesn't exist on NT4 - make sure we handle
+    /* XXX: this doesn't exist on NT4 - make sure we handle
      * gracefully not finding the target - needs a very explicit
      * d_r_get_proc_address() here.
      */
     GET_NTDLL(ZwAreMappedFilesTheSame, (
-                                        IN PVOID Address1,
-                                        IN PVOID Address2
+                                        DR_PARAM_IN PVOID Address1,
+                                        DR_PARAM_IN PVOID Address2
                                         ));
 #    endif
 
@@ -5176,7 +5254,7 @@ are_mapped_files_the_same(app_pc addr1, app_pc addr2)
 
 /* file_sharing_flags  */
 NTSTATUS
-nt_create_module_file(OUT HANDLE *file_handle, const wchar_t *file_path,
+nt_create_module_file(DR_PARAM_OUT HANDLE *file_handle, const wchar_t *file_path,
                       HANDLE root_directory_handle OPTIONAL,
                       ACCESS_MASK desired_access_rights, uint file_special_attributes,
                       uint file_sharing_flags, uint create_disposition,
@@ -5195,9 +5273,9 @@ nt_create_module_file(OUT HANDLE *file_handle, const wchar_t *file_path,
 /* thin wrapper around ZwQueryInformationFile -
  * see DDK for documented information classes */
 NTSTATUS
-nt_query_file_info(IN HANDLE FileHandle, OUT PVOID FileInformation,
-                   IN ULONG FileInformationLength,
-                   IN FILE_INFORMATION_CLASS FileInformationClass)
+nt_query_file_info(DR_PARAM_IN HANDLE FileHandle, DR_PARAM_OUT PVOID FileInformation,
+                   DR_PARAM_IN ULONG FileInformationLength,
+                   DR_PARAM_IN FILE_INFORMATION_CLASS FileInformationClass)
 {
     NTSTATUS res;
     IO_STATUS_BLOCK iob = { 0, 0 };
@@ -5215,9 +5293,9 @@ nt_query_file_info(IN HANDLE FileHandle, OUT PVOID FileInformation,
  * see DDK for fully documented information classes
  */
 NTSTATUS
-nt_set_file_info(IN HANDLE FileHandle, IN PVOID FileInformation,
-                 IN ULONG FileInformationLength,
-                 IN FILE_INFORMATION_CLASS FileInformationClass)
+nt_set_file_info(DR_PARAM_IN HANDLE FileHandle, DR_PARAM_IN PVOID FileInformation,
+                 DR_PARAM_IN ULONG FileInformationLength,
+                 DR_PARAM_IN FILE_INFORMATION_CLASS FileInformationClass)
 {
     NTSTATUS res;
     IO_STATUS_BLOCK iob = { 0, 0 };
@@ -5237,17 +5315,17 @@ nt_set_file_info(IN HANDLE FileHandle, IN PVOID FileInformation,
  * Note handle can be file, directory, device or volume.
  */
 NTSTATUS
-nt_query_volume_info(IN HANDLE FileHandle, OUT PVOID FsInformation,
-                     IN ULONG FsInformationLength,
-                     IN FS_INFORMATION_CLASS FsInformationClass)
+nt_query_volume_info(DR_PARAM_IN HANDLE FileHandle, DR_PARAM_OUT PVOID FsInformation,
+                     DR_PARAM_IN ULONG FsInformationLength,
+                     DR_PARAM_IN FS_INFORMATION_CLASS FsInformationClass)
 {
     NTSTATUS res;
     IO_STATUS_BLOCK iob = { 0, 0 };
 
     GET_NTDLL(NtQueryVolumeInformationFile,
-              (IN HANDLE FileHandle, OUT PIO_STATUS_BLOCK IoStatusBlock,
-               OUT PVOID FsInformation, IN ULONG Length,
-               IN FS_INFORMATION_CLASS FsInformationClass));
+              (DR_PARAM_IN HANDLE FileHandle, DR_PARAM_OUT PIO_STATUS_BLOCK IoStatusBlock,
+               DR_PARAM_OUT PVOID FsInformation, DR_PARAM_IN ULONG Length,
+               DR_PARAM_IN FS_INFORMATION_CLASS FsInformationClass));
 
     res = NtQueryVolumeInformationFile(FileHandle, &iob, FsInformation,
                                        FsInformationLength, FsInformationClass);
@@ -5268,17 +5346,20 @@ nt_query_volume_info(IN HANDLE FileHandle, OUT PVOID FsInformation,
  * Note handle can be any executive objective: including file, directory
  */
 NTSTATUS
-nt_query_security_object(IN HANDLE Handle, IN SECURITY_INFORMATION RequestedInformation,
-                         OUT PSECURITY_DESCRIPTOR SecurityDescriptor,
-                         IN ULONG SecurityDescriptorLength, OUT PULONG ReturnLength)
+nt_query_security_object(DR_PARAM_IN HANDLE Handle,
+                         DR_PARAM_IN SECURITY_INFORMATION RequestedInformation,
+                         DR_PARAM_OUT PSECURITY_DESCRIPTOR SecurityDescriptor,
+                         DR_PARAM_IN ULONG SecurityDescriptorLength,
+                         DR_PARAM_OUT PULONG ReturnLength)
 {
     NTSTATUS res;
 
     /* note that SecurityDescriptor returned is always PISECURITY_DESCRIPTOR_RELATIVE */
-    GET_NTDLL(NtQuerySecurityObject,
-              (IN HANDLE Handle, IN SECURITY_INFORMATION RequestedInformation,
-               OUT PSECURITY_DESCRIPTOR SecurityDescriptor,
-               IN ULONG SecurityDescriptorLength, OUT PULONG ReturnLength));
+    GET_NTDLL(
+        NtQuerySecurityObject,
+        (DR_PARAM_IN HANDLE Handle, DR_PARAM_IN SECURITY_INFORMATION RequestedInformation,
+         DR_PARAM_OUT PSECURITY_DESCRIPTOR SecurityDescriptor,
+         DR_PARAM_IN ULONG SecurityDescriptorLength, DR_PARAM_OUT PULONG ReturnLength));
     res = NtQuerySecurityObject(Handle, RequestedInformation, SecurityDescriptor,
                                 SecurityDescriptorLength, ReturnLength);
     /* if SecurityDescriptorLength is too small ReturnLength is set to
@@ -5569,11 +5650,13 @@ nt_raw_UnmapViewOfSection(HANDLE process_handle, PVOID base_address)
 }
 #endif /* !NOT_DYNAMORIO_CORE_PROPER && !NOT_DYNAMORIO_CORE */
 
-GET_RAW_SYSCALL(MapViewOfSection, IN HANDLE SectionHandle, IN HANDLE ProcessHandle,
-                IN OUT PVOID *BaseAddress, IN ULONG_PTR ZeroBits, IN SIZE_T CommitSize,
-                IN OUT PLARGE_INTEGER SectionOffset OPTIONAL, IN OUT PSIZE_T ViewSize,
-                IN SECTION_INHERIT InheritDisposition, IN ULONG AllocationType,
-                IN ULONG Protect);
+GET_RAW_SYSCALL(MapViewOfSection, DR_PARAM_IN HANDLE SectionHandle,
+                DR_PARAM_IN HANDLE ProcessHandle, DR_PARAM_INOUT PVOID *BaseAddress,
+                DR_PARAM_IN ULONG_PTR ZeroBits, DR_PARAM_IN SIZE_T CommitSize,
+                DR_PARAM_INOUT PLARGE_INTEGER SectionOffset OPTIONAL,
+                DR_PARAM_INOUT PSIZE_T ViewSize,
+                DR_PARAM_IN SECTION_INHERIT InheritDisposition,
+                DR_PARAM_IN ULONG AllocationType, DR_PARAM_IN ULONG Protect);
 
 GET_RAW_SYSCALL(OpenProcess, PHANDLE process_handle, ACCESS_MASK desired_access,
                 POBJECT_ATTRIBUTES object_attributes, PCLIENT_ID client_id);

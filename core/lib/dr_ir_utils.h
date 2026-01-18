@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _DR_IR_UTILS_H_
-#define _DR_IR_UTILS_H_ 1
+#define _DR_IR_UTILS_H_
 
 /**************************************************
  * CODE TRANSFORMATION UTILITIES
@@ -279,7 +279,7 @@ DR_API
 reg_t
 dr_merge_arith_flags(reg_t cur_xflags, reg_t saved_xflag);
 
-/* FIXME PR 315327: add routines to save, restore and access from C code xmm registers
+/* XXX PR 315327: add routines to save, restore and access from C code xmm registers
  * from our dcontext slots.  Not clear we really need to since we can't do it all
  * that much faster than the client can already with read/write tls field (only one
  * extra load) or (if -thread_private) absolute addresses.
@@ -352,7 +352,7 @@ instrlist_meta_fault_append(instrlist_t *ilist, instr_t *instr);
 
 /* dr_insert_* are used by general DR */
 
-/* FIXME PR 213600: for clean call args that reference memory the
+/* XXX PR 213600: for clean call args that reference memory the
  * client may prefer to receive the fault itself rather than it being treated
  * as an app exception (xref PR 302951).
  */
@@ -700,7 +700,7 @@ void
 dr_insert_cbr_instrumentation_ex(void *drcontext, instrlist_t *ilist, instr_t *instr,
                                  void *callee, opnd_t user_data);
 
-/* FIXME: will never see any ubrs! */
+/* XXX: will never see any ubrs! */
 DR_API
 /**
  * Assumes that \p instr is a direct, near, unconditional branch.
@@ -804,8 +804,10 @@ DR_API
  *
  * Even when #DR_MC_CONTROL is specified, does NOT copy the pc field,
  * except for system call events, when it will point at the
- * post-syscall address, and kernel transfer events, when it will point to the
- * target pc.
+ * post-syscall address; for kernel transfer events, when it will point to the
+ * target pc; and thread exit events, when it will point to the thread's final
+ * (or detach-time) pc (which is the next pc to execute: it was not itself
+ * executed under DR).
  *
  * Returns false if called from the init event or the initial thread's
  * init event; returns true otherwise (cannot distinguish whether the
@@ -887,7 +889,7 @@ DR_API
 bool
 dr_set_mcontext(void *drcontext, dr_mcontext_t *context);
 
-/* FIXME - combine with dr_set_mcontext()?  Implementation wise it's nice to split the
+/* XXX - combine with dr_set_mcontext()?  Implementation wise it's nice to split the
  * two since handling the pc with dr_set_mcontext() would complicate the clean call
  * handling. But perhaps would be nicer from an interface perspective to combine them. */
 DR_API
@@ -1008,8 +1010,9 @@ DR_API
  */
 void
 instrlist_insert_mov_immed_ptrsz(void *drcontext, ptr_int_t val, opnd_t dst,
-                                 instrlist_t *ilist, instr_t *where, instr_t **first OUT,
-                                 instr_t **last OUT);
+                                 instrlist_t *ilist, instr_t *where,
+                                 instr_t **first DR_PARAM_OUT,
+                                 instr_t **last DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1021,8 +1024,8 @@ DR_API
  */
 void
 instrlist_insert_push_immed_ptrsz(void *drcontext, ptr_int_t val, instrlist_t *ilist,
-                                  instr_t *where, instr_t **first OUT,
-                                  instr_t **last OUT);
+                                  instr_t *where, instr_t **first DR_PARAM_OUT,
+                                  instr_t **last DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1043,7 +1046,8 @@ DR_API
 void
 instrlist_insert_mov_instr_addr(void *drcontext, instr_t *src_inst, byte *encode_estimate,
                                 opnd_t dst, instrlist_t *ilist, instr_t *where,
-                                instr_t **first OUT, instr_t **last OUT);
+                                instr_t **first DR_PARAM_OUT,
+                                instr_t **last DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1062,7 +1066,8 @@ DR_API
 void
 instrlist_insert_push_instr_addr(void *drcontext, instr_t *src_inst,
                                  byte *encode_estimate, instrlist_t *ilist,
-                                 instr_t *where, instr_t **first OUT, instr_t **last OUT);
+                                 instr_t *where, instr_t **first DR_PARAM_OUT,
+                                 instr_t **last DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1133,6 +1138,19 @@ DR_API
  */
 int
 dr_insert_it_instrs(void *drcontext, instrlist_t *ilist);
+
+DR_API
+/**
+ * Insert code to get the application value of the thread pointer register
+ * into register \p reg.
+ *
+ * \return whether successful.
+ *
+ * \note RISCV-only
+ */
+bool
+dr_insert_get_app_tls(void *drcontext, instrlist_t *ilist, instr_t *instr,
+                      reg_id_t tls_reg, reg_id_t reg);
 
 DR_API
 /**

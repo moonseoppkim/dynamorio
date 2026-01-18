@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,18 +33,32 @@
 /* utils.h: utilities for cache simulator */
 
 #ifndef _UTILS_H_
-#define _UTILS_H_ 1
+#define _UTILS_H_
 
+#include <stdint.h>
 #include <stdio.h>
 #include <iomanip>
 #include <sstream>
 #include <string>
+#include <vector>
+
+#if defined(_WIN32) || defined(_WIN64) || defined(WINDOWS)
+#    define WIN32_LEAN_AND_MEAN
+#    define UNICODE  // For Windows headers.
+#    define _UNICODE // For C headers.
+#    define NOMINMAX // Avoid windows.h messing up std::min.
+#    include <windows.h>
+#else
+#    include <sys/time.h>
+#endif
 
 namespace dynamorio {
 namespace drmemtrace {
 
 // XXX: DR should export this
 #define INVALID_THREAD_ID 0
+// We avoid collisions with DR's INVALID_PROCESS_ID by using our own name.
+#define INVALID_PID -1
 
 // XXX: perhaps we should use a C++-ish stream approach instead
 // This cannot be named ERROR as that conflicts with Windows headers.
@@ -56,8 +70,10 @@ namespace drmemtrace {
 // XXX i#4399: DR should define a DEBUG-only assert.
 #ifdef DEBUG
 #    define ASSERT(x, msg) DR_ASSERT_MSG(x, msg)
+#    define IF_DEBUG(x) x
 #else
 #    define ASSERT(x, msg) /* Nothing. */
+#    define IF_DEBUG(x)    /* Nothing. */
 #endif
 
 #define BUFFER_SIZE_BYTES(buf) sizeof(buf)
@@ -127,11 +143,11 @@ namespace drmemtrace {
 #endif
 
 static inline int
-compute_log2(int value)
+compute_log2(int64_t value)
 {
     int i;
-    for (i = 0; i < 31; i++) {
-        if (value == 1 << i)
+    for (i = 0; i < 63; i++) {
+        if (value == int64_t(1) << i)
             return i;
     }
     // returns -1 if value is not a power of 2.
@@ -164,6 +180,42 @@ starts_with(const std::string &str, const std::string &with)
     if (pos == std::string::npos)
         return false;
     return pos == 0;
+}
+
+static inline std::vector<std::string>
+split_by(std::string s, const std::string &sep)
+{
+    size_t pos;
+    std::vector<std::string> vec;
+    if (s.empty())
+        return vec;
+    do {
+        pos = s.find(sep);
+        vec.push_back(s.substr(0, pos));
+        s.erase(0, pos + sep.length());
+    } while (pos != std::string::npos);
+    return vec;
+}
+
+// Returns a timestamp with at least microsecond granularity.
+// On UNIX this is an absolute timestamp; but on Windows where we had
+// trouble with the GetSystemTime* functions not being granular enough
+// it's the timestamp counter from the processor.
+// (We avoid dr_get_microseconds() because not all targets link
+// in the DR library.)
+static inline uint64_t
+get_microsecond_timestamp()
+{
+#if defined(_WIN32) || defined(_WIN64) || defined(WINDOWS)
+    uint64_t res;
+    QueryPerformanceCounter((LARGE_INTEGER *)&res);
+    return res;
+#else
+    struct timeval time;
+    if (gettimeofday(&time, nullptr) != 0)
+        return 0;
+    return time.tv_sec * 1000000 + time.tv_usec;
+#endif
 }
 
 } // namespace drmemtrace

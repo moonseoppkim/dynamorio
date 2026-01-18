@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _RAW2TRACE_DIRECTORY_H_
-#define _RAW2TRACE_DIRECTORY_H_ 1
+#define _RAW2TRACE_DIRECTORY_H_
 
 #include <fstream>
 #include <string>
@@ -40,6 +40,7 @@
 
 #include "archive_ostream.h"
 #include "dr_api.h"
+#include "record_file_reader.h"
 
 #if !defined DEFAULT_TRACE_COMPRESSION_TYPE
 #    ifdef HAS_ZIP
@@ -75,18 +76,14 @@ public:
     // is used by default.  Returns "" on success or an error message on failure.
     std::string
     initialize(const std::string &indir, const std::string &outdir,
-               const std::string &compress = DEFAULT_TRACE_COMPRESSION_TYPE);
-    // Use this instead of initialize() to only fill in modfile_bytes, for
-    // constructing a module_mapper_t.  Returns "" on success or an error message on
-    // failure.
-    std::string
-    initialize_module_file(const std::string &module_file_path);
+               const std::string &compress = DEFAULT_TRACE_COMPRESSION_TYPE,
+               const std::string &syscall_template_file = "");
     // Use this instead of initialize() to only read the funcion map file.
     // Returns "" on success or an error message on failure.
     // On success, pushes the parsed entries from the file into "entries".
     std::string
     initialize_funclist_file(const std::string &funclist_file_path,
-                             OUT std::vector<std::vector<std::string>> *entries);
+                             DR_PARAM_OUT std::vector<std::vector<std::string>> *entries);
 
     static std::string
     tracedir_from_rawdir(const std::string &rawdir);
@@ -107,12 +104,11 @@ public:
     std::unordered_map<thread_id_t, std::istream *> in_kfiles_map_;
     std::string kcoredir_;
     std::string kallsymsdir_;
+    std::unique_ptr<dynamorio::drmemtrace::record_reader_t> syscall_template_file_reader_;
 
 private:
     std::string
     trace_suffix();
-    std::string
-    read_module_file(const std::string &modfilename);
     std::string
     open_thread_files();
     std::string
@@ -121,6 +117,8 @@ private:
     open_serial_schedule_file();
     std::string
     open_cpu_schedule_file();
+    std::string
+    open_syscall_template_file(const std::string &syscall_template_file);
 #ifdef BUILD_PT_POST_PROCESSOR
     std::string
     open_kthread_files();

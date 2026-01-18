@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2009 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -300,8 +300,8 @@ event_basic_block(void *drcontext, void *tag, instrlist_t *bb,
     dr_mutex_unlock(as_built_lock);
 
 +     /* insert clean call */
-+     dr_insert_clean_call(drcontext, bb, instrlist_first(bb), clean_call, false, 1,
-+                          OPND_CREATE_INT32(num_instructions));
++     dr_insert_clean_call(drcontext, bb, instrlist_first(bb), (void *)clean_call,
++                          false, 1, OPND_CREATE_INT32(num_instructions));
 +
     return DR_EMIT_DEFAULT;
 }
@@ -1191,7 +1191,7 @@ annotation. The first step is to copy the DynamoRIO souce file
 
 \code
 #ifndef _DYNAMORIO_ANNOTATIONS_H_
-#define _DYNAMORIO_ANNOTATIONS_H_ 1
+#define _DYNAMORIO_ANNOTATIONS_H_
 
 #include "dr_annotations_asm.h"
 

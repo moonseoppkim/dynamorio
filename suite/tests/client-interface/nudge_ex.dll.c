@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -50,6 +50,15 @@ static int cls_idx;
 static bool sent_self;
 
 static process_id_t child_pid;
+
+/* SYS_fork is not defined in recent Linux distributions, which use SYS_clone instead.
+ * To keep the code readable, declare a constant which we know will be defined.
+ */
+#ifdef SYS_fork
+static const int SYS_FORK_VALUE = SYS_fork;
+#else
+static const int SYS_FORK_VALUE = -1; /* Make sure the comparison fails. */
+#endif
 
 typedef struct {
     ptr_int_t saved_param;
@@ -158,7 +167,7 @@ event_post_syscall(void *drcontext, int sysnum)
     per_thread_t *data = (per_thread_t *)drmgr_get_cls_field(drcontext, cls_idx);
     /* XXX i#752: should DR provide a child creation event that gives us the pid? */
 #ifdef UNIX
-    if (sysnum == SYS_fork
+    if (sysnum == SYS_FORK_VALUE
 #    ifdef LINUX
         || (sysnum == SYS_clone && !TEST(CLONE_VM, data->saved_param))
 #    endif
@@ -217,7 +226,7 @@ event_thread_context_exit(void *drcontext, bool thread_exit)
 
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data)
+                  bool translating, DR_PARAM_OUT void **user_data)
 {
     instr_t *instr, *next_instr, *next_next_instr;
     /* Look for 3 nops in parent code to know child is live and avoid flakiness (i#953) */
@@ -259,10 +268,10 @@ dr_init(client_id_t id)
         drmgr_register_cls_field(event_thread_context_init, event_thread_context_exit);
     ASSERT(cls_idx != -1);
     dr_register_nudge_event(event_nudge, id);
-    dr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_filter_syscall_event(event_filter_syscall);
     drmgr_register_pre_syscall_event(event_pre_syscall);
     drmgr_register_post_syscall_event(event_post_syscall);
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     ok = drmgr_register_bb_instrumentation_event(event_bb_analysis, NULL, NULL);
     ASSERT(ok);

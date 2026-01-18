@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * ******************************************************************************/
 
@@ -60,13 +60,14 @@
 #include "drwrap.h"
 #include "drx.h"
 #include "func_trace.h"
+#include "hashtable.h"
 #include "instr_counter.h"
 #include "instru.h"
 #include "named_pipe.h"
 #include "options.h"
 #include "output.h"
 #include "physaddr.h"
-#include "raw2trace.h"
+#include "raw2trace_shared.h"
 #include "reader.h"
 #include "trace_entry.h"
 #include "utils.h"
@@ -81,6 +82,10 @@
 #    include "drpttracer.h"
 #    include "syscall_pt_trace.h"
 #    include "kcore_copy.h"
+#endif
+
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+#    include "drsyscall_record_lib.h"
 #endif
 
 /* Make sure we export function name as the symbol name without mangling. */
@@ -105,7 +110,7 @@ using ::dynamorio::droption::DROPTION_SCOPE_CLIENT;
 
 char logsubdir[MAXIMUM_PATH];
 #ifdef BUILD_PT_TRACER
-char kernel_pt_logsubdir[MAXIMUM_PATH];
+char kernel_trace_logsubdir[MAXIMUM_PATH];
 #endif
 char subdir_prefix[MAXIMUM_PATH]; /* Holds op_subdir_prefix. */
 
@@ -175,17 +180,19 @@ static void *trace_thread_cb_user_data;
 static bool thread_filtering_enabled;
 bool attached_midway;
 
-#ifdef AARCH64
-static bool reported_sg_warning = false;
-#endif
+// We may be able to safely use std::unordered_map as at runtime we only need
+// to do lookups which shouldn't need heap or locks, but to be safe we use
+// the DR hashtable.
+static hashtable_t syscall2args;
 
 static bool
 bbdup_instr_counting_enabled()
 {
     // XXX: with no other options -trace_for_instrs switches to counting mode once tracing
     // is done, so return true. Now that we have a NOP mode this could be changed.
-    return op_trace_after_instrs.get_value() > 0 || op_trace_for_instrs.get_value() > 0 ||
-        op_retrace_every_instrs.get_value() > 0;
+    return get_initial_no_trace_for_instrs_value() > 0 ||
+        get_current_trace_for_instrs_value() > 0 ||
+        get_current_no_trace_for_instrs_value() > 0;
 }
 
 static bool
@@ -197,7 +204,8 @@ bbdup_duplication_enabled()
 // If we have both BBDUP_MODE_TRACE and BBDUP_MODE_L0_FILTER, then L0 filter is active
 // only when mode is BBDUP_MODE_L0_FILTER
 void
-get_L0_filters_enabled(uintptr_t mode, OUT bool *l0i_enabled, OUT bool *l0d_enabled)
+get_L0_filters_enabled(uintptr_t mode, DR_PARAM_OUT bool *l0i_enabled,
+                       DR_PARAM_OUT bool *l0d_enabled)
 {
     if (op_L0_filter_until_instrs.get_value()) {
         if (mode != BBDUP_MODE_L0_FILTER) {
@@ -220,11 +228,30 @@ static char modlist_path[MAXIMUM_PATH];
 static char funclist_path[MAXIMUM_PATH];
 static char encoding_path[MAXIMUM_PATH];
 
+#ifdef BUILD_PT_TRACER
+static char kallsyms_path[MAXIMUM_PATH];
+static char kcore_path[MAXIMUM_PATH];
+#endif
+
+static void
+append_timestamp_and_cpu_marker(per_thread_t *data)
+{
+    BUF_PTR(data->seg_base) += instru->append_timestamp(BUF_PTR(data->seg_base));
+    BUF_PTR(data->seg_base) += instru->append_marker(
+        BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_CPU_ID, instru_t::get_cpu_id());
+}
+
 /* clean_call sends the memory reference info to the simulator */
 static void
 clean_call(void)
 {
     void *drcontext = dr_get_current_drcontext();
+    // Append a timestamp at the end of the buffer to isolate app time from
+    // buffer i/o time.  We do this here instead of inside process_and_output_buffer()
+    // as the timestamp needs to be before thread exit markers or other special
+    // cases.
+    per_thread_t *data = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
+    append_timestamp_and_cpu_marker(data);
     process_and_output_buffer(drcontext, false);
 }
 
@@ -393,14 +420,19 @@ event_app_instruction_case(void *drcontext, void *tag, instrlist_t *bb, instr_t 
 static void
 instrumentation_exit()
 {
-    dr_unregister_filter_syscall_event(event_filter_syscall);
+    drmgr_unregister_filter_syscall_event(event_filter_syscall);
     if (!drmgr_unregister_pre_syscall_event(event_pre_syscall) ||
         !drmgr_unregister_kernel_xfer_event(event_kernel_xfer) ||
         !drmgr_unregister_bb_app2app_event(event_bb_app2app))
         DR_ASSERT(false);
-#ifdef DELAYED_CHECK_INLINED
-    drx_exit();
+#ifdef LINUX
+    // XXX i#7504: Time and timer scaling currently only supports Linux.
+    if (op_scale_timers.get_value() > 1 || op_scale_timeouts.get_value() > 1) {
+        bool ok = drx_unregister_time_scaling();
+        DR_ASSERT(ok);
+    }
 #endif
+    drx_exit();
     drbbdup_status_t res = drbbdup_exit();
     DR_ASSERT(res == DRBBDUP_SUCCESS);
 }
@@ -444,30 +476,48 @@ instrumentation_init()
         !drmgr_register_kernel_xfer_event(event_kernel_xfer) ||
         !drmgr_register_bb_app2app_event(event_bb_app2app, &pri_pre_bbdup))
         DR_ASSERT(false);
-    dr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_filter_syscall_event(event_filter_syscall);
 
+    /* XXX i#7598: With -synchronous_attach, no thread executes in nop mode
+     * before event_post_attach, so we could start out in trace mode.
+     * Safer to leave as-is in case -synchronous_attach is turned off; but if
+     * the option is removed (permanently on) we can then clean up here and
+     * remove the attach part of -align_endpoints.
+     */
     if (align_attach_detach_endpoints())
         tracing_mode.store(BBDUP_MODE_NOP, std::memory_order_release);
-    else if (op_trace_after_instrs.get_value() != 0)
+    else if (get_initial_no_trace_for_instrs_value() != 0)
         tracing_mode.store(BBDUP_MODE_COUNT, std::memory_order_release);
     else if (op_L0_filter_until_instrs.get_value())
         tracing_mode.store(BBDUP_MODE_L0_FILTER, std::memory_order_release);
 
-#ifdef DELAYED_CHECK_INLINED
-    drx_init();
+    bool ok = drx_init();
+    DR_ASSERT(ok);
+#ifdef LINUX
+    // XXX i#7504: Time and timer scaling currently only supports Linux.
+    if (op_scale_timers.get_value() > 1 || op_scale_timeouts.get_value() > 1) {
+        drx_time_scale_t scale = {
+            sizeof(scale),
+        };
+        scale.timer_scale = op_scale_timers.get_value();
+        scale.timeout_scale = op_scale_timeouts.get_value();
+        NOTIFY(1, "Registering timer scaling %dx timeout scaling %dx\n",
+               scale.timer_scale, scale.timeout_scale);
+        ok = drx_register_time_scaling(&scale);
+        DR_ASSERT(ok);
+    }
 #endif
 }
 
 static void
 event_post_attach()
 {
-    DR_ASSERT(attached_midway);
     if (!align_attach_detach_endpoints())
         return;
     uint64 timestamp = instru_t::get_timestamp();
     attached_timestamp.store(timestamp, std::memory_order_release);
     NOTIFY(1, "Fully-attached timestamp is " UINT64_FORMAT_STRING "\n", timestamp);
-    if (op_trace_after_instrs.get_value() != 0) {
+    if (get_initial_no_trace_for_instrs_value() != 0) {
         NOTIFY(1, "Switching to counting mode after attach\n");
         tracing_mode.store(BBDUP_MODE_COUNT, std::memory_order_release);
     } else if (op_L0_filter_until_instrs.get_value()) {
@@ -494,6 +544,64 @@ event_pre_detach()
     }
 }
 
+static void
+event_nudge(void *drcontext, uint64 arg)
+{
+    if ((arg >> TRACER_NUDGE_TYPE_SHIFT) == TRACER_NUDGE_MEM_DUMP) {
+#ifdef WINDOWS
+        /* TODO i#7508: raw2trace fails with "Non-module instructions found with no
+         * encoding information.". This occurs on Windows when capturing memory dumps at
+         * the start of a new tracing window.
+         */
+        NOTIFY(
+            0,
+            "ERROR: capturing memory dump when a trace window opens is not supported.\n");
+        return;
+#else
+        char path[MAXIMUM_PATH];
+        dr_memory_dump_spec_t spec;
+        spec.size = sizeof(dr_memory_dump_spec_t);
+        spec.flags = DR_MEMORY_DUMP_ELF;
+        spec.elf_path = (char *)&path;
+        spec.elf_path_size = MAXIMUM_PATH;
+        spec.elf_output_directory = nullptr;
+
+        char windir[MAXIMUM_PATH];
+        if (has_tracing_windows()) {
+            if (op_split_windows.get_value()) {
+                dr_snprintf(windir, BUFFER_SIZE_ELEMENTS(windir),
+                            "%s%s" WINDOW_SUBDIR_FORMAT, logsubdir, DIRSEP,
+                            arg & TRACER_NUDGE_VALUE_MASK);
+                NULL_TERMINATE_BUFFER(windir);
+                spec.elf_output_directory = windir;
+            }
+        }
+
+        if (!dr_create_memory_dump(&spec)) {
+            NOTIFY(0, "ERROR: failed to create memory dump.\n");
+            return;
+        }
+        file_t memory_dump_file = dr_open_file(path, DR_FILE_READ);
+        if (memory_dump_file < 0) {
+            NOTIFY(0, "ERROR: failed to read memory dump file: %s.\n", path);
+            return;
+        }
+        uint64 file_size;
+        if (!dr_file_size(memory_dump_file, &file_size)) {
+            NOTIFY(0, "ERROR: failed to read the size of the memory dump file: %s.\n",
+                   path);
+            dr_close_file(memory_dump_file);
+            return;
+        }
+        if (file_size == 0) {
+            NOTIFY(0, "ERROR: memory dump file %s is empty.\n", path);
+        }
+        dr_close_file(memory_dump_file);
+        return;
+#endif
+    }
+}
+
 /***************************************************************************
  * Tracing instrumentation.
  */
@@ -513,8 +621,10 @@ append_marker_seg_base(void *drcontext, func_trace_entry_vector_t *vec)
      * a redzone check at the end guarding a clean call to memtrace(), but to
      * be a litte safer in case that changes we also do a redzone check here.
      */
-    if (BUF_PTR(data->seg_base) - data->buf_base > static_cast<ssize_t>(trace_buf_size))
+    if (BUF_PTR(data->seg_base) - data->buf_base > static_cast<ssize_t>(trace_buf_size)) {
+        append_timestamp_and_cpu_marker(data);
         process_and_output_buffer(drcontext, false);
+    }
 }
 
 static void
@@ -592,7 +702,7 @@ instrument_delay_instrs(void *drcontext, void *tag, instrlist_t *ilist, user_dat
  */
 static void
 insert_conditional_skip(void *drcontext, instrlist_t *ilist, instr_t *where,
-                        reg_id_t reg_skip_if_zero, reg_id_t *reg_tmp INOUT,
+                        reg_id_t reg_skip_if_zero, reg_id_t *reg_tmp DR_PARAM_INOUT,
                         instr_t *skip_label, bool short_reaches,
                         reg_id_set_t &app_regs_at_skip)
 {
@@ -660,6 +770,11 @@ insert_conditional_skip(void *drcontext, instrlist_t *ilist, instr_t *where,
     MINSERT(ilist, where,
             INSTR_CREATE_cbz(drcontext, opnd_create_instr(skip_label),
                              opnd_create_reg(reg_skip_if_zero)));
+#elif defined(RISCV64)
+    MINSERT(ilist, where,
+            INSTR_CREATE_beq(drcontext, opnd_create_instr(skip_label),
+                             opnd_create_reg(reg_skip_if_zero),
+                             opnd_create_reg(DR_REG_ZERO)));
 #endif
 }
 
@@ -736,7 +851,7 @@ insert_mode_comparison(void *drcontext, instrlist_t *ilist, instr_t *where,
             XINST_CREATE_sub(drcontext, opnd_create_reg(reg_mine),
                              opnd_create_reg(reg_global)));
 #elif defined(RISCV64)
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     DR_ASSERT_MSG(false, "Not implemented on RISC-V");
 #else
     // Our version of a flags-free reg-reg subtraction: 1's complement one reg
@@ -870,7 +985,7 @@ insert_filter_addr(void *drcontext, instrlist_t *ilist, instr_t *where, user_dat
         // every instr.  We skip if we're still on the same cache line.
         if (ud->last_app_pc != NULL) {
             ptr_uint_t prior_line = ((ptr_uint_t)ud->last_app_pc >> line_bits) & mask;
-            // FIXME i#2439: we simplify and ignore a 2nd cache line touched by an
+            // XXX i#2439: we simplify and ignore a 2nd cache line touched by an
             // instr that straddles cache lines.  However, that is not uncommon on
             // x86 and we should check the L0 cache for both lines, do regular instru
             // if either misses, and have some flag telling the regular instru to
@@ -911,11 +1026,15 @@ insert_filter_addr(void *drcontext, instrlist_t *ilist, instr_t *where, user_dat
         // lazy restores are the same on all paths.
         // XXX: do better!
         insert_load_buf_ptr(drcontext, ilist, where, reg_ptr);
+#ifdef RISCV64
+        ASSERT(false, "NYI on RISCV64");
+#else
         MINSERT(
             ilist, where,
             XINST_CREATE_cmp(drcontext, opnd_create_reg(reg_ptr), OPND_CREATE_INT32(0)));
         MINSERT(ilist, where,
                 XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(skip)));
+#endif
     }
     // First get the cache slot and load what's currently stored there.
     // XXX i#2439: we simplify and ignore a memref that straddles cache lines.
@@ -926,9 +1045,13 @@ insert_filter_addr(void *drcontext, instrlist_t *ilist, instr_t *where, user_dat
                                          NULL);
     } else
         instru->insert_obtain_addr(drcontext, ilist, where, reg_addr, reg_ptr, ref);
+#ifdef RISCV64
+    ASSERT(false, "NYI on RISCV64");
+#else
     MINSERT(ilist, where,
             XINST_CREATE_slr_s(drcontext, opnd_create_reg(reg_addr),
                                OPND_CREATE_INT8(line_bits)));
+#endif
     MINSERT(ilist, where,
             XINST_CREATE_move(drcontext, opnd_create_reg(reg_idx),
                               opnd_create_reg(reg_addr)));
@@ -940,16 +1063,23 @@ insert_filter_addr(void *drcontext, instrlist_t *ilist, instr_t *where, user_dat
             XINST_CREATE_load_int(drcontext, opnd_create_reg(reg_ptr),
                                   OPND_CREATE_INT32(mask)));
 #endif
+#ifdef RISCV64
+    ASSERT(false, "NYI on RISCV64");
+#else
     MINSERT(ilist, where,
             XINST_CREATE_and_s(
                 drcontext, opnd_create_reg(reg_idx),
                 IF_X86_ELSE(OPND_CREATE_INT32(mask), opnd_create_reg(reg_ptr))));
+#endif
     dr_insert_read_raw_tls(drcontext, ilist, where, tls_seg,
                            tls_offs + sizeof(void *) * offs, reg_ptr);
     // While we can load from a base reg + scaled index reg on x86 and arm, we
     // have to clobber the index reg as the dest, and we need the final address again
     // to store on a miss.  Thus we take a step to compute the final
     // cache addr in a register.
+#ifdef RISCV64
+    ASSERT(false, "NYI on RISCV64");
+#else
     MINSERT(ilist, where,
             XINST_CREATE_add_sll(drcontext, opnd_create_reg(reg_ptr),
                                  opnd_create_reg(reg_ptr), opnd_create_reg(reg_idx),
@@ -967,7 +1097,7 @@ insert_filter_addr(void *drcontext, instrlist_t *ilist, instr_t *where, user_dat
     MINSERT(ilist, where,
             XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(reg_ptr, 0),
                                opnd_create_reg(reg_addr)));
-
+#endif
     // Restore app value b/c the caller will re-compute the app addr.
     // We can avoid clobbering the app address if we either get a 4th scratch or
     // keep re-computing the tag and the mask but it's better to keep the common
@@ -1224,7 +1354,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
 #ifdef X86
     drreg_set_vector_entry(&rvec, DR_REG_XCX, true);
 #elif defined(RISCV64)
-    /* FIXME i#3544: Check if scratch reg can be used here. */
+    /* XXX i#3544: Check if scratch reg can be used here. */
     drreg_set_vector_entry(&rvec, DR_REG_T2, true);
 #else
     for (reg_ptr = DR_REG_R0; reg_ptr <= DR_REG_R7; reg_ptr++)
@@ -1310,22 +1440,6 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         for (i = 0; i < instr_num_srcs(instr_operands); i++) {
             const opnd_t src = instr_get_src(instr_operands, i);
             if (opnd_is_memory_reference(src)) {
-#ifdef AARCH64
-                /* TODO i#5844: Memory references involving SVE registers are not
-                 * supported yet. To be implemented as part of scatter/gather work.
-                 */
-                if (opnd_is_base_disp(src) &&
-                    (reg_is_z(opnd_get_base(src)) || reg_is_z(opnd_get_index(src)))) {
-                    if (!reported_sg_warning) {
-                        NOTIFY(
-                            0,
-                            "WARNING: Scatter/gather is not supported, results will be "
-                            "inaccurate\n");
-                        reported_sg_warning = true;
-                    }
-                    continue;
-                }
-#endif
                 adjust = instrument_memref(drcontext, ud, bb, where, reg_ptr, adjust,
                                            instr_operands, src, i, false, pred, mode);
             }
@@ -1334,22 +1448,6 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
         for (i = 0; i < instr_num_dsts(instr_operands); i++) {
             const opnd_t dst = instr_get_dst(instr_operands, i);
             if (opnd_is_memory_reference(dst)) {
-#ifdef AARCH64
-                /* TODO i#5844: Memory references involving SVE registers are not
-                 * supported yet. To be implemented as part of scatter/gather work.
-                 */
-                if (opnd_is_base_disp(dst) &&
-                    (reg_is_z(opnd_get_base(dst)) || reg_is_z(opnd_get_index(dst)))) {
-                    if (!reported_sg_warning) {
-                        NOTIFY(
-                            0,
-                            "WARNING: Scatter/gather is not supported, results will be "
-                            "inaccurate\n");
-                        reported_sg_warning = true;
-                    }
-                    continue;
-                }
-#endif
                 adjust = instrument_memref(drcontext, ud, bb, where, reg_ptr, adjust,
                                            instr_operands, dst, i, true, pred, mode);
             }
@@ -1438,6 +1536,87 @@ event_filter_syscall(void *drcontext, int sysnum)
     return true;
 }
 
+static void
+init_record_syscall()
+{
+    // We only modify the table at init time and do not want a lock for runtime
+    // lookups.
+    hashtable_init_ex(&syscall2args, 8, HASH_INTPTR, /*strdup=*/false, /*synch=*/false,
+                      nullptr, nullptr, nullptr);
+#ifdef LINUX
+    // We trace futex by default.  Add it first so a use can disable.
+    static constexpr int FUTEX_ARG_COUNT = 6;
+    if (!hashtable_add(&syscall2args,
+                       reinterpret_cast<void *>(static_cast<ptr_int_t>(SYS_futex)),
+                       reinterpret_cast<void *>(static_cast<ptr_int_t>(FUTEX_ARG_COUNT))))
+        DR_ASSERT(false && "Failed to add to syscall2args internal hashtable");
+#endif
+    auto op_values =
+        split_by(op_record_syscall.get_value(), op_record_syscall.get_value_separator());
+    for (auto &single_op_value : op_values) {
+        auto items = split_by(single_op_value, PATTERN_SEPARATOR);
+        if (items.size() != 2) {
+            FATAL("Error: -record_syscall takes exactly 2 fields for each item: %s\n",
+                  op_record_syscall.get_value().c_str());
+        }
+        int num = atoi(items[0].c_str());
+        if (num < 0)
+            FATAL("Error: -record_syscall invalid number %d\n", num);
+        int args = atoi(items[1].c_str());
+        // Sanity check.  Some Windows syscalls have dozens of parameters but we
+        // should not see anything as high as 100.
+        static constexpr int MAX_SYSCALL_ARGS = 100;
+        if (args < 0 || args > MAX_SYSCALL_ARGS)
+            FATAL("Error: -record_syscall invalid parameter count %d\n", args);
+        dr_log(NULL, DR_LOG_ALL, 1, "Tracing syscall #%d args=%d\n", num, args);
+        NOTIFY(1, "Tracing syscall #%d args=%d\n", num, args);
+        hashtable_add_replace(&syscall2args,
+                              reinterpret_cast<void *>(static_cast<ptr_int_t>(num)),
+                              reinterpret_cast<void *>(static_cast<ptr_int_t>(args)));
+    }
+}
+
+static void
+exit_record_syscall()
+{
+    hashtable_delete(&syscall2args);
+}
+
+#ifdef BUILD_PT_TRACER
+static bool
+stop_cur_syscall_pt_trace(void *drcontext, per_thread_t *data, bool dump_to_trace)
+{
+    int cur_recording_sysnum = data->syscall_pt_trace.get_cur_recording_sysnum();
+    ASSERT(cur_recording_sysnum != INVALID_SYSNUM,
+           "Routine expected to be called only when PT tracing is active.");
+    if (dump_to_trace) {
+        // Write a marker to the userspace raw trace that denotes where raw2trace
+        // should decode and insert the PT trace for the system call being
+        // recorded currently. Some drmemtrace derivations may interleave the PT
+        // trace raw data with the drmemtrace user-space raw trace data (instead of
+        // outputting the PT trace data to separate files like we do here). In such
+        // cases, we want to ensure that the TRACE_MARKER_TYPE_SYSCALL_IDX does not
+        // get output before the actual PT trace data, so we output the marker when
+        // we stop and write the PT trace (instead of when we start the PT trace).
+        // Note that the order below does not matter because the actual buffer
+        // flush happens later.
+        trace_marker_type_t marker_type = TRACE_MARKER_TYPE_SYSCALL_IDX;
+        uintptr_t marker_val = data->syscall_pt_trace.get_traced_syscall_idx();
+        BUF_PTR(data->seg_base) +=
+            instru->append_marker(BUF_PTR(data->seg_base), marker_type, marker_val);
+    }
+    if (!data->syscall_pt_trace.stop_syscall_pt_trace(dump_to_trace)) {
+        NOTIFY(0,
+               "ERROR: Failed to stop PT tracing for syscall %d of thread "
+               "T%d.\n",
+               cur_recording_sysnum, dr_get_thread_id(drcontext));
+        ASSERT(false, "Failed to stop syscall PT trace");
+        return false;
+    }
+    return true;
+}
+#endif
+
 static bool
 event_pre_syscall(void *drcontext, int sysnum)
 {
@@ -1454,29 +1633,44 @@ event_pre_syscall(void *drcontext, int sysnum)
     // (The converse can happen, with a tracing window ending in a syscall but the mode
     // having changed, causing us to exit up above and not emit a marker: we solve that
     // by removing syscalls without markers in raw2trace.)
-    if (is_new_window_buffer_empty(data))
+    if (is_new_window_buffer_empty(data)) {
         return true;
+    }
 
     // Output system call numbers if we have a full instruction trace.
     // Since the instruction fetch has already been output, this will be
     // appended to the block-final syscall instr.
     if (!op_L0I_filter.get_value()) {
+        // Append a timestamp prior to the syscall to give us syscall latency.
+        append_timestamp_and_cpu_marker(data);
+
         BUF_PTR(data->seg_base) += instru->append_marker(
             BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_SYSCALL, sysnum);
-#ifdef LINUX
-        if (sysnum == SYS_futex) {
-            static constexpr int FUTEX_ARG_COUNT = 6;
+
+        // Record parameter values, if requested.
+        int args = static_cast<int>(reinterpret_cast<ptr_int_t>(hashtable_lookup(
+            &syscall2args, reinterpret_cast<void *>(static_cast<ptr_int_t>(sysnum)))));
+        if (args > 0) {
             BUF_PTR(data->seg_base) += instru->append_marker(
                 BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_FUNC_ID,
                 static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) +
                     IF_X64_ELSE(sysnum, (sysnum & 0xffff)));
-            for (int i = 0; i < FUTEX_ARG_COUNT; ++i) {
+            for (int i = 0; i < args; ++i) {
                 BUF_PTR(data->seg_base) += instru->append_marker(
                     BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_FUNC_ARG,
                     dr_syscall_get_param(drcontext, i));
             }
         }
-#endif
+    }
+    // Filtered traces take a while to fill up the buffer, so we do an output
+    // before each syscall so we can check for various thresholds more frequently.
+    // For the same reason, we output for small window thresholds.
+    static constexpr int INSTRS_PER_BUFFER = 5000;
+    if (file_ops_func.handoff_buf == NULL &&
+        (op_L0I_filter.get_value() ||
+         (has_tracing_windows() &&
+          get_current_trace_for_instrs_value() < 10 * INSTRS_PER_BUFFER))) {
+        process_and_output_buffer(drcontext, false);
     }
 
 #ifdef ARM
@@ -1490,31 +1684,42 @@ event_pre_syscall(void *drcontext, int sysnum)
         }
     }
 #endif
-    if (file_ops_func.handoff_buf == NULL)
-        process_and_output_buffer(drcontext, false);
 
 #ifdef BUILD_PT_TRACER
     if (op_offline.get_value() && op_enable_kernel_tracing.get_value()) {
         if (data->syscall_pt_trace.get_cur_recording_sysnum() != INVALID_SYSNUM) {
-            ASSERT(false, "last tracing isn't stopped");
-            if (!data->syscall_pt_trace.stop_syscall_pt_trace()) {
-                ASSERT(false, "failed to stop syscall pt trace");
+            NOTIFY(0,
+                   "ERROR: Tracing for last syscall %d wasn't stopped when we reached "
+                   "the next one in T%d.\n",
+                   data->syscall_pt_trace.get_cur_recording_sysnum(),
+                   dr_get_thread_id(drcontext));
+            ASSERT(false,
+                   "Last syscall tracing wasn't stopped when we reached the next one");
+            // In the release build, in case we somehow did not stop the PT tracing, we
+            // try to stop it and continue.
+            // XXX: Something didn't go as expected as the last syscall PT trace was
+            // not stopped yet. We may need to find other control points where PT
+            // tracing needs to be stopped. E.g., PT tracing for syscalls interrupted by
+            // signals may need to be stopped in main_signal_handler. Though it has
+            // not been observed yet, the traces dumped below may have issues during
+            // decoding.
+            if (!stop_cur_syscall_pt_trace(drcontext, data, /*dump_to_trace=*/true))
                 return false;
-            }
         }
 
-        if (!syscall_pt_trace_t::is_syscall_pt_trace_enabled(sysnum)) {
-            return true;
-        }
-
-        /* Write a marker to userspace raw trace. */
-        trace_marker_type_t marker_type = TRACE_MARKER_TYPE_SYSCALL_IDX;
-        uintptr_t marker_val = data->syscall_pt_trace.get_traced_syscall_idx();
-        BUF_PTR(data->seg_base) +=
-            instru->append_marker(BUF_PTR(data->seg_base), marker_type, marker_val);
-
-        if (!data->syscall_pt_trace.start_syscall_pt_trace(sysnum)) {
+        if (syscall_pt_trace_t::is_syscall_pt_trace_enabled(sysnum) &&
+            !data->syscall_pt_trace.start_syscall_pt_trace(sysnum)) {
             ASSERT(false, "failed to start syscall pt trace");
+            return false;
+        }
+    }
+#endif
+
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+    if (op_collect_syscall_records.get_value()) {
+        if (!drsyscall_write_pre_syscall_records(write_syscall_record, drcontext, sysnum,
+                                                 instru_t::get_timestamp())) {
+            dr_log(NULL, DR_LOG_ALL, 1, "failed to write pre-syscall records\n");
             return false;
         }
     }
@@ -1533,46 +1738,75 @@ event_post_syscall(void *drcontext, int sysnum)
 
 #ifdef LINUX
     if (!op_L0I_filter.get_value()) { /* No syscall data unless full instr trace. */
-        if (sysnum == SYS_futex) {
-            dr_syscall_result_info_t info = {
-                sizeof(info),
-            };
+        if (hashtable_lookup(&syscall2args,
+                             reinterpret_cast<void *>(static_cast<ptr_int_t>(sysnum))) !=
+            nullptr) {
+            dr_syscall_result_info_t info = {};
+            info.size = sizeof(info);
+            info.use_errno = true;
             dr_syscall_get_result_ex(drcontext, &info);
             BUF_PTR(data->seg_base) += instru->append_marker(
                 BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_FUNC_ID,
                 static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) +
                     IF_X64_ELSE(sysnum, (sysnum & 0xffff)));
-            /* XXX i#5843: Return values are complex and can include more than just
-             * the primary register value.  Since we care mostly just about failure,
-             * we use the "succeeded" field.  However, this is not accurate for all
-             * syscalls.  Plus, would the scheduler want to know about various
-             * successful return values which indicate how many waiters were woken
-             * up and other data?
-             */
             BUF_PTR(data->seg_base) += instru->append_marker(
-                BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_FUNC_RETVAL, info.succeeded);
+                BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_FUNC_RETVAL, info.value);
+            if (!info.succeeded) {
+                // On Mac you can't tell success from just the return value so we
+                // include a failure indicator.  Since mmap is also complex, and
+                // to reduce Mac-only code, we provide this for all platforms.
+                BUF_PTR(data->seg_base) += instru->append_marker(
+                    BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_SYSCALL_FAILED,
+                    info.errno_value);
+            }
         }
     }
 #endif
 
-#ifdef BUILD_PT_TRACER
-    if (!op_offline.get_value() || !op_enable_kernel_tracing.get_value())
-        return;
-    if (!is_in_tracing_mode(tracing_mode.load(std::memory_order_acquire)))
-        return;
-    if (!syscall_pt_trace_t::is_syscall_pt_trace_enabled(sysnum))
-        return;
-
-    if (data->syscall_pt_trace.get_cur_recording_sysnum() == INVALID_SYSNUM) {
-        ASSERT(false, "last syscall is not traced");
-        return;
+    if (!op_L0I_filter.get_value()) { /* No syscall data unless full instr trace. */
+        // Append a timestamp after the syscall to give us syscall latency.
+        // XXX: If we have a frozen timestamp we won't have latency info but that's
+        // not easily solved (could record unfrozen and adjust to frozen+delta
+        // in rawtrace?) so we live with that at detach/max-refs time.
+        append_timestamp_and_cpu_marker(data);
     }
 
-    ASSERT(data->syscall_pt_trace.get_cur_recording_sysnum() == sysnum,
-           "last tracing isn't for the expected sysnum");
-    if (!data->syscall_pt_trace.stop_syscall_pt_trace()) {
-        ASSERT(false, "failed to stop syscall pt trace");
-        return;
+#ifdef BUILD_PT_TRACER
+    if (op_offline.get_value() && op_enable_kernel_tracing.get_value()) {
+        // We intentionally do not check is_in_tracing_mode here because
+        // we may be in a non-tracing mode now but may have enabled PT
+        // tracing in the pre-syscall event when we were in tracing mode.
+        // We still want to stop the PT tracing the syscall in this case.
+        // We also intentionally do not check is_syscall_pt_trace_enabled
+        // for sysnum so that we may catch a case where we were not able
+        // to see the post-syscall event for the syscall for which we
+        // started PT tracing (maybe there was a signal that interrupted
+        // that syscall); we still have a debug-build assert below for
+        // this case.
+        int cur_recording_sysnum = data->syscall_pt_trace.get_cur_recording_sysnum();
+        if (cur_recording_sysnum != INVALID_SYSNUM) {
+            ASSERT(cur_recording_sysnum == sysnum,
+                   "Last tracing isn't for the expected sysnum");
+            ASSERT(syscall_pt_trace_t::is_syscall_pt_trace_enabled(cur_recording_sysnum),
+                   "Did not expect syscall tracing to be enabled for this syscall");
+            // Ignore return value and try to continue in release build.
+            stop_cur_syscall_pt_trace(drcontext, data, /*dump_to_trace=*/true);
+        } else {
+            // No syscall trace is being recorded. This may be because syscall tracing
+            // is not enabled for sysnum, or that we were not in tracing mode at the
+            // pre-syscall event for sysnum.
+        }
+    }
+#endif
+
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+    if (op_collect_syscall_records.get_value()) {
+        if (!drsyscall_write_post_syscall_records(write_syscall_record, drcontext, sysnum,
+                                                  instru_t::get_timestamp())) {
+            dr_log(NULL, DR_LOG_ALL, 1, "failed to write post-syscall records\n");
+            NOTIFY(0, "ERROR: failed to write post-syscall records for syscall %d\n",
+                   sysnum);
+        }
     }
 #endif
 }
@@ -1643,8 +1877,13 @@ event_kernel_xfer(void *drcontext, const dr_kernel_xfer_info_t *info)
     }
     BUF_PTR(data->seg_base) +=
         instru->append_marker(BUF_PTR(data->seg_base), marker_type, marker_val);
-    if (file_ops_func.handoff_buf == NULL)
-        process_and_output_buffer(drcontext, false);
+    if (info->type == DR_XFER_SIGNAL_DELIVERY) {
+        BUF_PTR(data->seg_base) += instru->append_marker(
+            BUF_PTR(data->seg_base), TRACE_MARKER_TYPE_SIGNAL_NUMBER, info->sig);
+    }
+    // Append a timestamp to provide more accurate timing information at point
+    // of interest such as kernel-mediated control transfers like these.
+    append_timestamp_and_cpu_marker(data);
 }
 
 /***************************************************************************
@@ -1676,14 +1915,18 @@ init_thread_in_process(void *drcontext)
 
 #ifdef BUILD_PT_TRACER
     if (op_offline.get_value() && op_enable_kernel_tracing.get_value()) {
-        data->syscall_pt_trace.init(
-            drcontext, kernel_pt_logsubdir,
-            // XXX i#5505: This should be per-thread and per-window; once we've
-            // finalized the PT output scheme we should pass those parameters.
-            [](const char *fname, uint mode_flags) {
-                return file_ops_func.open_process_file(fname, mode_flags);
-            },
-            file_ops_func.write_file, file_ops_func.close_file);
+        if (!data->syscall_pt_trace.init(
+                drcontext, kernel_trace_logsubdir,
+                [](const char *fname, uint mode_flags, thread_id_t thread_id,
+                   int64 window_id) {
+                    return file_ops_func.call_open_file(fname, mode_flags, thread_id,
+                                                        window_id);
+                },
+                file_ops_func.write_file, file_ops_func.close_file,
+                op_kernel_trace_buffer_size_shift.get_value())) {
+            FATAL("Failed to init syscall_pt_trace_t for kernel raw files at %s\n",
+                  kernel_trace_logsubdir);
+        }
     }
 #endif
     // XXX i#1729: gather and store an initial callstack for the thread.
@@ -1730,13 +1973,17 @@ event_thread_exit(void *drcontext)
             int cur_recording_sysnum = data->syscall_pt_trace.get_cur_recording_sysnum();
             if (cur_recording_sysnum != INVALID_SYSNUM) {
                 NOTIFY(0,
-                       "ERROR: The last recorded syscall %d of thread T%d wasn't be "
-                       "stopped.\n",
+                       "ERROR: PT tracing for the last syscall %d of thread T%d was "
+                       "found active at detach.\n",
                        cur_recording_sysnum, dr_get_thread_id(drcontext));
-                ASSERT(cur_recording_sysnum, "syscall recording is not stopped");
-                if (!data->syscall_pt_trace.stop_syscall_pt_trace()) {
-                    ASSERT(false, "failed to stop syscall pt trace");
-                }
+                // Ignore return value and try to continue in release build.
+                // We skip dumping the trace because the syscall was likely interrupted
+                // by the detach signal and does not represent the real app behavior.
+                // XXX: Can we somehow figure out how much of the PT trace we can keep?
+                // Such PT syscall traces at the thread's end have been seen to not
+                // decode successfully in libipt, particularly for syscalls like futex,
+                // and epoll_wait.
+                stop_cur_syscall_pt_trace(drcontext, data, /*dump_to_trace=*/false);
             }
         }
 #endif
@@ -1798,12 +2045,17 @@ event_exit(void)
 #ifdef BUILD_PT_TRACER
     if (op_offline.get_value() && op_enable_kernel_tracing.get_value()) {
         drpttracer_exit();
-        /* Copy kcore and kallsyms to {kernel_pt_logsubdir}. */
-        kcore_copy_t kcore_copy(file_ops_func.open_file, file_ops_func.write_file,
-                                file_ops_func.close_file);
-        if (!kcore_copy.copy(kernel_pt_logsubdir)) {
-            NOTIFY(0, "WARNING: failed to copy kcore and kallsyms to %s\n",
-                   kernel_pt_logsubdir);
+        if (!op_skip_kcore_dump.get_value()) {
+            /* Copy kcore and kallsyms to {kernel_trace_logsubdir}. */
+            kcore_copy_t kcore_copy(
+                [](const char *fname, uint mode_flags) {
+                    return file_ops_func.open_process_file(fname, mode_flags);
+                },
+                file_ops_func.write_file, file_ops_func.close_file);
+            if (!kcore_copy.copy(kcore_path, kallsyms_path)) {
+                NOTIFY(0, "WARNING: failed to copy kcore and kallsyms to %s\n",
+                       kernel_trace_logsubdir);
+            }
         }
     }
 #endif
@@ -1823,6 +2075,13 @@ event_exit(void)
                " physical address markers in " UINT64_FORMAT_STRING " writeouts.\n",
                num_phys_markers, num_v2p_writeouts);
     }
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+    if (op_collect_syscall_records.get_value()) {
+        if (drsys_exit() != DRMF_SUCCESS) {
+            DR_ASSERT(false);
+        }
+    }
+#endif
     /* we use placement new for better isolation */
     instru->~instru_t();
     dr_global_free(instru, MAX_INSTRU_SIZE);
@@ -1856,7 +2115,9 @@ event_exit(void)
             DR_ASSERT(false);
         }
     }
-    dr_unregister_exit_event(event_exit);
+    drmgr_unregister_exit_event(event_exit);
+    drmgr_unregister_post_attach_event(event_post_attach);
+    drmgr_unregister_pre_detach_event(event_pre_detach);
 
     /* Clear callbacks and globals to support re-attach when linked statically. */
     file_ops_func = file_ops_func_t();
@@ -1869,6 +2130,8 @@ event_exit(void)
     num_refs_racy = 0;
     num_filter_refs_racy = 0;
 
+    exit_record_syscall();
+    delete_instr_window_lists();
     exit_io();
 
     dr_mutex_destroy(mutex);
@@ -1892,8 +2155,8 @@ init_offline_dir(void)
      */
     dr_snprintf(subdir_prefix, BUFFER_SIZE_ELEMENTS(subdir_prefix), "%s",
                 op_subdir_prefix.get_value().c_str());
-    NULL_TERMINATE_BUFFER(subdir_prefix);
     /* We do not need to call drx_init before using drx_open_unique_appid_file. */
+    NULL_TERMINATE_BUFFER(subdir_prefix);
     for (i = 0; i < NUM_OF_TRIES; i++) {
         /* We use drx_open_unique_appid_file with DRX_FILE_SKIP_OPEN to get a
          * directory name for creation.  Retry if the same name directory already
@@ -1919,13 +2182,20 @@ init_offline_dir(void)
         return false;
 
 #ifdef BUILD_PT_TRACER
-    dr_snprintf(kernel_pt_logsubdir, BUFFER_SIZE_ELEMENTS(kernel_pt_logsubdir), "%s%s%s",
-                buf, DIRSEP, DRMEMTRACE_KERNEL_PT_SUBDIR);
-    NULL_TERMINATE_BUFFER(kernel_pt_logsubdir);
+    dr_snprintf(kernel_trace_logsubdir, BUFFER_SIZE_ELEMENTS(kernel_trace_logsubdir),
+                "%s%s%s", buf, DIRSEP, DRMEMTRACE_KERNEL_TRACE_SUBDIR);
+    NULL_TERMINATE_BUFFER(kernel_trace_logsubdir);
     if (op_offline.get_value() && op_enable_kernel_tracing.get_value()) {
-        if (!file_ops_func.create_dir(kernel_pt_logsubdir))
+        if (!file_ops_func.create_dir(kernel_trace_logsubdir))
             return false;
     }
+    dr_snprintf(kcore_path, BUFFER_SIZE_ELEMENTS(kcore_path), "%s%s%s",
+                kernel_trace_logsubdir, DIRSEP, DRMEMTRACE_KCORE_FILENAME);
+    NULL_TERMINATE_BUFFER(kcore_path);
+
+    dr_snprintf(kallsyms_path, BUFFER_SIZE_ELEMENTS(kallsyms_path), "%s%s%s",
+                kernel_trace_logsubdir, DIRSEP, DRMEMTRACE_KALLSYMS_FILENAME);
+    NULL_TERMINATE_BUFFER(kallsyms_path);
 #endif
     if (has_tracing_windows())
         open_new_window_dir(tracing_window.load(std::memory_order_acquire));
@@ -2051,7 +2321,7 @@ drmemtrace_buffer_handoff(drmemtrace_handoff_func_t handoff_func,
 }
 
 drmemtrace_status_t
-drmemtrace_get_output_path(OUT const char **path)
+drmemtrace_get_output_path(DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRMEMTRACE_ERROR_INVALID_PARAMETER;
@@ -2059,8 +2329,37 @@ drmemtrace_get_output_path(OUT const char **path)
     return DRMEMTRACE_SUCCESS;
 }
 
+#ifdef BUILD_PT_TRACER
 drmemtrace_status_t
-drmemtrace_get_modlist_path(OUT const char **path)
+drmemtrace_get_kcore_path(DR_PARAM_OUT const char **path)
+{
+    if (path == NULL)
+        return DRMEMTRACE_ERROR_INVALID_PARAMETER;
+    *path = kcore_path;
+    return DRMEMTRACE_SUCCESS;
+}
+
+drmemtrace_status_t
+drmemtrace_get_kallsyms_path(DR_PARAM_OUT const char **path)
+{
+    if (path == NULL)
+        return DRMEMTRACE_ERROR_INVALID_PARAMETER;
+    *path = kallsyms_path;
+    return DRMEMTRACE_SUCCESS;
+}
+
+drmemtrace_status_t
+drmemtrace_get_kernel_trace_output_path(DR_PARAM_OUT const char **path)
+{
+    if (path == NULL)
+        return DRMEMTRACE_ERROR_INVALID_PARAMETER;
+    *path = kernel_trace_logsubdir;
+    return DRMEMTRACE_SUCCESS;
+}
+#endif
+
+drmemtrace_status_t
+drmemtrace_get_modlist_path(DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRMEMTRACE_ERROR_INVALID_PARAMETER;
@@ -2069,7 +2368,7 @@ drmemtrace_get_modlist_path(OUT const char **path)
 }
 
 drmemtrace_status_t
-drmemtrace_get_funclist_path(OUT const char **path)
+drmemtrace_get_funclist_path(DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRMEMTRACE_ERROR_INVALID_PARAMETER;
@@ -2078,7 +2377,7 @@ drmemtrace_get_funclist_path(OUT const char **path)
 }
 
 drmemtrace_status_t
-drmemtrace_get_encoding_path(OUT const char **path)
+drmemtrace_get_encoding_path(DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRMEMTRACE_ERROR_INVALID_PARAMETER;
@@ -2175,7 +2474,8 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
         op_L0D_filter.get_value())
         op_disable_optimizations.set_value(true);
 
-    event_inscount_init();
+    init_record_syscall();
+    event_inscount_init(id);
     init_io();
 
     DR_ASSERT(std::atomic_is_lock_free(&tracing_mode));
@@ -2197,10 +2497,12 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
         /* we use placement new for better isolation */
         DR_ASSERT(MAX_INSTRU_SIZE >= sizeof(offline_instru_t));
         placement = dr_global_alloc(MAX_INSTRU_SIZE);
-        instru = new (placement)
-            offline_instru_t(insert_load_buf_ptr, &scratch_reserve_vec,
-                             file_ops_func.write_file, module_file, encoding_file,
-                             op_disable_optimizations.get_value(), instru_notify);
+        // TODO i#6474, i#2062: Also handle op_L0_filter_until_instrs here when
+        // i#6474 is resolved.
+        instru = new (placement) offline_instru_t(
+            insert_load_buf_ptr, &scratch_reserve_vec, file_ops_func.write_file,
+            module_file, encoding_file, op_disable_optimizations.get_value(),
+            op_L0D_filter.get_value() || op_L0I_filter.get_value(), instru_notify);
     } else {
         void *placement;
         /* we use placement new for better isolation */
@@ -2212,14 +2514,23 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
             DR_ASSERT(false);
 #ifdef UNIX
         /* we want an isolated fd so we don't use ipc_pipe.open_for_write() */
-        int fd = dr_open_file(ipc_pipe.get_pipe_path().c_str(), DR_FILE_WRITE_ONLY);
+        const char *pipe_path = ipc_pipe.get_pipe_path().c_str();
+        if (!dr_file_exists(pipe_path)) {
+            NOTIFY(0,
+                   "drmemtrace WARNING: attempting to open write end of pipe at %s "
+                   "for online analysis but pipe does not exist. Use \"-offline\" "
+                   "mode if you are using drmemtrace without a reader.\n",
+                   pipe_path);
+        }
+
+        int fd = dr_open_file(pipe_path, DR_FILE_WRITE_ONLY);
         DR_ASSERT(fd != INVALID_FILE);
         if (!ipc_pipe.set_fd(fd))
             DR_ASSERT(false);
 #else
         if (!ipc_pipe.open_for_write()) {
             if (GetLastError() == ERROR_PIPE_BUSY) {
-                // FIXME i#1727: add multi-process support to Windows named_pipe_t.
+                // XXX i#1727: add multi-process support to Windows named_pipe_t.
                 FATAL("Fatal error: multi-process applications not yet supported "
                       "for drcachesim on Windows\n");
             } else {
@@ -2257,12 +2568,17 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
     }
 
     /* register events */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 #ifdef UNIX
     dr_register_fork_init_event(fork_init);
 #endif
-    attached_midway = dr_register_post_attach_event(event_post_attach);
-    dr_register_pre_detach_event(event_pre_detach);
+
+    if (!drmgr_register_post_attach_event(event_post_attach))
+        FATAL("Failed to register post-attach event.\n");
+    attached_midway = dr_attached_midrun();
+
+    drmgr_register_pre_detach_event(event_pre_detach);
+    dr_register_nudge_event(event_nudge, id);
 
     /* We need our thread exit event to run *before* drmodtrack's as we may
      * need to translate physical addresses for the thread's final buffer.
@@ -2282,9 +2598,9 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
      * buffer if full.  We leave room for each of the maximum count of
      * instructions accessing memory once, which is fairly
      * pathological as by default that's 256 memrefs for one bb.  We double
-     * it to ensure we cover skipping clean calls for sthg like strex.
-     * We also check here that the max_bb_instrs can fit in the instr_count
-     * bitfield in offline_entry_t.
+     * it to include the extra timestamps we now insert and to ensure we cover
+     * skipping clean calls for sthg like strex.  We also check here that the
+     * max_bb_instrs can fit in the instr_count bitfield in offline_entry_t.
      */
     uint64 max_bb_instrs;
     if (!dr_get_integer_option("max_bb_instrs", &max_bb_instrs))
@@ -2331,6 +2647,18 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
             FATAL("Failed to initialize drpttracer.\n");
     }
 #endif
+
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+    if (op_collect_syscall_records.get_value()) {
+        drsys_options_t ops = {
+            sizeof(ops),
+            0,
+        };
+        if (drsys_init(id, &ops) != DRMF_SUCCESS) {
+            FATAL("Failed to initialize Dr. Syscall extension.");
+        }
+    }
+#endif
 }
 
 } // namespace drmemtrace
@@ -2341,14 +2669,17 @@ drmemtrace_client_main(client_id_t id, int argc, const char *argv[])
  */
 
 /* To support statically linked multiple clients, we add drmemtrace_client_main
- * as the real client init function and make dr_client_main a weak symbol.
- * We could also use alias to link dr_client_main to drmemtrace_client_main.
- * A simple call won't add too much overhead, and works both in Windows and Linux.
- * To automate the process and minimize the code change, we should investigate the
- * approach that uses command-line link option to alias two symbols.
+ * as the real client init function and let a separate dr_client_main call
+ * drmemtrace_client_main. Since dynamorio_static now provides its own weak
+ * dr_client_main symbol, we can't simply always provide a weak dr_client_main here:
+ * it must either be present and strong or not present, controlled by the
+ * DRMEMTRACE_NO_MAIN define.
  */
-DR_EXPORT WEAK void
+#ifndef DRMEMTRACE_NO_MAIN
+DR_EXPORT
+void
 dr_client_main(client_id_t id, int argc, const char *argv[])
 {
     dynamorio::drmemtrace::drmemtrace_client_main(id, argc, argv);
 }
+#endif

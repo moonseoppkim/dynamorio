@@ -129,7 +129,7 @@ set_up_bb_dups(void *drbbdup_ctx, void *drcontext, void *tag, instrlist_t *bb,
 
 static void
 analyse_orig_bb(void *drcontext, void *tag, instrlist_t *bb, void *user_data,
-                IN void **orig_analysis_data)
+                DR_PARAM_IN void **orig_analysis_data)
 {
     /* Extract bb_pc and store it as analysis data. */
     app_pc *bb_pc = dr_thread_alloc(drcontext, sizeof(app_pc));
@@ -239,7 +239,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
 
     /* register events */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     hashtable_init_ex(&hit_count_table, HASH_BITS, HASH_INTPTR, false /*!strdup*/,
                       false /*synchronization is external*/, destroy_hit_count, NULL,

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2022-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2022-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -43,10 +43,11 @@
  */
 
 #ifndef _MEMTRACE_STREAM_H_
-#define _MEMTRACE_STREAM_H_ 1
+#define _MEMTRACE_STREAM_H_
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 
 /**
  * @file drmemtrace/memtrace_stream.h
@@ -63,6 +64,66 @@ namespace drmemtrace { /**< DrMemtrace tracing + simulation infrastructure names
  */
 class memtrace_stream_t {
 public:
+    /**
+     * Statistics on the resulting schedule from interleaving and switching
+     * between the inputs in core-sharded modes.
+     */
+    enum schedule_statistic_t {
+        /** Count of context switches away from an input to a different input. */
+        SCHED_STAT_SWITCH_INPUT_TO_INPUT,
+        /** Count of context switches away from an input to an idle state. */
+        SCHED_STAT_SWITCH_INPUT_TO_IDLE,
+        /**
+         * Count of context switches away from idle to an input.
+         * This does not include the initial assignment of an input to a core.
+         */
+        SCHED_STAT_SWITCH_IDLE_TO_INPUT,
+        /**
+         * Count of quantum preempt points where the same input remains in place
+         * as nothing else of equal or greater priority is available.
+         */
+        SCHED_STAT_SWITCH_NOP,
+        /**
+         * Count of preempts due to quantum expiration.  Includes instances
+         * of the quantum expiring but no switch happening (but #SCHED_STAT_SWITCH_NOP
+         * can be used to separate those).
+         */
+        SCHED_STAT_QUANTUM_PREEMPTS,
+        /** Count of #TRACE_MARKER_TYPE_DIRECT_THREAD_SWITCH markers. */
+        SCHED_STAT_DIRECT_SWITCH_ATTEMPTS,
+        /** Count of #TRACE_MARKER_TYPE_DIRECT_THREAD_SWITCH attempts that succeeded. */
+        SCHED_STAT_DIRECT_SWITCH_SUCCESSES,
+        /**
+         * Counts the number of times an input switches from another core to this core:
+         * i.e., the number of input migrations to this core.
+         */
+        SCHED_STAT_MIGRATIONS,
+        /**
+         * Counts the number of times this output's runqueue became empty and it took
+         * work from another output's runqueue.
+         */
+        SCHED_STAT_RUNQUEUE_STEALS,
+        /**
+         * Counts the number of output runqueue rebalances triggered by this output.
+         */
+        SCHED_STAT_RUNQUEUE_REBALANCES,
+        /**
+         * Counts the instances where a workload's output limit prevented one of its
+         * inputs from being scheduled onto an output.
+         */
+        SCHED_STAT_HIT_OUTPUT_LIMIT,
+        /**
+         * Counts the instances when the kernel context switch sequences were injected.
+         */
+        SCHED_STAT_KERNEL_SWITCH_SEQUENCE_INJECTIONS,
+        /**
+         * Counts the instances when the kernel syscall sequences were injected.
+         */
+        SCHED_STAT_KERNEL_SYSCALL_SEQUENCE_INJECTIONS,
+        /** Count of statistic types. */
+        SCHED_STAT_TYPE_COUNT,
+    };
+
     /** Destructor. */
     virtual ~memtrace_stream_t()
     {
@@ -154,6 +215,129 @@ public:
     {
         return false;
     }
+
+    /**
+     * Returns the 0-based ordinal for the current shard.  For parallel analysis,
+     * this equals the \p shard_index passed to parallel_shard_init_stream().
+     * This is more useful for serial modes where there is no other convenience mechanism
+     * to determine such an index; it allows a tool to compute per-shard results even in
+     * serial mode.  The shard orderings in serial mode may not always mach the ordering
+     * in parallel mode. If not implemented, -1 is returned.
+     */
+    virtual int
+    get_shard_index() const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns a unique identifier for the current "output cpu".  Generally this only
+     * applies when using #SHARD_BY_CORE.  For dynamic schedules, the identifier is
+     * typically an output cpu ordinal equal to get_shard_index().  For replaying an
+     * as-traced schedule, the
+     * identifier is typically the original input cpu which is now mapped directly
+     * to this output.  If not implemented for the current mode, -1 is returned.
+     */
+    virtual int64_t
+    get_output_cpuid() const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns a unique identifier for the current workload.  This might be an ordinal
+     * from the list of active workloads, or some other identifier.  This is guaranteed
+     * to be unique among all inputs. If not implemented for the current mode, -1 is
+     * returned.
+     */
+    virtual int64_t
+    get_workload_id() const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns a unique identifier for the current input trace.  This might be an ordinal
+     * from the list of active inputs, or some other identifier.  This is guaranteed to
+     * be unique among all inputs.  If not implemented for the current mode, -1 is
+     * returned.
+     */
+    virtual int64_t
+    get_input_id() const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns the thread identifier for the current input trace.
+     * This is a convenience method for use in parallel_shard_init_stream()
+     * prior to access to any #memref_t records.
+     */
+    virtual int64_t
+    get_tid() const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns the stream interface for the current input trace.  This differs from
+     * "this" for #SHARD_BY_CORE where multiple inputs are interleaved on one
+     * output stream ("this").
+     * If not implemented for the current mode, nullptr is returned.
+     */
+    virtual memtrace_stream_t *
+    get_input_interface() const
+    {
+        return nullptr;
+    }
+
+    /**
+     * Returns whether the current record is from a part of the trace corresponding
+     * to kernel execution.
+     */
+    virtual bool
+    is_record_kernel() const
+    {
+        return false;
+    }
+
+    /**
+     * Returns the value of the specified statistic for this output stream.
+     * The values for all output stream must be summed to obtain global counts.
+     * Returns -1 if statistics are not supported for this stream.
+     */
+    virtual double
+    get_schedule_statistic(schedule_statistic_t stat) const
+    {
+        return -1;
+    }
+
+    /**
+     * Returns the value of the next continuous PC in the trace after the
+     * current trace record. This PC is from the next instruction or the
+     * next #TRACE_MARKER_TYPE_KERNEL_EVENT, whichever comes first.
+     *
+     * This is not supported during online analysis, and for i-filtered
+     * traces. i-filtered traces have a zero-sized instr entry before memrefs,
+     * which is not presented to the tools. Reading ahead past them to provide
+     * the actual next trace pc complicates read-ahead logic especially for
+     * zipfile readers.
+     *
+     * As the record stream proceeds to the next record, the value returned
+     * by this routine generally changes only when the record corresponding
+     * to the prior returned "next trace pc" value is seen. It may also
+     * change when a dynamic decision is made by the drmemtrace scheduler
+     * to insert trace records for a system call or context switch sequence,
+     * at the #TRACE_MARKER_TYPE_SYSCALL and #TRACE_MARKER_TYPE_CONTEXT_SWITCH_START
+     * markers respectively. Also, when dynamic injection for context switch
+     * sequences is not enabled, the returned value may change when the
+     * actual switch to a new input is made.
+     */
+    virtual uint64_t
+    get_next_trace_pc() const
+    {
+        return 0;
+    }
 };
 
 /**
@@ -189,10 +373,15 @@ public:
     {
         return "";
     }
+    void
+    set_last_timestamp(uint64_t timestamp)
+    {
+        last_timestamp_ = timestamp;
+    }
     uint64_t
     get_last_timestamp() const override
     {
-        return 0;
+        return last_timestamp_;
     }
     uint64_t
     get_first_timestamp() const override
@@ -225,8 +414,77 @@ public:
         return 0;
     }
 
+    void
+    set_output_cpuid(int64_t cpuid)
+    {
+        cpuid_ = cpuid;
+    }
+    int64_t
+    get_output_cpuid() const override
+    {
+        return cpuid_;
+    }
+    void
+    set_shard_index(int index)
+    {
+        shard_ = index;
+    }
+    int
+    get_shard_index() const override
+    {
+        return shard_;
+    }
+    int64_t
+    get_workload_id() const override
+    {
+        return workload_id_;
+    }
+    // Also sets the shard index to the dynamic-discovery-order tid ordinal.
+    void
+    set_tid(int64_t tid)
+    {
+        tid_ = tid;
+        auto exists = tid2shard_.find(tid);
+        if (exists == tid2shard_.end()) {
+            int index = static_cast<int>(tid2shard_.size());
+            tid2shard_[tid] = index;
+            set_shard_index(index);
+        } else {
+            set_shard_index(exists->second);
+        }
+    }
+    int64_t
+    get_tid() const override
+    {
+        return tid_;
+    }
+    void
+    set_workload_id(int64_t id)
+    {
+        workload_id_ = id;
+    }
+
+    bool
+    is_record_kernel() const override
+    {
+        return in_kernel_trace_;
+    }
+    void
+    set_in_kernel_trace(bool in_kernel_trace)
+    {
+        in_kernel_trace_ = in_kernel_trace;
+    }
+
 private:
-    uint64_t *record_ordinal_;
+    uint64_t *record_ordinal_ = nullptr;
+    int64_t cpuid_ = 0;
+    int shard_ = 0;
+    int64_t tid_ = 0;
+    int64_t workload_id_ = 0;
+    int64_t last_timestamp_ = 0;
+    bool in_kernel_trace_ = false;
+    // To let a test set just the tid and get a shard index for free.
+    std::unordered_map<int64_t, int> tid2shard_;
 };
 
 } // namespace drmemtrace

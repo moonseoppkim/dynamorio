@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2021 Google, Inc.    All rights reserved.
+# Copyright (c) 2021-2025 Google, Inc.    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -28,7 +28,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 include(../../make/policies.cmake NO_POLICY_SCOPE)
 
@@ -48,11 +48,15 @@ endif ()
 
 add_library(drcallstack SHARED ${srcs})
 set(PREFERRED_BASE 0x79800000)
-configure_extension(drcallstack OFF)
+configure_extension(drcallstack OFF OFF)
 target_link_libraries(drcallstack unwind)
 
 add_library(drcallstack_static STATIC ${srcs_static})
-configure_extension(drcallstack_static ON)
+configure_extension(drcallstack_static ON OFF)
 target_link_libraries(drcallstack_static unwind)
+
+add_library(drcallstack_drstatic STATIC ${srcs_static})
+configure_extension(drcallstack_drstatic ON ON)
+target_link_libraries(drcallstack_drstatic unwind)
 
 install_ext_header(drcallstack.h)

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _FUNC_VIEW_H_
-#define _FUNC_VIEW_H_ 1
+#define _FUNC_VIEW_H_
 
 #include <stddef.h>
 #include <stdint.h>
@@ -59,7 +59,9 @@ public:
                 unsigned int verbose = 0);
     virtual ~func_view_t();
     std::string
-    initialize() override;
+    initialize_shard_type(shard_type_t shard_type) override;
+    std::string
+    initialize_stream(memtrace_stream_t *serial_stream) override;
     bool
     process_memref(const memref_t &memref) override;
     bool
@@ -67,7 +69,8 @@ public:
     bool
     parallel_shard_supported() override;
     void *
-    parallel_shard_init(int shard_index, void *worker_data) override;
+    parallel_shard_init_stream(int shard_index, void *worker_data,
+                               memtrace_stream_t *stream) override;
     bool
     parallel_shard_exit(void *shard_data) override;
     bool
@@ -89,7 +92,7 @@ protected:
         // TODO i#4083: Record the arg and retval distributions.
     };
     struct shard_data_t {
-        memref_tid_t tid = 0;
+        memref_tid_t tid = 0; // We only support SHARD_BY_THREAD.
         std::unordered_map<int, func_stats_t> func_map;
         std::string error;
         // We use the function markers to record arguments and return
@@ -108,16 +111,22 @@ protected:
         std::string last_trace_module_name;
     };
     struct traced_info_t {
-        int id = -1;
         std::set<std::string> names;
-        int num_args = 0;
+        int num_args = -1; // Illegal value to mark uninitialized info structs.
         bool noret = false;
     };
+
+    // Lookup the information for the shard's last_func_id and return its traced_info_t
+    // struct.  Sets shard.error if the ID is not found (but still returns a traced_info_t
+    // reference).
+    traced_info_t &
+    get_info_for_last_func_id(shard_data_t *shard);
 
     static bool
     cmp_func_stats(const std::pair<int, func_stats_t> &l,
                    const std::pair<int, func_stats_t> &r);
-    void
+    // Process markers, return true on success.
+    bool
     process_memref_for_markers(void *shard_data, const memref_t &memref);
     std::unordered_map<int, func_stats_t>
     compute_totals();
@@ -130,11 +139,11 @@ protected:
 
     std::string funclist_file_path_;
 
-    // The keys here are shard index for parallel, tid for serial.
-    std::unordered_map<memref_tid_t, shard_data_t *> shard_map_;
+    std::unordered_map<int, shard_data_t *> shard_map_;
     // This mutex is only needed in parallel_shard_init.  In all other accesses to
     // shard_map (process_memref, print_results) we are single-threaded.
     std::mutex shard_map_mutex_;
+    memtrace_stream_t *serial_stream_ = nullptr;
 };
 
 } // namespace drmemtrace

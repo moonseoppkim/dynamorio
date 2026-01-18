@@ -1,6 +1,6 @@
 /* **********************************************************
- * Copyright (c) 2019-2023 Google, Inc. All rights reserved.
- * Copyright (c) 2016 ARM Limited. All rights reserved.
+ * Copyright (c) 2019-2025 Google, Inc. All rights reserved.
+ * Copyright (c) 2016-2025 ARM Limited. All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,6 +35,7 @@
  * AArch64-specific assembly and trampoline code
  */
 
+#include "asm_offsets.h"
 #include "../asm_defines.asm"
 START_FILE
 
@@ -46,50 +47,16 @@ START_FILE
 # error Non-Unix is not supported
 #endif
 
-/* sizeof(priv_mcontext_t) rounded up to a multiple of 16 */
-#define PRIV_MCONTEXT_SIZE 3424
-
-/* offsetof(spill_state_t, r0) */
-#define spill_state_r0_OFFSET 0
-/* offsetof(spill_state_t, r1) */
-#define spill_state_r1_OFFSET 8
-/* offsetof(spill_state_t, r2) */
-#define spill_state_r2_OFFSET 16
-/* offsetof(spill_state_t, r3) */
-#define spill_state_r3_OFFSET 24
-/* offsetof(spill_state_t, r4) */
-#define spill_state_r4_OFFSET 32
-/* offsetof(spill_state_t, r5) */
-#define spill_state_r5_OFFSET 40
-/* offsetof(spill_state_t, dcontext) */
-#define spill_state_dcontext_OFFSET 56
-/* offsetof(spill_state_t, fcache_return) */
-#define spill_state_fcache_return_OFFSET 64
-
-/* offsetof(priv_mcontext_t, simd) */
-#define simd_OFFSET (16 * ARG_SZ*2 + 32)
-/* offsetof(dcontext_t, dstack) */
-#define dstack_OFFSET     0xda8
-/* offsetof(dcontext_t, is_exiting) */
-#define is_exiting_OFFSET (dstack_OFFSET+1*ARG_SZ)
-/* offsetof(struct tlsdesc_t, arg) */
-#define tlsdesc_arg_OFFSET 8
-
-/* offsetof(icache_op_struct_t, flag) */
-#define icache_op_struct_flag_OFFSET 0
-/* offsetof(icache_op_struct_t, lock) */
-#define icache_op_struct_lock_OFFSET 4
-/* offsetof(icache_op_struct_t, linesize) */
-#define icache_op_struct_linesize_OFFSET 8
-/* offsetof(icache_op_struct_t, begin) */
-#define icache_op_struct_begin_OFFSET 16
-/* offsetof(icache_op_struct_t, end) */
-#define icache_op_struct_end_OFFSET 24
-/* offsetof(icache_op_struct_t, spill) */
-#define icache_op_struct_spill_OFFSET 32
-
 #ifndef X64
 # error X64 must be defined
+#endif
+
+#if (spill_state_t_OFFSET_r1 != spill_state_t_OFFSET_r0 + 1 * 8 || \
+     spill_state_t_OFFSET_r2 != spill_state_t_OFFSET_r0 + 2 * 8 || \
+     spill_state_t_OFFSET_r3 != spill_state_t_OFFSET_r0 + 3 * 8 || \
+     spill_state_t_OFFSET_r4 != spill_state_t_OFFSET_r0 + 4 * 8 || \
+     spill_state_t_OFFSET_r5 != spill_state_t_OFFSET_r0 + 5 * 8)
+#    error Code in this file assumes r0, r1, r2, r3, r4, r5 consecutive.
 #endif
 
 #if defined(UNIX)
@@ -101,21 +68,7 @@ DECL_EXTERN(d_r_internal_error)
 DECL_EXTERN(exiting_thread_count)
 DECL_EXTERN(d_r_initstack)
 DECL_EXTERN(initstack_mutex)
-DECL_EXTERN(icache_op_struct)
 DECL_EXTERN(linkstub_selfmod)
-
-/* For debugging: report an error if the function called by call_switch_stack()
- * unexpectedly returns.  Also used elsewhere.
- */
-        DECLARE_FUNC(unexpected_return)
-GLOBAL_LABEL(unexpected_return:)
-        CALLC3(GLOBAL_REF(d_r_internal_error), HEX(0), HEX(0), HEX(0))
-        /* d_r_internal_error normally never returns */
-        /* Infinite loop is intentional.  Can we do better in release build?
-         * XXX: why not a debug instr?
-         */
-        JUMP  GLOBAL_REF(unexpected_return)
-        END_FUNC(unexpected_return)
 
 /* bool mrs_id_reg_supported(void)
  * Checks for kernel support of the MRS instr when reading system registers
@@ -158,7 +111,9 @@ call_dispatch_alt_stack_no_free:
         /* Switch stack back. */
         mov      sp, x19
         /* Test return_on_return. */
-        cbz      w20, GLOBAL_REF(unexpected_return)
+        cbnz     w20, call_dispatch_alt_stack_ok_return
+        bl       GLOBAL_REF(unexpected_return)
+call_dispatch_alt_stack_ok_return:
         /* Restore and return. */
         ldr      x19, [sp, #16]
         ldp      x20, x30, [sp], #32
@@ -189,7 +144,7 @@ GLOBAL_LABEL(dr_call_on_clean_stack:)
         stp      x29, x30, [sp, #-16]! /* Save frame pointer and link register. */
         mov      x29, sp /* Save sp across the call. */
         /* Swap stacks. */
-        ldr      x30, [x0, #dstack_OFFSET]
+        ldr      x30, [x0, #dcontext_t_OFFSET_dstack]
         mov      sp, x30
         /* Set up args. */
         mov      x30, x1 /* void *(*func)(arg1...arg8) */
@@ -236,17 +191,43 @@ save_priv_mcontext_helper:
         str      w1, [x0, #(16 * ARG_SZ*2 + 8)]
         str      w2, [x0, #(16 * ARG_SZ*2 + 12)]
         str      w3, [x0, #(16 * ARG_SZ*2 + 16)]
-        add      x4, x0, #simd_OFFSET
-        st1      {v0.2d-v3.2d}, [x4], #64
-        st1      {v4.2d-v7.2d}, [x4], #64
-        st1      {v8.2d-v11.2d}, [x4], #64
-        st1      {v12.2d-v15.2d}, [x4], #64
-        st1      {v16.2d-v19.2d}, [x4], #64
-        st1      {v20.2d-v23.2d}, [x4], #64
-        st1      {v24.2d-v27.2d}, [x4], #64
-        st1      {v28.2d-v31.2d}, [x4], #64
-        /* TODO i#5365: Save Z/P regs as well? Will require runtime check of
-         * ID_AA64PFR0_EL1 for FEAT_SVE.
+        add      x4, x0, #priv_mcontext_t_OFFSET_simd
+
+        /* Registers Q0-Q31 map directly to registers V0-V31. */
+        str      q0, [x4], #64
+        str      q1, [x4], #64
+        str      q2, [x4], #64
+        str      q3, [x4], #64
+        str      q4, [x4], #64
+        str      q5, [x4], #64
+        str      q6, [x4], #64
+        str      q7, [x4], #64
+        str      q8, [x4], #64
+        str      q9, [x4], #64
+        str      q10, [x4], #64
+        str      q11, [x4], #64
+        str      q12, [x4], #64
+        str      q13, [x4], #64
+        str      q14, [x4], #64
+        str      q15, [x4], #64
+        str      q16, [x4], #64
+        str      q17, [x4], #64
+        str      q18, [x4], #64
+        str      q19, [x4], #64
+        str      q20, [x4], #64
+        str      q21, [x4], #64
+        str      q22, [x4], #64
+        str      q23, [x4], #64
+        str      q24, [x4], #64
+        str      q25, [x4], #64
+        str      q26, [x4], #64
+        str      q27, [x4], #64
+        str      q28, [x4], #64
+        str      q29, [x4], #64
+        str      q30, [x4], #64
+        str      q31, [x4], #64
+        /* TODO i#5365, i#5036: Save Z/P regs as well? Will require runtime
+         * check of ID_AA64PFR0_EL1 for FEAT_SVE.
          */
         ret
 
@@ -255,15 +236,15 @@ GLOBAL_LABEL(dr_app_start:)
         /* Save FP and LR for the case that DR is not taking over. */
         stp      x29, x30, [sp, #-16]!
         /* Build a priv_mcontext_t on the stack. */
-        sub      sp, sp, #PRIV_MCONTEXT_SIZE
+        sub      sp, sp, #priv_mcontext_t_SIZE
         stp      x0, x1, [sp, #(0 * ARG_SZ*2)]
-        add      x0, sp, #(PRIV_MCONTEXT_SIZE + 16) /* compute original SP */
+        add      x0, sp, #(priv_mcontext_t_SIZE + 16) /* compute original SP */
         stp      x30, x0, [sp, #(15 * ARG_SZ*2)]
         str      x30, [sp, #(16 * ARG_SZ*2)] /* save LR as PC */
         CALLC1(save_priv_mcontext_helper, sp)
         CALLC1(GLOBAL_REF(dr_app_start_helper), sp)
         /* If we get here, DR is not taking over. */
-        add      sp, sp, #PRIV_MCONTEXT_SIZE
+        add      sp, sp, #priv_mcontext_t_SIZE
         ldp      x29, x30, [sp], #16
         ret
         END_FUNC(dr_app_start)
@@ -286,15 +267,15 @@ GLOBAL_LABEL(dynamorio_app_take_over:)
         /* Save FP and LR for the case that DR is not taking over. */
         stp      x29, x30, [sp, #-16]!
         /* Build a priv_mcontext_t on the stack. */
-        sub      sp, sp, #PRIV_MCONTEXT_SIZE
+        sub      sp, sp, #priv_mcontext_t_SIZE
         stp      x0, x1, [sp, #(0 * ARG_SZ*2)]
-        add      x0, sp, #(PRIV_MCONTEXT_SIZE + 16) /* compute original SP */
+        add      x0, sp, #(priv_mcontext_t_SIZE + 16) /* compute original SP */
         stp      x30, x0, [sp, #(15 * ARG_SZ*2)]
         str      x30, [sp, #(16 * ARG_SZ*2)] /* save LR as PC */
         CALLC1(save_priv_mcontext_helper, sp)
         CALLC1(GLOBAL_REF(dynamorio_app_take_over_helper), sp)
         /* If we get here, DR is not taking over. */
-        add      sp, sp, #PRIV_MCONTEXT_SIZE
+        add      sp, sp, #priv_mcontext_t_SIZE
         ldp      x29, x30, [sp], #16
         ret
         END_FUNC(dynamorio_app_take_over)
@@ -332,14 +313,14 @@ GLOBAL_LABEL(cleanup_and_terminate:)
 
         /* save dcontext->dstack for freeing later and set dcontext->is_exiting */
         mov      w1, #1
-        mov      x2, #(is_exiting_OFFSET)
+        mov      x2, #dcontext_t_OFFSET_is_exiting
         str      w1, [x19, x2] /* dcontext->is_exiting = 1 */
         CALLC1(GLOBAL_REF(is_currently_on_dstack), x19)
         cbnz     w0, cat_save_dstack
         mov      x24, #0
         b        cat_done_saving_dstack
 cat_save_dstack:
-        mov      x2, #(dstack_OFFSET)
+        mov      x2, #(dcontext_t_OFFSET_dstack)
         ldr      x24, [x19, x2]
 cat_done_saving_dstack:
         CALLC0(GLOBAL_REF(get_cleanup_and_terminate_global_do_syscall_entry))
@@ -351,9 +332,9 @@ cat_thread_only:
         CALLC0(GLOBAL_REF(dynamo_thread_exit))
 cat_no_thread:
         /* switch to d_r_initstack for cleanup of dstack */
-        AARCH64_ADRP_GOT(GLOBAL_REF(initstack_mutex), x26)
+        AARCH64_ADRP_GOT(GLOBAL_REF(initstack_mutex), x0)
 cat_spin:
-        CALLC2(GLOBAL_REF(atomic_swap), x26, #1)
+        CALLC2(GLOBAL_REF(atomic_swap), x0, #1)
         cbz      w0, cat_have_lock
         yield
         b        cat_spin
@@ -386,7 +367,7 @@ cat_have_lock:
         mov      SYSNUM_REG, w20 /* sys_call */
 
         br       x25  /* go do the syscall! */
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(cleanup_and_terminate)
 
 #endif /* NOT_DYNAMORIO_CORE_PROPER */
@@ -405,7 +386,7 @@ GLOBAL_LABEL(global_do_syscall_int:)
 #ifdef MACOS
         svc      #0x80
 #else
-        /* FIXME i#1569: NYI on AArch64 */
+        /* TODO i#1569: NYI on AArch64 */
         svc      #0
 #endif
         bl       GLOBAL_REF(unexpected_return)
@@ -418,10 +399,10 @@ DECLARE_GLOBAL(safe_read_asm_recover)
 
 /* i#350: Xref comment in x86.asm about safe_read.
  *
- * FIXME i#1569: NYI: We need to save the PC's that can fault and have
+ * TODO i#1569: NYI: We need to save the PC's that can fault and have
  * is_safe_read_pc() identify them.
  *
- * FIXME i#1569: We should optimize this as it can be on the critical path.
+ * XXX i#1569: We should optimize this as it can be on the critical path.
  *
  * void *safe_read_asm(void *dst, const void *src, size_t n);
  */
@@ -517,38 +498,21 @@ GLOBAL_LABEL(atomic_swap:)
 #ifdef UNIX
         DECLARE_FUNC(client_int_syscall)
 GLOBAL_LABEL(client_int_syscall:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(client_int_syscall)
 
         DECLARE_FUNC(native_plt_call)
 GLOBAL_LABEL(native_plt_call:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(native_plt_call)
 
         DECLARE_FUNC(_dynamorio_runtime_resolve)
 GLOBAL_LABEL(_dynamorio_runtime_resolve:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(_dynamorio_runtime_resolve)
 #endif /* UNIX */
 
 #ifdef LINUX
-/* thread_id_t dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls,
- *                             void *ctid, void (*func)(void))
- */
-        DECLARE_FUNC(dynamorio_clone)
-GLOBAL_LABEL(dynamorio_clone:)
-        stp      ARG6, x0, [ARG2, #-16]! /* func is now on TOS of newsp */
-        /* All args are already in syscall registers. */
-        mov      SYSNUM_REG, #SYS_clone
-        svc      #0
-        cbnz     x0, dynamorio_clone_parent
-        ldp      x0, x1, [sp], #16
-        blr      x0
-        bl       GLOBAL_REF(unexpected_return)
-dynamorio_clone_parent:
-        ret
-        END_FUNC(dynamorio_clone)
-
         DECLARE_FUNC(dynamorio_sigreturn)
 GLOBAL_LABEL(dynamorio_sigreturn:)
         mov      SYSNUM_REG, #SYS_rt_sigreturn
@@ -595,8 +559,21 @@ GLOBAL_LABEL(dynamorio_sys_exit:)
 
         DECLARE_FUNC(new_bsdthread_intercept)
 GLOBAL_LABEL(new_bsdthread_intercept:)
-        /* TODO i#5383: Get correct syscall number for svc. */
-        brk 0xb003 /* For now we break with a unique code. */
+        /* We assume we can clobber callee-saved */
+        mov      x9, ARG1 /* This is the clone_rec argument set in pre_system_call */
+
+        /* Push a priv_mcontext on the stack */
+        sub      sp, sp, #priv_mcontext_t_SIZE
+        stp      x0, x1, [sp, #(0 * ARG_SZ*2)]
+        add      x0, sp, #(priv_mcontext_t_SIZE) /* compute original SP */
+        stp      x30, x0, [sp, #(15 * ARG_SZ*2)]
+        str      x30, [sp, #(16 * ARG_SZ*2)] /* save LR as PC */
+
+        CALLC1(save_priv_mcontext_helper, sp)
+
+        CALLC1(GLOBAL_REF(new_bsdthread_setup), sp)
+        /* Should not return */
+        bl       GLOBAL_REF(unexpected_return)
         END_FUNC(new_bsdthread_intercept)
 #endif
 
@@ -619,19 +596,19 @@ GLOBAL_LABEL(main_signal_handler:)
 
         DECLARE_FUNC(hashlookup_null_handler)
 GLOBAL_LABEL(hashlookup_null_handler:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(hashlookup_null_handler)
 
         DECLARE_FUNC(back_from_native_retstubs)
 GLOBAL_LABEL(back_from_native_retstubs:)
 DECLARE_GLOBAL(back_from_native_retstubs_end)
 ADDRTAKEN_LABEL(back_from_native_retstubs_end:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(back_from_native_retstubs)
 
         DECLARE_FUNC(back_from_native)
 GLOBAL_LABEL(back_from_native:)
-        bl       GLOBAL_REF(unexpected_return) /* FIXME i#1569: NYI */
+        bl       GLOBAL_REF(unexpected_return) /* TODO i#1569: NYI */
         END_FUNC(back_from_native)
 
 /* A static resolver for TLS descriptors, implemented in assembler as
@@ -645,195 +622,58 @@ GLOBAL_LABEL(back_from_native:)
  */
         DECLARE_FUNC(tlsdesc_resolver)
 GLOBAL_LABEL(tlsdesc_resolver:)
-        ldr      x0, [x0, #tlsdesc_arg_OFFSET]
+        ldr      x0, [x0, #struct_tlsdesc_t_OFFSET_arg]
         ret
 
 /* This function is called from the fragment cache when the original code had
- * IC IVAU, Xt. Typically it just records which cache lines have been invalidated
- * and sets icache_op_struct.flag. However, if non-contiguous cache lines have
- * been invalidated we branch to fcache_return instead of returning.
- * When we enter here:
+ * IC IVAU, Xt. When we enter here:
  *
  * X0 contains the pointer to spill_state_t.
- * X30 contains the return address in the fragment cache.
  * TLS_REG0_SLOT contains app's X0.
  * TLS_REG1_SLOT contains app's X30.
  * TLS_REG2_SLOT contains the argument of "IC IVAU, Xt".
  * TLS_REG3_SLOT contains the original address of the instruction after the IC.
  *
- * If we return, the first two slots and all registers except X0 and X30 must
- * be preserved.
+ * When we branch to fcache_return:
  *
- * XXX: We do not correctly handle the case where the set of contiguous cache
- * lines covers the entire address space, so begin == end again, but that would
- * require more than 1e14 calls to this function even with the largest possible
- * icache line.
+ * X0 contains linkstub_selfmod.
+ * X1 contains fcache_return.
+ * TLS_REG0_SLOT contains app's X0.
+ * TLS_REG1_SLOT contains app's X1.
+ * TLS_REG2_SLOT contains begin of flushed region.
+ * TLS_REG3_SLOT contains end of flushed region.
+ * TLS_REG4_SLOT contains the original address of the instruction after the IC.
  */
         DECLARE_FUNC(icache_op_ic_ivau_asm)
 GLOBAL_LABEL(icache_op_ic_ivau_asm:)
-        /* Spill X1 and X2 to TLS_REG4_SLOT and TLS_REG5_SLOT. */
-        stp      x1, x2, [x0, #spill_state_r4_OFFSET]
-        /* Point X1 at icache_op_struct.lock. */
-        AARCH64_ADRP_GOT((GLOBAL_REF(icache_op_struct) + icache_op_struct_lock_OFFSET), x1)
-        /* Acquire lock. */
-        prfm     pstl1keep, [x1]
-1:
-        ldaxr    w2, [x1]
-        cbnz     w2, 1b
-        stxr     w2, w1, [x1] /* w1 is non-zero! */
-        cbnz     w2, 1b
-        /* Point X1 at iccache_op_struct. */
-        sub      x1, x1, #icache_op_struct_lock_OFFSET
-        /* Spill X3 and X4 to icache_op_struct.spill. */
-        stp      x3, x4, [x1, #icache_op_struct_spill_OFFSET]
-        /* Load size of icache line to X2. */
-        ldr      x2, [x1, #icache_op_struct_linesize_OFFSET]
-        cbz      x2, set_linesize
-linesize_set:
-        /* Align argument to cache line. */
-        ldr      x3, [x0, #spill_state_r2_OFFSET]
-        sub      x4, x2, #1
-        bic      x3, x3, x4
-        str      x3, [x0, #spill_state_r2_OFFSET]
-        /* Is (begin == end)? */
-        ldp      x3, x4, [x1, #icache_op_struct_begin_OFFSET]
-        eor      x3, x3, x4
-        cbnz     x3, 2f
-        /* Yes, so set begin, end, flag, and return. */
-        ldr      x3, [x0, #spill_state_r2_OFFSET]
-        add      x4, x3, x2
-        stp      x3, x4, [x1, #icache_op_struct_begin_OFFSET]
-        mov      w3, #1
-        str      w3, [x1, #icache_op_struct_flag_OFFSET]
-        b        ic_ivau_return
-2:
-        /* Is (argument == end)? */
-        ldr      x3, [x0, #spill_state_r2_OFFSET]
-        ldr      x4, [x1, #(icache_op_struct_begin_OFFSET + 8)]
-        eor      x4, x3, x4
-        cbnz     x4, 3f
-        /* Yes, so increment end by linesize, and return. */
-        add      x3, x3, x2
-        str      x3, [x1, #(icache_op_struct_begin_OFFSET + 8)]
-        b        ic_ivau_return
-3:
-        /* Is (argument == begin - linesize)? */
-        ldr      x4, [x1, #icache_op_struct_begin_OFFSET]
-        sub      x4, x4, x2
-        eor      x4, x3, x4
-        cbnz     x4, 4f
-        /* Yes, so decrement begin by linesize, and return. */
-        str      x3, [x1, #icache_op_struct_begin_OFFSET]
-        b        ic_ivau_return
-4:
-        /* Is argument in the range from begin to end? */
-        ldp      x2, x4, [x1, #icache_op_struct_begin_OFFSET]
-        sub      x3, x3, x2 /* (argument - begin) */
-        sub      x4, x4, x2 /* (end - begin) */
-        lsr      x3, x3, #1
-        sub      x3, x3, x4, lsr #1 /* ((argument - begin) / 2 - (end - begin) / 2) */
-        tbz      x3, #63, 5f
-        /* Yes, so just return. */
-ic_ivau_return:
-        /* Restore X3 and X4 from icache_op_struct.spill. */
-        ldp      x3, x4, [x1, #icache_op_struct_spill_OFFSET]
-        /* Point X1 at icache_op_struct_lock. */
-        add      x1, x1, #icache_op_struct_lock_OFFSET
-        /* Release lock. */
-        stlr     wzr, [x1]
-        /* Restore X1 and X2 from TLS_REG4_SLOT and TLS_REG5_SLOT. */
-        ldp      x1, x2, [x0, #spill_state_r4_OFFSET]
-        /* Return to fragment cache. */
-        ret
-5:
-        /* The new cache line is not contiguous with the previous set. */
-        /* Restore X30 from TLS_REG1_SLOT. */
-        ldr      x30, [x0, #spill_state_r1_OFFSET]
-        /* Move PC and X1 from slots 3 and 4 to slots 4 and 1. */
-        ldp      x3, x4, [x0, #spill_state_r3_OFFSET]
-        str      x3, [x0, #spill_state_r4_OFFSET]
-        str      x4, [x0, #spill_state_r1_OFFSET]
-        /* Load argument from TLS_REG2_SLOT to X2. */
-        ldr      x2, [x0, #spill_state_r2_OFFSET]
-        /* Save (begin, end) to TLS_REG_SLOT2 and TLS_REG_SLOT3. */
-        ldp      x3, x4, [x1, #icache_op_struct_begin_OFFSET]
-        stp      x3, x4, [x0, #spill_state_r2_OFFSET]
-        /* Set icache_op_struct. */
-        ldr      x4, [x1, #icache_op_struct_linesize_OFFSET]
-        add      x3, x2, x4
-        stp      x2, x3, [x1, #icache_op_struct_begin_OFFSET]
-        /* Restore X2 from TLS_REG5_SLOT. */
-        ldr      x2, [x0, #spill_state_r5_OFFSET]
-        /* Restore X3 and X4 from icache_op_struct.spill. */
-        ldp      x3, x4, [x1, #icache_op_struct_spill_OFFSET]
-        /* Release lock. */
-        add      x1, x1, #icache_op_struct_lock_OFFSET
-        stlr     wzr, [x1]
-        /* Load fcache_return into X1. */
-        ldr      x1, [x0, #spill_state_fcache_return_OFFSET]
-        /* Point X0 at fake linkstub. */
-        AARCH64_ADRP_GOT(GLOBAL_REF(linkstub_selfmod), x0)
-        /* Branch to fcache_return. */
-        br       x1
-
-set_linesize:
-        mrs      x3, ctr_el0
-        and      w3, w3, #15
+        /* Copy app's PC and X2 to slots 4 and 5. */
+        ldr      x30, [x0, #spill_state_t_OFFSET_r3]
+        stp      x30, x2, [x0, #spill_state_t_OFFSET_r4]
+        /* Compute icache line size in X30. */
+        mrs      x30, ctr_el0
+        and      x30, x30, #15
         mov      x2, #4
-        lsl      x2, x2, x3
-        str      x2, [x1, #icache_op_struct_linesize_OFFSET]
-        b        linesize_set
-
-        END_FUNC(icache_op_ic_ivau_asm)
-
-/* This code is branched to from the fragment cache when the original code had
- * ISB and icache_op_struct.flag was found to be set. We must reset icache_op_struct,
- * then branch to fcache_return, where we will call flush_fragments_from_region.
- * When we enter here:
- *
- * X0 contains the pointer to spill_state_t.
- * X1 contains the original address of the instruction after the ISB.
- * X2 is corrupted.
- * TLS_REG0_SLOT contains app's X0.
- * TLS_REG1_SLOT contains app's X1.
- * TLS_REG2_SLOT contains app's X2.
- */
-        DECLARE_FUNC(icache_op_isb_asm)
-GLOBAL_LABEL(icache_op_isb_asm:)
-        /* Save PC to TLS_REG4_SLOT, and move X2 to TLS_REG5_SLOT. */
-        ldr      x2, [x0, #spill_state_r2_OFFSET]
-        stp      x1, x2, [x0, #spill_state_r4_OFFSET]
-        /* Point X1 at icache_op_struct.lock. */
-        AARCH64_ADRP_GOT((GLOBAL_REF(icache_op_struct) + icache_op_struct_lock_OFFSET), x1)
-        /* Acquire lock. */
-        prfm     pstl1keep, [x1]
-1:
-        ldaxr    w2, [x1]
-        cbnz     w2, 1b
-        stxr     w2, w1, [x1] /* w2 is non-zero! */
-        cbnz     w2, 1b
-        /* Point X1 at icache_op_struct. */
-        sub      x1, x1, #icache_op_struct_lock_OFFSET
-        /* Save (begin, end) to TLS_REG_SLOT2 and TLS_REG_SLOT3. */
-        ldr      x2, [x1, #icache_op_struct_begin_OFFSET]
-        str      x2, [x0, #spill_state_r2_OFFSET]
-        ldr      x2, [x1, #icache_op_struct_end_OFFSET]
-        str      x2, [x0, #spill_state_r3_OFFSET]
-        /* Reset icache_op_struct. */
-        str      wzr, [x1, #icache_op_struct_flag_OFFSET]
-        stp      xzr, xzr, [x1, #icache_op_struct_begin_OFFSET]
-        /* Point X1 at icache_op_struct.lock. */
-        add      x1, x1, #4
-        /* Release lock. */
-        stlr     wzr, [x1]
-        /* Restore X2 from TLS_REG5_SLOT. */
-        ldr      x2, [x0, #spill_state_r5_OFFSET]
+        lsl      x30, x2, x30
+        /* Compute "begin" of region to be flushed in X2. */
+        ldr      x2, [x0, #spill_state_t_OFFSET_r2]
+        sub      x30, x30, #1
+        bic      x2, x2, x30
+        /* Compute "end" of region to be flushed in X30. */
+        add      x30, x2, x30
+        add      x30, x30, #1
+        /* Write "begin" and "end" to slots 2 and 3. */
+        stp      x2, x30, [x0, #spill_state_t_OFFSET_r2]
+        /* Restore app's X30 and X2. */
+        ldr      x30, [x0, #spill_state_t_OFFSET_r1]
+        ldr      x2, [x0, #spill_state_t_OFFSET_r5]
+        /* Store app's X1 to slot 1. */
+        str      x1, [x0, #spill_state_t_OFFSET_r1]
         /* Load fcache_return into X1. */
-        ldr      x1, [x0, #spill_state_fcache_return_OFFSET]
+        ldr      x1, [x0, #spill_state_t_OFFSET_fcache_return]
         /* Point X0 at fake linkstub. */
         AARCH64_ADRP_GOT(GLOBAL_REF(linkstub_selfmod), x0)
         /* Branch to fcache_return. */
         br       x1
-        END_FUNC(icache_op_isb_asm)
+        END_FUNC(icache_op_ic_ivau_asm)
 
 END_FILE

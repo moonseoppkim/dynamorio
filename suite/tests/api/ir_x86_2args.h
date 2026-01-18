@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -169,7 +169,7 @@ OPCODE(movntss, movntss, movntss, 0, MEMARG(OPSZ_4), REGARG_PARTIAL(XMM0, OPSZ_4
 OPCODE(movntsd, movntsd, movntsd, 0, MEMARG(OPSZ_8), REGARG_PARTIAL(XMM0, OPSZ_8))
 OPCODE(movntps, movntps, movntps, 0, MEMARG(OPSZ_16), REGARG(XMM0))
 OPCODE(movntpd, movntpd, movntpd, 0, MEMARG(OPSZ_16), REGARG(XMM0))
-OPCODE(movntdqa, movntdqa, movntdqa, 0, MEMARG(OPSZ_16), REGARG(XMM0))
+OPCODE(movntdqa, movntdqa, movntdqa, 0, REGARG(XMM0), MEMARG(OPSZ_16))
 OPCODE(movntq, movntq, movntq, 0, MEMARG(OPSZ_8), REGARG(MM0))
 OPCODE(movntdq, movntdq, movntdq, 0, MEMARG(OPSZ_16), REGARG(XMM0))
 OPCODE(movnti, movnti, movnti, 0, MEMARG(OPSZ_4), REGARG(EAX))
@@ -459,3 +459,10 @@ OPCODE(vpabsd, vpabsd, vpabsd, 0, REGARG(XMM1), MEMARG(OPSZ_16))
 OPCODE(vpabsb_256, vpabsb, vpabsb, 0, REGARG(YMM1), MEMARG(OPSZ_32))
 OPCODE(vpabsw_256, vpabsw, vpabsw, 0, REGARG(YMM1), MEMARG(OPSZ_32))
 OPCODE(vpabsd_256, vpabsd, vpabsd, 0, REGARG(YMM1), MEMARG(OPSZ_32))
+
+/****************************************************************************/
+/* GFNI */
+OPCODE(gf2p8mulb_regreg, gf2p8mulb, gf2p8mulb, 0, REGARG(XMM0), REGARG(XMM1))
+OPCODE(gf2p8mulb_regmem, gf2p8mulb, gf2p8mulb, 0, REGARG(XMM0), MEMARG(OPSZ_16))
+OPCODE(gf2p8mulb_reghireg, gf2p8mulb, gf2p8mulb, X64_ONLY, REGARG(XMM0), REGARG(XMM8))
+OPCODE(gf2p8mulb_hiregreg, gf2p8mulb, gf2p8mulb, X64_ONLY, REGARG(XMM8), REGARG(XMM0))

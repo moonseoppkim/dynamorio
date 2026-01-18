@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,7 +40,7 @@
  */
 
 #ifndef _OS_PUBLIC_H_
-#define _OS_PUBLIC_H_ 1
+#define _OS_PUBLIC_H_
 
 #ifdef LINUX
 #    include "include/sigcontext.h"
@@ -205,6 +205,17 @@ typedef kernel_sigcontext_t sigcontext_t;
 #    define SC_SYSNUM_REG SC_R7
 #    define SC_RETURN_REG SC_R0
 #elif defined(RISCV64)
+#    define SC_XIP SC_FIELD(sc_regs.pc)
+#    define SC_RA SC_FIELD(sc_regs.ra)
+#    define SC_XSP SC_FIELD(sc_regs.sp)
+#    define SC_GP SC_FIELD(sc_regs.gp)
+#    define SC_TP SC_FIELD(sc_regs.tp)
+#    define SC_T0 SC_FIELD(sc_regs.t0)
+#    define SC_T1 SC_FIELD(sc_regs.t1)
+#    define SC_T2 SC_FIELD(sc_regs.t2)
+#    define SC_S0 SC_FIELD(sc_regs.s0)
+#    define SC_FP SC_FIELD(sc_regs.s0)
+#    define SC_S1 SC_FIELD(sc_regs.s1)
 #    define SC_A0 SC_FIELD(sc_regs.a0)
 #    define SC_A1 SC_FIELD(sc_regs.a1)
 #    define SC_A2 SC_FIELD(sc_regs.a2)
@@ -213,12 +224,32 @@ typedef kernel_sigcontext_t sigcontext_t;
 #    define SC_A5 SC_FIELD(sc_regs.a5)
 #    define SC_A6 SC_FIELD(sc_regs.a6)
 #    define SC_A7 SC_FIELD(sc_regs.a7)
-#    define SC_FP SC_FIELD(sc_regs.s0)
-#    define SC_RA SC_FIELD(sc_regs.ra)
-#    define SC_XIP SC_FIELD(sc_regs.pc)
-#    define SC_XSP SC_FIELD(sc_regs.sp)
+#    define SC_S2 SC_FIELD(sc_regs.s2)
+#    define SC_S3 SC_FIELD(sc_regs.s3)
+#    define SC_S4 SC_FIELD(sc_regs.s4)
+#    define SC_S5 SC_FIELD(sc_regs.s5)
+#    define SC_S6 SC_FIELD(sc_regs.s6)
+#    define SC_S7 SC_FIELD(sc_regs.s7)
+#    define SC_S8 SC_FIELD(sc_regs.s8)
+#    define SC_S9 SC_FIELD(sc_regs.s9)
+#    define SC_S10 SC_FIELD(sc_regs.s10)
+#    define SC_S11 SC_FIELD(sc_regs.s11)
+#    define SC_T3 SC_FIELD(sc_regs.t3)
+#    define SC_T4 SC_FIELD(sc_regs.t4)
+#    define SC_T5 SC_FIELD(sc_regs.t5)
+#    define SC_T6 SC_FIELD(sc_regs.t6)
 #    define SC_SYSNUM_REG SC_A7
 #    define SC_RETURN_REG SC_A0
 #endif /* X86/ARM */
+
+/* XXX i#5383: macOS 14.4 on ARM64 _init does not seem to get called
+ * without __attribute__((constructor)) but it inexplicably breaks tests if
+ * we add this flag on X86. So we add it only on ARM64 for now.
+ */
+#if defined(MACOS) && defined(AARCH64)
+#    define INITIALIZER_ATTRIBUTES __attribute__((constructor))
+#else
+#    define INITIALIZER_ATTRIBUTES
+#endif
 
 #endif /* _OS_PUBLIC_H_ 1 */

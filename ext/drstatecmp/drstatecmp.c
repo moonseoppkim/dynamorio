@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2021-2022 Google, Inc.   All rights reserved.
+ * Copyright (c) 2021-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 /*
  * Redistribution and use in source and binary forms, with or without
@@ -188,7 +188,7 @@ drstatecmp_aflags_must_be_dead(instrlist_t *bb)
 
 static dr_emit_flags_t
 drstatecmp_app2app_phase(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                         bool translating, OUT void **user_data)
+                         bool translating, DR_PARAM_OUT void **user_data)
 {
     /* Allocate space for user_data. */
     drstatecmp_user_data_t *data = (drstatecmp_user_data_t *)dr_thread_alloc(
@@ -490,7 +490,7 @@ drstatecmp_check_simd_value
 #elif defined(RISCV64)
     (void *tag, dr_simd_t *value, dr_simd_t *expected)
 {
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     ASSERT(false, "Not implemented");
 }
 #endif

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _DR_IR_OPND_H_
-#define _DR_IR_OPND_H_ 1
+#define _DR_IR_OPND_H_
 
 /****************************************************************************
  * OPERAND ROUTINES
@@ -222,6 +222,9 @@ enum {
     OPSZ_8x16, /**< 8 or 16 bytes, but not based on rex prefix, instead dependent
                 * on 32-bit/64-bit mode.
                 */
+    OPSZ_256,  /**< 256 bytes. Needed for RISC-V vector extension with LMUL. */
+    OPSZ_192,  /**< 192 bytes. The size of 3 512-bit SVE Z registers. */
+    OPSZ_addr, /**< OPSZ_4x8 but varies by the address prefix, not the data prefix. */
     /* Add new size here.  Also update size_names[] in decode_shared.c along with
      * the size routines in opnd_shared.c.
      */
@@ -555,6 +558,8 @@ enum {
     DR_REG_BND1, /**< The "bnd1" register. */
     DR_REG_BND2, /**< The "bnd2" register. */
     DR_REG_BND3, /**< The "bnd3" register. */
+
+    DR_REG_AFTER_LAST_VALID_ENUM,
 
 /****************************************************************************/
 #elif defined(AARCHXX)
@@ -1010,10 +1015,11 @@ enum {
     DR_REG_SPSR_ABT,        /**< The "spsr_abt" register. */
     DR_REG_SPSR_UND,        /**< The "spsr_und" register. */
     DR_REG_SPSR_FIQ,        /**< The "spsr_fiq" register. */
+/* Be sure to update reg_get_size() in opnd_shared.c if you add a register. */
 #    else
-    DR_REG_CPSR,                              /**< The "cpsr" register. */
-    DR_REG_SPSR,                              /**< The "spsr" register. */
-    DR_REG_FPSCR,                             /**< The "fpscr" register. */
+    DR_REG_CPSR,                  /**< The "cpsr" register. */
+    DR_REG_SPSR,                  /**< The "spsr" register. */
+    DR_REG_FPSCR,                 /**< The "fpscr" register. */
 #    endif
 
     /* AArch32 Thread Registers */
@@ -1044,8 +1050,29 @@ enum {
 
 #    ifdef AARCH64
     /* AArch64 Counter/Timer Register(s) */
-    DR_REG_CNTVCT_EL0, /**< Virtual Timer Count Register, EL0. */
+    DR_REG_CNTVCT_EL0,       /**< Virtual Timer Count Register, EL0. */
+    DR_REG_ID_AA64ISAR0_EL1, /**< The "id_aa64isar0_el1" register. */
+    DR_REG_ID_AA64ISAR1_EL1, /**< The "id_aa64isar1_el1" register. */
+    DR_REG_ID_AA64ISAR2_EL1, /**< The "id_aa64isar2_el1" register. */
+    DR_REG_ID_AA64PFR0_EL1,  /**< The "id_aa64pfr0_el1" register. */
+    DR_REG_ID_AA64MMFR1_EL1, /**< The "id_aa64mmfr1_el1" register. */
+    DR_REG_ID_AA64DFR0_EL1,  /**< The "id_aa64dfr0_el1" register. */
+    DR_REG_ID_AA64ZFR0_EL1,  /**< The "id_aa64zfr0_el1" register. */
+    DR_REG_ID_AA64PFR1_EL1,  /**< The "id_aa64pfr1_el1" register. */
+    DR_REG_ID_AA64MMFR2_EL1, /**< The "id_aa64mmfr2_el1" register. */
+    DR_REG_MIDR_EL1,         /**< The "midr_el1" register. */
+    DR_REG_MPIDR_EL1,        /**< The "mpidr_el1" register. */
+    DR_REG_REVIDR_EL1,       /**< The "revidr_el1" register. */
+    DR_REG_FPMR,             /**< The "fpmr" register. */
+    DR_REG_CONTEXTIDR_EL1,   /**< The "contextidr_el1" register. */
+    DR_REG_ELR_EL1,          /**< The "elr_el1" register. */
+    DR_REG_SPSR_EL1,         /**< The "spsr_el1" register. */
+    DR_REG_TPIDR_EL1,        /**< The "tpidr_el1" register. */
+    DR_REG_ACCDATA_EL1,      /**< The "accdata_el1" register. */
+/* Be sure to update reg_get_size() in opnd_shared.c if you add a register. */
 #    endif
+
+    DR_REG_AFTER_LAST_VALID_ENUM,
 
 /* Aliases below here: */
 #    ifdef AARCH64
@@ -1083,9 +1110,9 @@ enum {
     DR_REG_SP = DR_REG_XSP,  /**< The stack pointer register. */
     DR_REG_LR = DR_REG_X30,  /**< The link register. */
 #    else
-    DR_REG_SP = DR_REG_R13,                   /**< The stack pointer register. */
-    DR_REG_LR = DR_REG_R14,                   /**< The link register. */
-    DR_REG_PC = DR_REG_R15,                   /**< The program counter register. */
+    DR_REG_SP = DR_REG_R13,       /**< The stack pointer register. */
+    DR_REG_LR = DR_REG_R14,       /**< The link register. */
+    DR_REG_PC = DR_REG_R15,       /**< The program counter register. */
 #    endif
     DR_REG_SL = DR_REG_R10,  /**< Alias for the r10 register. */
     DR_REG_FP = DR_REG_R11,  /**< Alias for the r11 register. */
@@ -1101,16 +1128,8 @@ enum {
     /** Thread Pointer/ID Register, Read-Only, EL0. */
     DR_REG_TPIDRRO_EL0 = DR_REG_TPIDRURO,
     /* ARMv7 Thread Registers */
-    DR_REG_CP15_C13_2 = DR_REG_TPIDRURW,        /**< User Read/Write Thread ID Register */
-    DR_REG_CP15_C13_3 = DR_REG_TPIDRURO,        /**< User Read-Only Thread ID Register */
-
-#    ifdef AARCH64
-    DR_REG_LAST_VALID_ENUM = DR_REG_CNTVCT_EL0, /**< Last valid register enum */
-    DR_REG_LAST_ENUM = DR_REG_CNTVCT_EL0,       /**< Last value of register enums */
-#    else
-    DR_REG_LAST_VALID_ENUM = DR_REG_TPIDRURO, /**< Last valid register enum */
-    DR_REG_LAST_ENUM = DR_REG_TPIDRURO,       /**< Last value of register enums */
-#    endif
+    DR_REG_CP15_C13_2 = DR_REG_TPIDRURW, /**< User Read/Write Thread ID Register */
+    DR_REG_CP15_C13_3 = DR_REG_TPIDRURO, /**< User Read-Only Thread ID Register */
 
 #    ifdef AARCH64
     DR_REG_START_64 = DR_REG_X0,  /**< Start of 64-bit general register enum values */
@@ -1119,6 +1138,10 @@ enum {
     DR_REG_STOP_32 = DR_REG_WSP,  /**< End of 32-bit general register enum values */
     DR_REG_START_GPR = DR_REG_X0, /**< Start of full-size general-purpose registers */
     DR_REG_STOP_GPR = DR_REG_XSP, /**< End of full-size general-purpose registers */
+    DR_REG_START_Z = DR_REG_Z0,   /**< Start of Z scalable vector registers */
+    DR_REG_STOP_Z = DR_REG_Z31,   /**< Start of Z scalable vector registers */
+    DR_REG_START_P = DR_REG_P0,   /**< Start of P scalable predicate registers */
+    DR_REG_STOP_P = DR_REG_P15,   /**< Start of P scalable predicate registers */
 #    else
     DR_REG_START_32 = DR_REG_R0,  /**< Start of 32-bit general register enum values */
     DR_REG_STOP_32 = DR_REG_R15,  /**< End of 32-bit general register enum values */
@@ -1128,7 +1151,8 @@ enum {
 
     DR_NUM_GPR_REGS = DR_REG_STOP_GPR - DR_REG_START_GPR + 1, /**< Count of GPR regs. */
 #    ifdef AARCH64
-    DR_NUM_SIMD_VECTOR_REGS = DR_REG_Z31 - DR_REG_Z0 + 1,     /**< Count of SIMD regs. */
+    DR_NUM_SIMD_VECTOR_REGS =
+        DR_REG_STOP_Z - DR_REG_START_Z + 1, /**< Count of SIMD regs. */
 #    else
     /* XXX: maybe we want more distinct names that provide counts for 64-bit D or 32-bit
      * S registers.
@@ -1243,6 +1267,45 @@ enum {
     DR_REG_F30,  /**< The f30(ft10) floating-point register. */
     DR_REG_F31,  /**< The f31(ft11) floating-point register. */
     DR_REG_FCSR, /**< The floating-point control and status register. */
+
+    /* Vector registers, we name the macros DR_REG_VR* to avoid conflict with virtual
+     * registers.
+     */
+    DR_REG_VR0,  /**< The v0 vector register. */
+    DR_REG_VR1,  /**< The v1 vector register. */
+    DR_REG_VR2,  /**< The v2 vector register. */
+    DR_REG_VR3,  /**< The v3 vector register. */
+    DR_REG_VR4,  /**< The v4 vector register. */
+    DR_REG_VR5,  /**< The v5 vector register. */
+    DR_REG_VR6,  /**< The v6 vector register. */
+    DR_REG_VR7,  /**< The v7 vector register. */
+    DR_REG_VR8,  /**< The v8 vector register. */
+    DR_REG_VR9,  /**< The v9 vector register. */
+    DR_REG_VR10, /**< The v10 vector register. */
+    DR_REG_VR11, /**< The v11 vector register. */
+    DR_REG_VR12, /**< The v12 vector register. */
+    DR_REG_VR13, /**< The v13 vector register. */
+    DR_REG_VR14, /**< The v14 vector register. */
+    DR_REG_VR15, /**< The v15 vector register. */
+    DR_REG_VR16, /**< The v16 vector register. */
+    DR_REG_VR17, /**< The v17 vector register. */
+    DR_REG_VR18, /**< The v18 vector register. */
+    DR_REG_VR19, /**< The v19 vector register. */
+    DR_REG_VR20, /**< The v20 vector register. */
+    DR_REG_VR21, /**< The v21 vector register. */
+    DR_REG_VR22, /**< The v22 vector register. */
+    DR_REG_VR23, /**< The v23 vector register. */
+    DR_REG_VR24, /**< The v24 vector register. */
+    DR_REG_VR25, /**< The v25 vector register. */
+    DR_REG_VR26, /**< The v26 vector register. */
+    DR_REG_VR27, /**< The v27 vector register. */
+    DR_REG_VR28, /**< The v28 vector register. */
+    DR_REG_VR29, /**< The v29 vector register. */
+    DR_REG_VR30, /**< The v30 vector register. */
+    DR_REG_VR31, /**< The v31 vector register. */
+
+    DR_REG_AFTER_LAST_VALID_ENUM,
+
     /* FPR aliases */
     DR_REG_FT0 = DR_REG_F0, /**< The 1st temporary floating-point (f0) register. */
     DR_REG_FT1 = DR_REG_F1, /**< The 2nd temporary floating-point (f1) register. */
@@ -1279,24 +1342,293 @@ enum {
     DR_REG_FT10 = DR_REG_F30, /**< The 11th temporary floating-point (f30) register. */
     DR_REG_FT11 = DR_REG_F31, /**< The 12th temporary floating-point (f31) register. */
 
-    /* FIXME i#3544: CCSRs */
+    /* XXX i#3544: CCSRs */
 
-    DR_REG_LAST_VALID_ENUM = DR_REG_FCSR, /**< Last valid register enum. */
-    DR_REG_LAST_ENUM = DR_REG_FCSR,       /**< Last value of register enums. */
-
-    DR_REG_START_64 = DR_REG_X0,  /**< Start of 64-bit register enum values. */
+    DR_REG_START_64 = DR_REG_X1,  /**< Start of 64-bit register enum values. */
     DR_REG_STOP_64 = DR_REG_F31,  /**< End of 64-bit register enum values. */
-    DR_REG_START_32 = DR_REG_X0,  /**< Start of 32-bit register enum values. */
+    DR_REG_START_32 = DR_REG_X1,  /**< Start of 32-bit register enum values. */
     DR_REG_STOP_32 = DR_REG_F31,  /**< End of 32-bit register enum values. */
-    DR_REG_START_GPR = DR_REG_X0, /**< Start of general register registers. */
-    DR_REG_STOP_GPR = DR_REG_X31, /**< End of general register registers. */
+    DR_REG_START_GPR = DR_REG_X1, /**< Start of general registers. */
+    DR_REG_STOP_GPR = DR_REG_X31, /**< End of general registers. */
+    DR_REG_START_FPR = DR_REG_F0, /**< Start of floating-point registers. */
+    DR_REG_STOP_FPR = DR_REG_F31, /**< End of floating-point registers. */
+    DR_REG_START_VR = DR_REG_VR0, /**< Start of vector registers. */
+    DR_REG_STOP_VR = DR_REG_VR31, /**< End of vector registers. */
     DR_REG_XSP = DR_REG_SP, /**< Platform-independent way to refer to stack pointer. */
 
     DR_NUM_GPR_REGS = DR_REG_STOP_GPR - DR_REG_START_GPR + 1, /**< Count of GPR regs. */
-    DR_NUM_SIMD_VECTOR_REGS = 0,                              /**< Count of SIMD regs. */
+    DR_NUM_FPR_REGS = DR_REG_STOP_FPR - DR_REG_START_FPR + 1, /**< Count of FPR regs. */
+    DR_NUM_VR_REGS = DR_REG_STOP_VR - DR_REG_START_VR + 1, /**< Count of vector regs. */
+    DR_NUM_SIMD_VECTOR_REGS = 0,                           /**< Count of SIMD regs. */
 #else /* RISCV64 */
 #    error Register definitions missing for this platform.
 #endif
+};
+
+/* We need a seprate DR_REG_VIRT enum from DR_REG_ so we can start counting virtual
+ * registers from lower values.  Otherwise, the DR_REG_ enum values won't fit in the 1
+ * byte operand size of #DR_ISA_REGDEPS encoding.  Note that DR_REG_VIRT skips both values
+ * of DR_REG_INVALID to avoid issues with opnd_t operations.
+ */
+/** Virtual register identifiers for #DR_ISA_REGDEPS. */
+enum {
+    /**
+     * The first virtual register.  Note that all virtual registers named here are valid.
+     */
+    DR_REG_VIRT0 =
+        DR_REG_NULL + 2, /* Start from 2. Skip DR_REG_INVALID == 1 for non-x86. */
+    DR_REG_VIRT1,
+    DR_REG_VIRT2,
+    DR_REG_VIRT3,
+    DR_REG_VIRT4,
+    DR_REG_VIRT5,
+    DR_REG_VIRT6,
+    DR_REG_VIRT7,
+    DR_REG_VIRT8,
+    DR_REG_VIRT9,
+    DR_REG_VIRT10,
+    DR_REG_VIRT11,
+    DR_REG_VIRT12,
+    DR_REG_VIRT13,
+    DR_REG_VIRT14,
+    DR_REG_VIRT15,
+    DR_REG_VIRT16,
+    DR_REG_VIRT17,
+    DR_REG_VIRT18,
+    DR_REG_VIRT19,
+    DR_REG_VIRT20,
+    DR_REG_VIRT21,
+    DR_REG_VIRT22,
+    DR_REG_VIRT23,
+    DR_REG_VIRT24,
+    DR_REG_VIRT25,
+    DR_REG_VIRT26,
+    DR_REG_VIRT27,
+    DR_REG_VIRT28,
+    DR_REG_VIRT29,
+    DR_REG_VIRT30,
+    DR_REG_VIRT31,
+    DR_REG_VIRT32,
+    DR_REG_VIRT33,
+    DR_REG_VIRT34,
+    DR_REG_VIRT35,
+    DR_REG_VIRT36,
+    DR_REG_VIRT37,
+    DR_REG_VIRT38,
+    DR_REG_VIRT39,
+    DR_REG_VIRT40,
+    DR_REG_VIRT41,
+    DR_REG_VIRT42,
+    DR_REG_VIRT43,
+    DR_REG_VIRT44,
+    DR_REG_VIRT45,
+    DR_REG_VIRT46,
+    DR_REG_VIRT47,
+    DR_REG_VIRT48,
+    DR_REG_VIRT49,
+    DR_REG_VIRT50,
+    DR_REG_VIRT51,
+    DR_REG_VIRT52,
+    DR_REG_VIRT53,
+    DR_REG_VIRT54,
+    DR_REG_VIRT55,
+    DR_REG_VIRT56,
+    DR_REG_VIRT57,
+    DR_REG_VIRT58,
+    DR_REG_VIRT59,
+    DR_REG_VIRT60,
+    DR_REG_VIRT61,
+    DR_REG_VIRT62,
+    DR_REG_VIRT63,
+    DR_REG_VIRT64,
+    DR_REG_VIRT65,
+    DR_REG_VIRT66,
+    DR_REG_VIRT67,
+    DR_REG_VIRT68,
+    DR_REG_VIRT69,
+    DR_REG_VIRT70,
+    DR_REG_VIRT71,
+    DR_REG_VIRT72,
+    DR_REG_VIRT73,
+    DR_REG_VIRT74,
+    DR_REG_VIRT75,
+    DR_REG_VIRT76,
+    DR_REG_VIRT77,
+    DR_REG_VIRT78,
+    DR_REG_VIRT79,
+    DR_REG_VIRT80,
+    DR_REG_VIRT81,
+    DR_REG_VIRT82,
+    DR_REG_VIRT83,
+    DR_REG_VIRT84,
+    DR_REG_VIRT85,
+    DR_REG_VIRT86,
+    DR_REG_VIRT87,
+    DR_REG_VIRT88,
+    DR_REG_VIRT89,
+    DR_REG_VIRT90,
+    DR_REG_VIRT91,
+    DR_REG_VIRT92,
+    DR_REG_VIRT93,
+    DR_REG_VIRT94,
+    DR_REG_VIRT95,
+    DR_REG_VIRT96,
+    DR_REG_VIRT97,
+    DR_REG_VIRT98,
+    DR_REG_VIRT99,
+    DR_REG_VIRT100,
+    DR_REG_VIRT101,
+    DR_REG_VIRT102,
+    DR_REG_VIRT103,
+    DR_REG_VIRT104,
+    DR_REG_VIRT105,
+    DR_REG_VIRT106,
+    DR_REG_VIRT107,
+    DR_REG_VIRT108,
+    DR_REG_VIRT109,
+    DR_REG_VIRT110,
+    DR_REG_VIRT111,
+    DR_REG_VIRT112,
+    DR_REG_VIRT113,
+    DR_REG_VIRT114,
+    DR_REG_VIRT115,
+    DR_REG_VIRT116,
+    DR_REG_VIRT117,
+    DR_REG_VIRT118,
+    DR_REG_VIRT119,
+    DR_REG_VIRT120,
+    DR_REG_VIRT121,
+    DR_REG_VIRT122,
+    DR_REG_VIRT123,
+    DR_REG_VIRT124,
+    DR_REG_VIRT125,
+    DR_REG_VIRT126,
+    DR_REG_VIRT127,
+    DR_REG_VIRT128,
+    DR_REG_VIRT129,
+    DR_REG_VIRT130,
+    DR_REG_VIRT131,
+    DR_REG_VIRT132,
+    DR_REG_VIRT133,
+    DR_REG_VIRT134,
+    DR_REG_VIRT135,
+    DR_REG_VIRT136,
+    DR_REG_VIRT137,
+    DR_REG_VIRT138,
+    DR_REG_VIRT139,
+    DR_REG_VIRT140,
+    DR_REG_VIRT141,
+    DR_REG_VIRT142,
+    DR_REG_VIRT143,
+    DR_REG_VIRT144,
+    DR_REG_VIRT145,
+    DR_REG_VIRT146,
+    DR_REG_VIRT147,
+    DR_REG_VIRT148,
+    DR_REG_VIRT149,
+    DR_REG_VIRT150,
+    DR_REG_VIRT151,
+    DR_REG_VIRT152,
+    DR_REG_VIRT153,
+    DR_REG_VIRT154,
+    DR_REG_VIRT155,
+    DR_REG_VIRT156,
+    DR_REG_VIRT157,
+    DR_REG_VIRT158,
+    DR_REG_VIRT159,
+    DR_REG_VIRT160,
+    DR_REG_VIRT161,
+    DR_REG_VIRT162,
+    DR_REG_VIRT163,
+    DR_REG_VIRT164,
+    DR_REG_VIRT165,
+    DR_REG_VIRT166,
+    DR_REG_VIRT167,
+    DR_REG_VIRT168,
+    DR_REG_VIRT169,
+    DR_REG_VIRT170,
+    DR_REG_VIRT171,
+    DR_REG_VIRT172,
+    DR_REG_VIRT173,
+    DR_REG_VIRT174,
+    DR_REG_VIRT175,
+    DR_REG_VIRT176,
+    DR_REG_VIRT177,
+    DR_REG_VIRT178,
+    DR_REG_VIRT179,
+    DR_REG_VIRT180,
+    DR_REG_VIRT181,
+    DR_REG_VIRT182,
+    DR_REG_VIRT183,
+    DR_REG_VIRT184,
+    DR_REG_VIRT185 = 188, /* Skip x86 DR_REG_INVALID == 187. */
+    DR_REG_VIRT186,
+    DR_REG_VIRT187,
+    DR_REG_VIRT188,
+    DR_REG_VIRT189,
+    DR_REG_VIRT190,
+    DR_REG_VIRT191,
+    DR_REG_VIRT192,
+    DR_REG_VIRT193,
+    DR_REG_VIRT194,
+    DR_REG_VIRT195,
+    DR_REG_VIRT196,
+    DR_REG_VIRT197,
+    DR_REG_VIRT198,
+    DR_REG_VIRT199,
+    DR_REG_VIRT200,
+    DR_REG_VIRT201,
+    DR_REG_VIRT202,
+    DR_REG_VIRT203,
+    DR_REG_VIRT204,
+    DR_REG_VIRT205,
+    DR_REG_VIRT206,
+    DR_REG_VIRT207,
+    DR_REG_VIRT208,
+    DR_REG_VIRT209,
+    DR_REG_VIRT210,
+    DR_REG_VIRT211,
+    DR_REG_VIRT212,
+    DR_REG_VIRT213,
+    DR_REG_VIRT214,
+    DR_REG_VIRT215,
+    DR_REG_VIRT216,
+    DR_REG_VIRT217,
+    DR_REG_VIRT218,
+    DR_REG_VIRT219,
+    DR_REG_VIRT220,
+    DR_REG_VIRT221,
+    DR_REG_VIRT222,
+    DR_REG_VIRT223,
+    DR_REG_VIRT224,
+    DR_REG_VIRT225,
+    DR_REG_VIRT226,
+    DR_REG_VIRT227,
+    DR_REG_VIRT228,
+    DR_REG_VIRT229,
+    DR_REG_VIRT230,
+    DR_REG_VIRT231,
+    DR_REG_VIRT232,
+    DR_REG_VIRT233,
+    DR_REG_VIRT234,
+    DR_REG_VIRT235,
+    DR_REG_VIRT236,
+    DR_REG_VIRT237,
+    DR_REG_VIRT238,
+    DR_REG_VIRT239,
+    DR_REG_VIRT240,
+    DR_REG_VIRT241,
+    DR_REG_VIRT242,
+    DR_REG_VIRT243,
+    DR_REG_VIRT244,
+    DR_REG_VIRT245,
+    DR_REG_VIRT246,
+    DR_REG_VIRT247,
+    DR_REG_VIRT248,
+    DR_REG_VIRT249,
+    DR_REG_VIRT250,
+    DR_REG_VIRT251,
+    DR_REG_VIRT252,
 };
 
 /* we avoid typedef-ing the enum, as its storage size is compiler-specific */
@@ -1305,6 +1637,25 @@ typedef ushort reg_id_t; /**< The type of a DR_REG_ enum value. */
  * (checked in d_r_arch_init()).
  */
 typedef byte opnd_size_t; /**< The type of an OPSZ_ enum value. */
+
+#ifdef RISCV64
+/**
+ * The LMUL type for RISCV64 vector extension.
+ * We keep the encoding in sync with the specification, see page 12 of RISC-V "V" Vector
+ * Extension Version 1.0.
+ * We encode the lmul as signed number that fits into 3-bits, see reg_get_size_lmul() for
+ * the usage.
+ */
+typedef enum {
+    RV64_LMUL_1_8 = -3, /**< RISC-V vector extension LMUL 1/8. */
+    RV64_LMUL_1_4 = -2, /**< RISC-V vector extension LMUL 1/4. */
+    RV64_LMUL_1_2 = -1, /**< RISC-V vector extension LMUL 1/2. */
+    RV64_LMUL_1 = 0,    /**< RISC-V vector extension LMUL 1. */
+    RV64_LMUL_2 = 1,    /**< RISC-V vector extension LMUL 2. */
+    RV64_LMUL_4 = 2,    /**< RISC-V vector extension LMUL 4. */
+    RV64_LMUL_8 = 3,    /**< RISC-V vector extension LMUL 8. */
+} lmul_t;
+#endif
 
 #ifdef X86
 /* Platform-independent full-register specifiers */
@@ -1413,13 +1764,15 @@ typedef byte opnd_size_t; /**< The type of an OPSZ_ enum value. */
 #    define DR_REG_STOP_DR DR_REG_DR15    /**< End of debug register enum values */
 #    define DR_REG_START_CR DR_REG_CR0    /**< Start of control register enum values */
 #    define DR_REG_STOP_CR DR_REG_CR15    /**< End of control register enum values */
+
+#endif /* X86 */
+
 /**
- * Last valid register enum value.  Note: DR_REG_INVALID is now smaller
+ * Last valid register enum value.  Note: #DR_REG_INVALID is now smaller
  * than this value.
  */
-#    define DR_REG_LAST_VALID_ENUM DR_REG_K7
-#    define DR_REG_LAST_ENUM DR_REG_BND3 /**< Last value of register enums */
-#endif                                   /* X86 */
+#define DR_REG_LAST_VALID_ENUM (DR_REG_AFTER_LAST_VALID_ENUM - 1)
+#define DR_REG_LAST_ENUM (DR_REG_AFTER_LAST_VALID_ENUM - 1)
 
 #define REG_NULL DR_REG_NULL
 #define REG_INVALID DR_REG_INVALID
@@ -1429,8 +1782,6 @@ typedef byte opnd_size_t; /**< The type of an OPSZ_ enum value. */
 #endif
 #define REG_START_32 DR_REG_START_32
 #define REG_STOP_32 DR_REG_STOP_32
-#define REG_LAST_VALID_ENUM DR_REG_LAST_VALID_ENUM
-#define REG_LAST_ENUM DR_REG_LAST_ENUM
 #define REG_XSP DR_REG_XSP
 /* Backward compatibility with REG_ constants (we now use DR_REG_ to avoid
  * conflicts with the REG_ enum in <sys/ucontext.h>: i#34).
@@ -1715,6 +2066,116 @@ typedef enum _dr_pred_constr_type_t {
     DR_PRED_CONSTR_LAST_NUMBER = DR_PRED_CONSTR_UIMM5_28,
 } dr_pred_constr_type_t;
 
+/** Triggers used for conditionally executed instructions. */
+typedef enum _dr_pred_type_t {
+    DR_PRED_NONE, /**< No predicate is present. */
+#ifdef X86
+    DR_PRED_O,   /**< x86 condition: overflow (OF=1). */
+    DR_PRED_NO,  /**< x86 condition: no overflow (OF=0). */
+    DR_PRED_B,   /**< x86 condition: below (CF=1). */
+    DR_PRED_NB,  /**< x86 condition: not below (CF=0). */
+    DR_PRED_Z,   /**< x86 condition: zero (ZF=1). */
+    DR_PRED_NZ,  /**< x86 condition: not zero (ZF=0). */
+    DR_PRED_BE,  /**< x86 condition: below or equal (CF=1 or ZF=1). */
+    DR_PRED_NBE, /**< x86 condition: not below or equal (CF=0 and ZF=0). */
+    DR_PRED_S,   /**< x86 condition: sign (SF=1). */
+    DR_PRED_NS,  /**< x86 condition: not sign (SF=0). */
+    DR_PRED_P,   /**< x86 condition: parity (PF=1). */
+    DR_PRED_NP,  /**< x86 condition: not parity (PF=0). */
+    DR_PRED_L,   /**< x86 condition: less (SF != OF). */
+    DR_PRED_NL,  /**< x86 condition: not less (SF=OF). */
+    DR_PRED_LE,  /**< x86 condition: less or equal (ZF=1 or SF != OF). */
+    DR_PRED_NLE, /**< x86 condition: not less or equal (ZF=0 and SF=OF). */
+    /**
+     * x86 condition: special opcode-specific condition that depends on the
+     * values of the source operands.  Thus, unlike all of the other conditions,
+     * the source operands will be accessed even if the condition then fails
+     * and the destinations are not touched.  Any written eflags are
+     * unconditionally written, unlike regular destination operands.
+     */
+    DR_PRED_COMPLEX,
+    /* Aliases for XINST_CREATE_jump_cond() and other cross-platform routines. */
+    DR_PRED_EQ = DR_PRED_Z,  /**< Condition code: equal. */
+    DR_PRED_NE = DR_PRED_NZ, /**< Condition code: not equal. */
+    DR_PRED_LT = DR_PRED_L,  /**< Condition code: signed less than. */
+    /* DR_PRED_LE already matches aarchxx */
+    DR_PRED_GT = DR_PRED_NLE, /**< Condition code: signed greater than. */
+    DR_PRED_GE = DR_PRED_NL,  /**< Condition code: signed greater than or equal. */
+#endif
+/* We resist using #elif here because otherwise doxygen will be unable to
+ * document both defines, for X86 and for AARCHXX.
+ */
+#ifdef AARCHXX
+    DR_PRED_EQ, /**< ARM condition: 0000 Equal                   (Z == 1)           */
+    DR_PRED_NE, /**< ARM condition: 0001 Not equal               (Z == 0)           */
+    DR_PRED_CS, /**< ARM condition: 0010 Carry set               (C == 1)           */
+    DR_PRED_CC, /**< ARM condition: 0011 Carry clear             (C == 0)           */
+    DR_PRED_MI, /**< ARM condition: 0100 Minus, negative         (N == 1)           */
+    DR_PRED_PL, /**< ARM condition: 0101 Plus, positive or zero  (N == 0)           */
+    DR_PRED_VS, /**< ARM condition: 0110 Overflow                (V == 1)           */
+    DR_PRED_VC, /**< ARM condition: 0111 No overflow             (V == 0)           */
+    DR_PRED_HI, /**< ARM condition: 1000 Unsigned higher         (C == 1 and Z == 0)*/
+    DR_PRED_LS, /**< ARM condition: 1001 Unsigned lower or same  (C == 1 or Z == 0) */
+    DR_PRED_GE, /**< ARM condition: 1010 Signed >=               (N == V)           */
+    DR_PRED_LT, /**< ARM condition: 1011 Signed less than        (N != V)           */
+    DR_PRED_GT, /**< ARM condition: 1100 Signed greater than     (Z == 0 and N == V)*/
+    DR_PRED_LE, /**< ARM condition: 1101 Signed <=               (Z == 1 or N != V) */
+    DR_PRED_AL, /**< ARM condition: 1110 Always (unconditional)                    */
+#    ifdef AARCH64
+    DR_PRED_NV,     /**< ARM condition: 1111 Never, meaning always                     */
+    DR_PRED_MASKED, /** Used for AArch64 SVE instructions with governing predicate
+                     * registers
+                     */
+#    endif
+#    ifdef ARM
+    DR_PRED_OP, /**< ARM condition: 1111 Part of opcode                            */
+#    endif
+    /* Aliases */
+    DR_PRED_HS = DR_PRED_CS, /**< ARM condition: alias for DR_PRED_CS. */
+    DR_PRED_LO = DR_PRED_CC, /**< ARM condition: alias for DR_PRED_CC. */
+#    ifdef AARCH64
+    /* Some SVE instructions use the NZCV condition flags in a different way to the base
+     * AArch64 instruction set, and SVE introduces aliases for the condition codes based
+     * on the SVE interpretation of the flags. The state of predicate registers can be
+     * used to alter control flow with condition flags being set or cleared by an explicit
+     * test of a predicate register or by instructions which generate a predicate result.
+     *
+     *  N   First   Set if the first active element was true.
+     *  Z   None    Cleared if any active element was true.
+     *  C   !Last   Cleared if the last active element was true.
+     *  V           Cleared by all flag setting SVE instructions except CTERMEQ and
+     *              CTERMNE, for scalarised loops.
+     */
+    DR_PRED_SVE_NONE = DR_PRED_EQ, /**<  0000 All active elements were false
+                                              or no active elements            (Z == 1) */
+    DR_PRED_SVE_ANY = DR_PRED_NE, /**<   0001 An active element was true       (Z == 0) */
+    DR_PRED_SVE_NLAST = DR_PRED_CS, /**< 0010 Last active element was false
+                                              or no active elements            (C == 1) */
+    DR_PRED_SVE_LAST = DR_PRED_CC, /**<  0011 Last active element was true     (C == 0) */
+    DR_PRED_SVE_FIRST = DR_PRED_MI, /**< 0100 First active element was true    (N == 1) */
+    DR_PRED_SVE_NFRST = DR_PRED_PL, /**< 0101 First active element was false
+                                              or no active elements            (N == 0) */
+    DR_PRED_SVE_PLAST = DR_PRED_LS, /**< 1001 Last active element was true,
+                                              all active elements were false,
+                                              or no active elements   (C == 1 or Z == 0)*/
+    DR_PRED_SVE_TCONT = DR_PRED_GE, /**< 1010 CTERM termination condition
+                                              not detected, continue loop      (N == V) */
+    DR_PRED_SVE_TSTOP = DR_PRED_LT, /**< 1011 CTERM termination condition
+                                              detected, terminate loop         (N != V) */
+#    endif
+#endif
+#ifdef RISCV64
+    /* XXX i#3544: RISC-V does not have compare flag register! */
+    /* Aliases for XINST_CREATE_jump_cond() and other cross-platform routines. */
+    DR_PRED_EQ, /**< Condition code: equal. */
+    DR_PRED_NE, /**< Condition code: not equal. */
+    DR_PRED_LT, /**< Condition code: signed less than. */
+    DR_PRED_LE, /**< Condition code: signed less than or equal. */
+    DR_PRED_GT, /**< Condition code: signed greater than. */
+    DR_PRED_GE, /**< Condition code: signed greater than or equal. */
+#endif
+} dr_pred_type_t;
+
 /**
  * These flags describe operations performed on the value of a source register
  * before it is combined with other sources as part of the behavior of the
@@ -1770,7 +2231,7 @@ typedef enum _dr_opnd_flags_t {
      */
     DR_OPND_IS_VECTOR = 0x100,
     /**
-     * Predicate registers can either be merging, zero or neither. If one of these
+     * SVE predicate registers can either be merging, zero or neither. If one of these
      * are set then they are either a merge or zero otherwise aren't either.
      */
     DR_OPND_IS_MERGE_PREDICATE = 0x200,
@@ -1785,6 +2246,17 @@ typedef enum _dr_opnd_flags_t {
      * This is used by RISCV64 for immediates display format.
      */
     DR_OPND_IMM_PRINT_DECIMAL = 0x1000,
+
+    /**
+     * The register number is not in the instruction encoding but is calculated
+     * based on another register
+     */
+    DR_OPND_IMPLICIT = 0x2000,
+    /**
+     * The register is a SVE governing predicate register: it is used to select
+     * which elements of a vector are actually read or written to in AArch64 SVE
+     */
+    DR_OPND_IS_GOVERNING = 0x4000,
 } dr_opnd_flags_t;
 
 #ifdef DR_FAST_IR
@@ -1930,7 +2402,7 @@ enum {
     FAR_PC_kind,    /* a segment is specified as a selector value */
     FAR_INSTR_kind, /* a segment is specified as a selector value */
 #    if defined(X64) || defined(ARM)
-    REL_ADDR_kind, /* pc-relative address: ARM or 64-bit X86 only */
+    REL_ADDR_kind, /* pc-relative address: ARM/RISCV64/64-bit X86 only */
 #    endif
 #    ifdef X64
     ABS_ADDR_kind, /* 64-bit absolute address: x64 only */
@@ -1952,6 +2424,19 @@ INSTR_INLINE
 /** Returns a register operand (\p r must be a DR_REG_ constant). */
 opnd_t
 opnd_create_reg(reg_id_t r);
+
+DR_API
+INSTR_INLINE
+/**
+ * Returns a copy of a register operand with the reg number increased
+ * by \p amount.
+ *
+ * This only makes sense with numbered and ordered register sets,
+ * such as the AARCH64 X registers. Be sure not to exceed the
+ * last register in the set e.g. DR_REG_X30
+ */
+opnd_t
+opnd_inc_reg(opnd_t opnd, int amount);
 
 DR_API
 INSTR_INLINE
@@ -2106,7 +2591,7 @@ opnd_create_instr_ex(instr_t *instr, opnd_size_t size, ushort shift);
 
 DR_API
 /**
- * Returns a far instr_t pointer address with value \p seg_selector:instr.
+ * Returns a far #instr_t pointer address with value \p seg_selector:instr.
  * \p seg_selector is a segment selector, not a DR_SEG_ constant.
  */
 opnd_t
@@ -2513,22 +2998,22 @@ opnd_is_far_pc(opnd_t opnd);
 
 DR_API
 INSTR_INLINE
-/** Returns true iff \p opnd is a (near or far) instr_t pointer address operand. */
+/** Returns true iff \p opnd is a (near or far) #instr_t pointer address operand. */
 bool
 opnd_is_instr(opnd_t opnd);
 
 DR_API
-/** Returns true iff \p opnd is a near instr_t pointer address operand. */
+/** Returns true iff \p opnd is a near #instr_t pointer address operand. */
 bool
 opnd_is_near_instr(opnd_t opnd);
 
 DR_API
-/** Returns true iff \p opnd is a far instr_t pointer address operand. */
+/** Returns true iff \p opnd is a far #instr_t pointer address operand. */
 bool
 opnd_is_far_instr(opnd_t opnd);
 
 DR_API
-/** Returns true iff \p opnd is a memory reference to an instr_t address operand. */
+/** Returns true iff \p opnd is a memory reference to an #instr_t address operand. */
 bool
 opnd_is_mem_instr(opnd_t opnd);
 
@@ -2560,21 +3045,27 @@ opnd_is_element_vector_reg(opnd_t opnd);
 
 DR_API
 INSTR_INLINE
-/** Returns true iff \p opnd is a predicate register. */
+/** Returns true iff \p opnd is an SVE predicate register. */
 bool
 opnd_is_predicate_reg(opnd_t opnd);
 
 DR_API
 INSTR_INLINE
-/** Returns true iff \p opnd is a merging predicate register. */
+/** Returns true iff \p opnd is a n SVE merging predicate register. */
 bool
 opnd_is_predicate_merge(opnd_t opnd);
 
 DR_API
 INSTR_INLINE
-/** Returns true iff \p opnd is a zeroing predicate register. */
+/** Returns true iff \p opnd is an SVE zeroing predicate register. */
 bool
 opnd_is_predicate_zero(opnd_t opnd);
+
+DR_API
+INSTR_INLINE
+/** Returns true iff \p opnd is an SVE governing predicate register. */
+bool
+opnd_is_governing(opnd_t opnd);
 
 DR_API
 /**
@@ -2583,6 +3074,14 @@ DR_API
  */
 bool
 opnd_is_vsib(opnd_t opnd);
+
+DR_API
+/**
+ * Returns true iff \p opnd is a base+disp memory reference operand which uses vector
+ * registers.
+ */
+bool
+opnd_is_vector_base_disp(opnd_t opnd);
 
 DR_API
 /**
@@ -2689,7 +3188,7 @@ DR_API
 /**
  * Sets the data size of \p opnd.
  * Assumes \p opnd is an immediate integer, a memory reference,
- * or an instr_t pointer address operand.
+ * or an #instr_t pointer address operand.
  */
 void
 opnd_set_size(opnd_t *opnd, opnd_size_t newsize);
@@ -2793,12 +3292,15 @@ ushort
 opnd_get_segment_selector(opnd_t opnd);
 
 DR_API
-/** Assumes \p opnd is an instr_t (near, far, or memory) operand and returns its value. */
+/**
+ * Assumes \p opnd is an #instr_t (near, far, or memory) operand and returns its
+ * value.
+ */
 instr_t *
 opnd_get_instr(opnd_t opnd);
 
 DR_API
-/** Assumes \p opnd is a near instr_t operand and returns its shift value. */
+/** Assumes \p opnd is a near #instr_t operand and returns its shift value. */
 ushort
 opnd_get_shift(opnd_t opnd);
 
@@ -2888,7 +3390,7 @@ DR_API
  * \note ARM-only.
  */
 dr_shift_type_t
-opnd_get_index_shift(opnd_t opnd, uint *amount OUT);
+opnd_get_index_shift(opnd_t opnd, uint *amount DR_PARAM_OUT);
 
 DR_API
 /**
@@ -2913,7 +3415,7 @@ DR_API
  * \note AArch64-only.
  */
 dr_extend_type_t
-opnd_get_index_extend(opnd_t opnd, OUT bool *scaled, OUT uint *amount);
+opnd_get_index_extend(opnd_t opnd, DR_PARAM_OUT bool *scaled, DR_PARAM_OUT uint *amount);
 
 DR_API
 /**
@@ -2971,6 +3473,9 @@ DR_API
 /**
  * Assumes that \p reg is a DR_REG_ 32-bit register constant.
  * Returns the string name for \p reg.
+ * \note It uses the global dcontext_t to determine the ISA mode.  If the ISA mode is a
+ * synthetic one (e.g., #DR_ISA_REGDEPS), it returns the name of a #DR_REG_VIRT0 etc.
+ * virtual register.
  */
 const char *
 get_register_name(reg_id_t reg);
@@ -3038,6 +3543,15 @@ DR_API
 bool
 reg_is_avx512_extended(reg_id_t reg);
 #endif
+
+DR_API
+/**
+ * Returns true iff \p reg refers to register added by the AVX-512 feature set.
+ * Returns true for any ZMM register, any opmask register, and any
+ * reg_is_avx512_extended() register.
+ */
+bool
+reg_is_avx512(reg_id_t reg);
 
 DR_API
 /**
@@ -3242,7 +3756,13 @@ opnd_is_reg_64bit(opnd_t opnd);
 DR_API
 /**
  * Assumes that \p reg is a DR_REG_ constant.
- * Returns true iff it refers to a pointer-sized general-purpose register.
+ * Returns true iff it refers to a pointer-sized register. \p reg is a general
+ * purpose register for all architectures apart from AArch64. For AArch64, \p
+ * reg can also be a scalable vector (SVE) Z register. Although Z registers are
+ * supported from 128 to 512 bits in length on DynamoRIO, addressing uses 32 or
+ * 64 bit elements of a vector for scatter/gather instructions, e.g.
+ * LD1SB Z0.D, P0/Z, [Z1.D]. See also issue
+ * <a href="https://github.com/DynamoRIO/dynamorio/issues/6750">6750</a>
  */
 bool
 reg_is_pointer_sized(reg_id_t reg);
@@ -3289,6 +3809,18 @@ DR_API
  */
 opnd_size_t
 reg_get_size(reg_id_t reg);
+
+#ifdef RISCV64
+DR_API
+/**
+ * Assumes that \p reg is a DR_REG_VR constant.
+ * Returns the OPSZ_ constant corresponding to the vector register size and lmul.
+ * Returns OPSZ_NA if reg is not a DR_REG_VR constant.
+ * \note RISCV64-only.
+ */
+opnd_size_t
+reg_get_size_lmul(reg_id_t reg, lmul_t lmul);
+#endif
 
 DR_API
 /**
@@ -3474,7 +4006,7 @@ DR_API
  * requested register.
  */
 bool
-reg_get_value_ex(reg_id_t reg, dr_mcontext_t *mc, OUT byte *val);
+reg_get_value_ex(reg_id_t reg, dr_mcontext_t *mc, DR_PARAM_OUT byte *val);
 
 DR_API
 /**
@@ -3503,7 +4035,7 @@ DR_API
  * Returns false if the register is not supported.
  */
 bool
-reg_set_value_ex(reg_id_t reg, dr_mcontext_t *mc, IN byte *val_buf);
+reg_set_value_ex(reg_id_t reg, dr_mcontext_t *mc, DR_PARAM_IN byte *val_buf);
 
 DR_API
 /**
@@ -3535,5 +4067,26 @@ DR_API
  */
 bool
 reg_is_stolen(reg_id_t reg);
+
+#if defined(AARCH64)
+
+DR_API
+/**
+ * Returns an unsigned immediate integer operand that can be used as a condition code
+ * operand for instructions such as ccmp.
+ * \param cond A #dr_pred_type_t value corresponding to a condition code.
+ */
+opnd_t
+opnd_create_cond(dr_pred_type_t cond);
+
+DR_API
+/**
+ * Get the #dr_pred_type_t value for a condition code operand used in instructions such as
+ * ccmp.
+ */
+dr_pred_type_t
+opnd_get_cond(opnd_t opnd);
+
+#endif
 
 #endif /* _DR_IR_OPND_H_ */

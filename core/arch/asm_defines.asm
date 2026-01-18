@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2009 VMware, Inc.  All rights reserved.
  * ********************************************************** */
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _ASM_DEFINES_ASM_
-#define _ASM_DEFINES_ASM_ 1
+#define _ASM_DEFINES_ASM_
 
 /* Preprocessor macro definitions shared among all .asm files.
  * Since cpp macros can't generate newlines and #s we have a later
@@ -418,6 +418,9 @@ ASSUME fs:_DATA @N@\
 # define REG_R29  x29
 # define REG_R30  x30
 # define REG_R31  x31
+# define REG_A0   x10
+# define REG_A1   x11
+# define REG_A2   x12
 #else /* Intel X86 */
 # ifdef X64
 #  define REG_XAX rax
@@ -1082,5 +1085,13 @@ ASSUME fs:_DATA @N@\
 #else
 #define HIDDEN(x) .hidden x
 #endif
+
+#define PASTE(a, b) a##b
+
+/* Use inside a function to declare or reference a function-local label.
+ * Expects FUNCNAME to be defined.
+ */
+#define _LOCAL_LABEL(label, unique_id) PASTE(unique_id, label)
+#define LOCAL_LABEL(label) _LOCAL_LABEL(label, FUNCNAME)
 
 #endif /* _ASM_DEFINES_ASM_ */

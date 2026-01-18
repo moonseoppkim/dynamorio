@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -56,7 +56,7 @@ static void
 at_bb(app_pc bb_addr)
 {
 #ifdef X64
-    /* FIXME: abs ref is rip-rel so doesn't work w/o patching.
+    /* XXX: abs ref is rip-rel so doesn't work w/o patching.
      * need to impl patching here: finalize interface.
      */
 #else
@@ -71,7 +71,7 @@ at_bb(app_pc bb_addr)
 
 static size_t
 event_persist_ro_size(void *drcontext, void *perscxt, size_t file_offs,
-                      void **user_data OUT)
+                      void **user_data DR_PARAM_OUT)
 {
     return sizeof(mybase) +
         hashtable_persist_size(drcontext, &sample_pointer_table, sizeof(size_t), perscxt,
@@ -116,7 +116,7 @@ event_persist_ro(void *drcontext, void *perscxt, file_t fd, void *user_data)
 }
 
 static bool
-event_resurrect_ro(void *drcontext, void *perscxt, byte **map INOUT)
+event_resurrect_ro(void *drcontext, void *perscxt, byte **map DR_PARAM_OUT)
 {
     bool ok = true;
     uint i;

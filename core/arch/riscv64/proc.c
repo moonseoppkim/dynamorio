@@ -48,7 +48,7 @@ static int num_opmask_registers;
 static size_t
 read_cache_line(const char *fname)
 {
-    char b[sizeof(uint64)], tmp;
+    char b[sizeof(uint64)] = { 0 }, tmp;
     size_t res = 0;
     ssize_t n, i;
     file_t f;
@@ -80,7 +80,8 @@ read_cache_line(const char *fname)
  * - This code assumes that all harts have the same L1 cache-line size.
  */
 static bool
-get_cache_line_size(OUT size_t *dcache_line_size, OUT size_t *icache_line_size)
+get_cache_line_size(DR_PARAM_OUT size_t *dcache_line_size,
+                    DR_PARAM_OUT size_t *icache_line_size)
 {
 #if !defined(DR_HOST_NOT_TARGET) && defined(LINUX)
     static const char *d_cache_fname =
@@ -121,6 +122,24 @@ get_cache_line_size(OUT size_t *dcache_line_size, OUT size_t *icache_line_size)
     return false;
 }
 
+static void
+get_processor_specific_info(void)
+{
+#ifndef DR_HOST_NOT_TARGET
+    if (proc_has_feature(FEATURE_VECTOR)) {
+        uint64 vlenb = 0;
+        __asm__ __volatile__("csrr %0, 0xc22\n" : "=r"(vlenb));
+        cpu_info.vlenb = vlenb;
+        dr_set_vector_length(vlenb * 8);
+    } else {
+        cpu_info.vlenb = 32;
+        dr_set_vector_length(256);
+    }
+#else
+    dr_set_vector_length(256);
+#endif
+}
+
 void
 proc_init_arch(void)
 {
@@ -135,14 +154,20 @@ proc_init_arch(void)
                              /* icache_line_size= */ NULL)) {
         LOG(GLOBAL, LOG_TOP, 1, "Unable to obtain cache line size");
     }
+
+#ifndef DR_HOST_NOT_TARGET
+    get_processor_specific_info();
+#endif
 }
 
 bool
-proc_has_feature(feature_bit_t f)
+proc_has_feature(feature_bit_t feature_bit)
 {
-    /* FIXME i#3544: Not implemented */
-    ASSERT_NOT_IMPLEMENTED(false);
+#ifdef DR_HOST_NOT_TARGET
     return false;
+#else
+    return *cpu_info.features.isa_features & (1 << feature_bit);
+#endif
 }
 
 void
@@ -150,16 +175,17 @@ machine_cache_sync(void *pc_start, void *pc_end, bool flush_icache)
 {
     /* We need to flush the icache on all harts, which is not feasible for FENCE.I, so we
      * use SYS_riscv_flush_icache to let the kernel do this.
+     * In order for this to work for multithreaded applications, we must NOT set the
+     * SYS_RISCV_FLUSH_ICACHE_LOCAL flag.
      */
-    dynamorio_syscall(SYS_riscv_flush_icache, 3, pc_start, pc_end,
-                      SYS_RISCV_FLUSH_ICACHE_LOCAL);
+    dynamorio_syscall(SYS_riscv_flush_icache, 3, pc_start, pc_end, 0);
 }
 
 DR_API
 size_t
 proc_fpstate_save_size(void)
 {
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     ASSERT_NOT_IMPLEMENTED(false);
     return 0;
 }
@@ -235,8 +261,9 @@ DR_API
 size_t
 proc_save_fpstate(byte *buf)
 {
-    /* FIXME i#3544: Not implemented */
-    ASSERT_NOT_IMPLEMENTED(false);
+    /* All registers are saved by insert_push_all_registers so nothing extra
+     * needs to be saved here.
+     */
     return DR_FPSTATE_BUF_SIZE;
 }
 
@@ -244,28 +271,27 @@ DR_API
 void
 proc_restore_fpstate(byte *buf)
 {
-    /* FIXME i#3544: Not implemented */
-    ASSERT_NOT_IMPLEMENTED(false);
+    /* Nothing to restore. */
 }
 
 void
 dr_insert_save_fpstate(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t buf)
 {
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     ASSERT_NOT_IMPLEMENTED(false);
 }
 
 void
 dr_insert_restore_fpstate(void *drcontext, instrlist_t *ilist, instr_t *where, opnd_t buf)
 {
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     ASSERT_NOT_IMPLEMENTED(false);
 }
 
 uint64
 proc_get_timestamp(void)
 {
-    /* FIXME i#3544: Not implemented */
+    /* XXX i#3544: Not implemented */
     ASSERT_NOT_IMPLEMENTED(false);
     return 0;
 }

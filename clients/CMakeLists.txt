@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2022 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -29,7 +29,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 set(DynamoRIO_INTERNAL ON) # do not import dynamorio lib target
 set(DynamoRIO_DIR ${PROJECT_BINARY_DIR}/cmake)
@@ -94,11 +94,11 @@ endif ()
 file(GLOB dirs "*/CMakeLists.txt")
 foreach (dir ${dirs})
   get_filename_component(dir ${dir} PATH)
-  # FIXME i#1874: named pipe not working on Android.
+  # XXX i#1874: named pipe not working on Android.
   # We should build anyway since -offline should work.
   # This also prevents us from building the docs on Android!
   if (NOT ANDROID OR NOT ${dir} MATCHES "drcachesim")
-    # FIXME i#1732: drcpusim has no ARM support yet
+    # XXX i#1732: drcpusim has no ARM support yet
     if (NOT ANDROID OR NOT ${dir} MATCHES "drcpusim")
       add_subdirectory(${dir})
     endif ()

@@ -1,6 +1,7 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
+ * Copyright (c) 2025 Foundation of Research and Technology, Hellas.
  * **********************************************************/
 
 /*
@@ -43,7 +44,7 @@
  */
 
 #ifndef _ARCH_EXPORTS_H_
-#define _ARCH_EXPORTS_H_ 1
+#define _ARCH_EXPORTS_H_
 
 /* We export all of opnd.h for reg_id_t, DR_NUM_GPR_REGS, etc. */
 #include "opnd.h"
@@ -89,7 +90,7 @@ typedef enum {
     IBL_INDJMP,
     IBL_GENERIC = IBL_INDJMP, /* currently least restrictive */
     /* can double if a generic lookup is needed
-       FIXME: remove this and add names for specific needs */
+       XXX: remove this and add names for specific needs */
     IBL_SHARED_SYSCALL = IBL_GENERIC,
     IBL_BRANCH_TYPE_END
 } ibl_branch_type_t;
@@ -106,7 +107,7 @@ struct _ibl_table_t;      /* in fragment.h */
  * hashtable stats spilling onto the 2nd line.
  * Even all on one line, shared ibl has a load vs private ibl's hardcoded immed...
  *
- * FIXME: to avoid splitting the mcontext for now these scratch
+ * XXX: to avoid splitting the mcontext for now these scratch
  * fs:slots are used in fcache, but copied to the
  * mcontext on transitions.  see case 3701
  */
@@ -119,7 +120,7 @@ typedef struct _table_stat_state_t {
     /* Organized in mask-table pairs to get both fields for a particular table
      * on the same cache line.
      */
-    /* FIXME We can play w/ordering these fields differently or if TLS space is
+    /* XXX We can play w/ordering these fields differently or if TLS space is
      * crunched keeping a subset of them in TLS.
      * For example, the ret_trace & indcall_trace tables could be heavily used
      * but if the indjmp table isn't, it might make sense to put the ret_bb
@@ -127,7 +128,7 @@ typedef struct _table_stat_state_t {
      * used for BB2BB IBL.
      */
     lookup_table_access_t table[IBL_BRANCH_TYPE_END];
-    /* FIXME: should allocate this separately so that release and
+    /* XXX: should allocate this separately so that release and
      * DEBUG builds have the same layout especially when backward
      * aligned entry */
 #ifdef HASHTABLE_STATISTICS
@@ -157,19 +158,24 @@ typedef struct _spill_state_t {
     reg_t reg_stolen; /* slot for the stolen register */
 #elif defined(RISCV64)
     reg_t a0, a1, a2, a3;
-    /* Slot for the stolen register, which is tp.
-     * Note that on RISC-V, tp is the thread pointer, and it is also a general-purpose
-     * register, so we steal tp to store DR's tls.
+    /* These are needed for LR/SC mangling. */
+    reg_t a4, a5;
+    /* Slots for the stolen register. Similar to AArch64, we use reg_stolen slot to hold
+     * the app's stolen reg value.
      */
     reg_t reg_stolen;
 #endif
     /* XXX: move this below the tables to fit more on cache line */
+    /* In RISCV64 dcontext does not poiont to the actual dcontext. It points somewhere
+     * in the middle of that. This value is the actual pointer offseted by
+     * DCONTEXT_TLS_MIDPTR_OFFSET.
+     */
     dcontext_t *dcontext;
 #if defined(RISCV64) || defined(AARCHXX)
     /* We store addresses here so we can load pointer-sized addresses into
      * registers with a single instruction in our exit stubs and gencode.
      */
-    /* FIXME i#1551: add Thumb vs ARM: may need two entry points here */
+    /* XXX i#1551: add Thumb vs ARM: may need two entry points here */
     byte *fcache_return;
     ibl_entry_pc_t trace_ibl[IBL_BRANCH_TYPE_END];
     ibl_entry_pc_t bb_ibl[IBL_BRANCH_TYPE_END];
@@ -185,6 +191,11 @@ typedef struct _spill_state_t {
     reg_t ldstex_flags;
 #    endif
     /* TODO i#1575: coarse-grain NYI on ARM */
+#elif defined(RISCV64)
+    /* State for converting LR/SC pair into compare-and-swap (-ldstex2cas). */
+    ptr_uint_t lrsc_addr;
+    ptr_uint_t lrsc_value;
+    ptr_uint_t lrsc_size;
 #endif
 } spill_state_t;
 
@@ -234,11 +245,16 @@ typedef struct _local_state_extended_t {
 #    define TLS_REG1_SLOT ((ushort)offsetof(spill_state_t, a1))
 #    define TLS_REG2_SLOT ((ushort)offsetof(spill_state_t, a2))
 #    define TLS_REG3_SLOT ((ushort)offsetof(spill_state_t, a3))
+#    define TLS_REG4_SLOT ((ushort)offsetof(spill_state_t, a4))
+#    define TLS_REG5_SLOT ((ushort)offsetof(spill_state_t, a5))
 #    define TLS_REG_STOLEN_SLOT ((ushort)offsetof(spill_state_t, reg_stolen))
 #    define SCRATCH_REG0 DR_REG_A0
 #    define SCRATCH_REG1 DR_REG_A1
 #    define SCRATCH_REG2 DR_REG_A2
 #    define SCRATCH_REG3 DR_REG_A3
+#    define SCRATCH_REG4 DR_REG_A4
+#    define SCRATCH_REG5 DR_REG_A5
+#    define SCRATCH_REG_LAST DR_REG_A5
 #endif /* X86/ARM */
 #define IBL_TARGET_REG SCRATCH_REG2
 #define IBL_TARGET_SLOT TLS_REG2_SLOT
@@ -254,6 +270,9 @@ typedef struct _local_state_extended_t {
 #    endif
 #elif defined(RISCV64)
 #    define TLS_FCACHE_RETURN_SLOT ((ushort)offsetof(spill_state_t, fcache_return))
+#    define TLS_LRSC_ADDR_SLOT ((ushort)offsetof(spill_state_t, lrsc_addr))
+#    define TLS_LRSC_VALUE_SLOT ((ushort)offsetof(spill_state_t, lrsc_value))
+#    define TLS_LRSC_SIZE_SLOT ((ushort)offsetof(spill_state_t, lrsc_size))
 #endif
 
 #define TABLE_OFFSET (offsetof(local_state_extended_t, table_space))
@@ -353,7 +372,7 @@ get_stack_ptr(void);
             __asm__ __volatile__("bl 1f\n1: str x30, %0" : "=m"(var) : : "x30")
 #    elif defined(DR_HOST_ARM)
 #        define RDTSC_LL(llval) (llval) = proc_get_timestamp()
-/* FIXME i#1551: frame pointer is r7 in thumb mode */
+/* XXX i#1551: frame pointer is r7 in thumb mode */
 #        define GET_FRAME_PTR(var) \
             __asm__ __volatile__("str " IF_X64_ELSE("x29", "r11") ", %0" : "=m"(var))
 #        define GET_STACK_PTR(var) __asm__ __volatile__("str sp, %0" : "=m"(var))
@@ -451,11 +470,17 @@ void
 dr_mcontext_init(dr_mcontext_t *mc);
 void
 dump_mcontext(priv_mcontext_t *context, file_t f, bool dump_xml);
-#ifdef AARCHXX
+#if defined(AARCHXX) || defined(RISCV64)
 reg_t
 get_stolen_reg_val(priv_mcontext_t *context);
 void
 set_stolen_reg_val(priv_mcontext_t *mc, reg_t newval);
+#    ifdef RISCV64
+reg_t
+get_tp_reg_val(priv_mcontext_t *mc);
+void
+set_tp_reg_val(priv_mcontext_t *mc, reg_t newval);
+#    endif
 #endif
 const char *
 get_branch_type_name(ibl_branch_type_t branch_type);
@@ -690,9 +715,6 @@ dynamorio_condvar_wake_and_jmp(KSYNCH_TYPE *ksynch /*in xax/r0*/,
 void
 dynamorio_nonrt_sigreturn(void);
 #        endif
-thread_id_t
-dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls, void *ctid,
-                void (*func)(void));
 void
 xfer_to_new_libdr(app_pc entry, void **init_sp, byte *cur_dr_map, size_t cur_dr_size);
 #    endif
@@ -746,7 +768,7 @@ dr_fxrstor32(byte *buf_aligned);
 #    define DYNAMO_START_XSP_ADJUST 0
 #endif
 
-/* x86_code.c */
+/* asm_aux.c */
 void
 dynamo_start(priv_mcontext_t *mc);
 
@@ -824,10 +846,10 @@ use_addr_prefix_on_short_disp(void)
          /* PPro, P2, P3, but not PM */
          (proc_get_family() == FAMILY_PENTIUM_3 &&
           (proc_get_model() <= 8 || proc_get_model() == 10 || proc_get_model() == 11))));
-    /* FIXME: should similarly remove addr prefixes from hardcoded
+    /* XXX: should similarly remove addr prefixes from hardcoded
      * emits in emit_utils.c, except in cases where space is more
      * important than speed.
-     * FIXME: case 5231 long term solution should properly choose
+     * XXX: case 5231 long term solution should properly choose
      * - ibl - speed
      * - prefixes - speed/space?
      * - app code - preserverd since we normally don't need to reencode,
@@ -843,20 +865,20 @@ use_addr_prefix_on_short_disp(void)
 #include "encode_api.h"
 
 /* static version for drdecodelib */
-#define DEFAULT_ISA_MODE_STATIC                                                \
-    IF_X86_ELSE(IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32),                        \
-                IF_AARCHXX_ELSE(IF_X64_ELSE(DR_ISA_ARM_A64, DR_ISA_ARM_THUMB), \
-                                DR_ISA_RV64IMAFDC))
+#define DEFAULT_ISA_MODE_STATIC                 \
+    IF_X86_ELSE(                                \
+        IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32), \
+        IF_AARCHXX_ELSE(IF_X64_ELSE(DR_ISA_ARM_A64, DR_ISA_ARM_THUMB), DR_ISA_RV64))
 
 /* Use this one in DR proper.
  * This one is now static as well after we removed the runtime option that
  * used to be here: but I'm leaving the split to make it easier to add
  * an option in the future.
  */
-#define DEFAULT_ISA_MODE                                                       \
-    IF_X86_ELSE(IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32),                        \
-                IF_AARCHXX_ELSE(IF_X64_ELSE(DR_ISA_ARM_A64, DR_ISA_ARM_THUMB), \
-                                DR_ISA_RV64IMAFDC))
+#define DEFAULT_ISA_MODE                        \
+    IF_X86_ELSE(                                \
+        IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32), \
+        IF_AARCHXX_ELSE(IF_X64_ELSE(DR_ISA_ARM_A64, DR_ISA_ARM_THUMB), DR_ISA_RV64))
 
 /* For converting back from PC_AS_JMP_TGT on Thumb */
 #ifdef ARM
@@ -908,6 +930,7 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
 
 #    define PC_AS_JMP_TGT(isa_mode, pc) pc
 #    define PC_AS_LOAD_TGT(isa_mode, pc) pc
+#    define STRIP_MEMORY_TAG(addr) (addr)
 
 #    define SIZE_MOV_XAX_TO_TLS(flags, require_addr16)                            \
         (FRAG_IS_32(flags) ? ((require_addr16 || use_addr_prefix_on_short_disp()) \
@@ -933,7 +956,7 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
                                   : SIZE32_MOV_XBX_TO_ABS))
 
 /* exported for DYNAMO_OPTION(separate_private_stubs)
- * FIXME: find better way to export -- would use global var accessed
+ * XXX: find better way to export -- would use global var accessed
  * by macro, but easiest to have as static initializer for heap bucket
  */
 /* for -thread_private, we're relying on the fact that
@@ -1000,6 +1023,27 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
         ((isa_mode) == DR_ISA_ARM_THUMB ? (app_pc)(((ptr_uint_t)pc) | 1) : pc)
 #    define PC_AS_LOAD_TGT(isa_mode, pc) \
         ((isa_mode) == DR_ISA_ARM_THUMB ? (app_pc)(((ptr_uint_t)pc) & ~0x1) : pc)
+#    if defined(AARCH64)
+/* AArch64 canonincal VAs use the lower 48/52 bits of the address and the higher bits
+ * match 47/51. The TBI and MTE extensions use the top byte of the address to store a
+ * memory tag which is either ignored (TBI) or checked (MTE) by hardware.
+ *
+ * Memory tags are not part of the memory map of the process. It is a separate layer that
+ * is managed by the userspace allocator so system call parameters that contain addresses
+ * might have memory tags which need to be removed before we can compare them to
+ * canonical addresses in the process memory map.
+ * We do this by sign extending from bit 55.
+ *
+ * XXX i#7364: We need to be careful when stripping MTE tags from app pointers that we
+ *             need to access. MTE tags are checked by hardware so accessing a stripped
+ *             pointer will fault. For use cases where we need to dereference the app
+ *             pointer (for example code cache tags) we will either need to preserve the
+ *             allocations tags or disable tag checking.
+ */
+#        define STRIP_MEMORY_TAG(addr) ((__typeof__(addr))(((ptr_int_t)addr << 8) >> 8))
+#    else
+#        define STRIP_MEMORY_TAG(addr) (addr)
+#    endif
 
 #    ifdef AARCH64
 #        define AARCH64_INSTR_SIZE 4
@@ -1031,10 +1075,10 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
              DIRECT_EXIT_STUB_DATA_SZ)
 #    endif
 
-/* FIXME i#1575: implement coarse-grain support */
+/* XXX i#1575: implement coarse-grain support */
 #    define STUB_COARSE_DIRECT_SIZE(flags) (ASSERT_NOT_IMPLEMENTED(false), 0)
 
-/* FIXME i#1551: we need these to all take in the dr_isa_mode_t */
+/* XXX i#1551: we need these to all take in the dr_isa_mode_t */
 #    define ARM_NOP 0xe320f000
 #    define THUMB_NOP 0xbf00
 #    define ARM_BKPT 0xe1200070
@@ -1069,11 +1113,18 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
 #    define RISCV64_INSTR_COMPRESSED_SIZE 2
 #    define FRAGMENT_BASE_PREFIX_SIZE(flags) RISCV64_INSTR_SIZE * 2
 #    define DIRECT_EXIT_STUB_SIZE(flags) \
-        (16 * RISCV64_INSTR_SIZE) /* see insert_exit_stub_other_flags() */
+        (13 * RISCV64_INSTR_SIZE) +      \
+            DIRECT_EXIT_STUB_DATA_SZ /* See insert_exit_stub_other_flags(). */
 #    define FRAG_IS_32(flags) false
 #    define PC_AS_JMP_TGT(isa_mode, pc) pc
 #    define PC_AS_LOAD_TGT(isa_mode, pc) pc
-#    define DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING 4
+#    define STRIP_MEMORY_TAG(addr) (addr)
+/* Size of data slot used to store address of linked fragment or fcache return routine.
+ * We reserve 16 bytes for the 8 byte address, so that we can store it in an 8-byte
+ * aligned address (unlike AArch64, 12 bytes is not enough as RISC-V instructions can
+ * be 2 bytes long). This is required for atomicity of write operations.
+ */
+#    define DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING 8
 #    define DIRECT_EXIT_STUB_DATA_SZ \
         (sizeof(app_pc) + DIRECT_EXIT_STUB_DATA_SLOT_ALIGNMENT_PADDING)
 #    define STUB_COARSE_DIRECT_SIZE(flags) (ASSERT_NOT_IMPLEMENTED(false), 0)
@@ -1082,16 +1133,16 @@ fill_with_nops(dr_isa_mode_t isa_mode, byte *addr, size_t size);
 #    define IS_SET_TO_DEBUG(addr, size) (ASSERT_NOT_IMPLEMENTED(false), false)
 
 /* offset of the patchable region from the end of a cti */
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
 #    define CTI_PATCH_OFFSET 4
 /* offset of the patchable region from the end of a stub */
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
 #    define EXIT_STUB_PATCH_OFFSET 4
 /* size of the patch to a stub */
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
 #    define EXIT_STUB_PATCH_SIZE 4
 /* the most bytes we'll need to shift a patchable location for -pad_jmps */
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
 #    define MAX_PAD_SIZE 0
 #endif /* RISCV64 */
 /****************************************************************************/
@@ -1277,7 +1328,7 @@ enum {
     CBR_LONG_LENGTH = 6,
     JMP_LONG_LENGTH = 5,
     JMP_SHORT_LENGTH = 2,
-    CBR_SHORT_REWRITE_LENGTH = 9, /* FIXME: use this in mangle.c */
+    CBR_SHORT_REWRITE_LENGTH = 9, /* XXX: use this in mangle.c */
     RET_0_LENGTH = 1,
     PUSH_IMM32_LENGTH = 5,
     POPF_LENGTH = 1,
@@ -1311,7 +1362,7 @@ enum {
 #endif
 
 /* Not under defines so we can have code that is less cluttered */
-/* FIXME i#3544: With Compressed ext ecall can be 2 */
+/* XXX i#3544: With Compressed ext ecall can be 2 */
 #if defined(AARCH64) || defined(RISCV64)
     INT_LENGTH = 4,
     SYSCALL_LENGTH = 4,
@@ -1429,6 +1480,8 @@ shift_ctis_in_fragment(dcontext_t *dcontext, fragment_t *f, ssize_t shift, cache
 void
 add_profile_call(dcontext_t *dcontext);
 #endif
+bool
+d_r_emulate_instr(dcontext_t *dcontext, instr_t *inst, priv_mcontext_t *mc);
 app_pc
 d_r_emulate(dcontext_t *dcontext, app_pc pc, priv_mcontext_t *mc);
 
@@ -1765,14 +1818,14 @@ get_mcontext_frame_ptr(dcontext_t *dcontext, priv_mcontext_t *mc)
 #elif defined(AARCH64)
     case DR_ISA_ARM_A64: reg = mc->r29; break;
 #elif defined(RISCV64)
-    case DR_ISA_RV64IMAFDC: reg = mc->x8; break;
+    case DR_ISA_RV64: reg = mc->x8; break;
 #endif /* X86/ARM/AARCH64 */
     default: ASSERT_NOT_REACHED(); reg = 0;
     }
     return reg;
 }
 
-/* FIXME: check on all platforms: these are for Fedora 8 and XP SP2
+/* XXX: check on all platforms: these are for Fedora 8 and XP SP2
  * Keep in synch w/ defines in x86.asm
  */
 #define CS32_SELECTOR 0x23
@@ -1794,6 +1847,36 @@ encode_instr_freed_event(dcontext_t *dcontext, instr_t *instr);
 typedef struct _rseq_entry_state_t {
     reg_t gpr[DR_NUM_GPR_REGS];
 } rseq_entry_state_t;
+#endif
+
+/*
+ * In riscv we cannot address the entire dcontext by using base + immediate.
+ * For the reason we add 0x800 to the saved pointer and access it by
+ * substracting 0x800 from the offset in the struct.
+ */
+#ifdef RISCV64
+#    define DCONTEXT_TLS_MIDPTR_OFFSET 0x800
+#else
+#    define DCONTEXT_TLS_MIDPTR_OFFSET 0
+#endif
+
+#if (DCONTEXT_TLS_MIDPTR_OFFSET != 0)
+#    define DCONTEXT_ACTUAL_TO_TLS_PTR(x) \
+        ((dcontext_t *)(((ptr_uint_t)x) + DCONTEXT_TLS_MIDPTR_OFFSET))
+#    define DCONTEXT_TLS_TO_ACTUAL_PTR(x) \
+        ((dcontext_t *)(((ptr_uint_t)x) - DCONTEXT_TLS_MIDPTR_OFFSET))
+#    define DCONTEXT_ACTUAL_TO_TLS_OFFSET(x) (x - DCONTEXT_TLS_MIDPTR_OFFSET)
+#    define DCONTEXT_TLS_TO_ACTUAL_OFFSET(x) (x + DCONTEXT_TLS_MIDPTR_OFFSET)
+#else
+#    define DCONTEXT_ACTUAL_TO_TLS_PTR(x) x
+#    define DCONTEXT_TLS_TO_ACTUAL_PTR(x) x
+#    define DCONTEXT_ACTUAL_TO_TLS_OFFSET(x) x
+#    define DCONTEXT_TLS_TO_ACTUAL_OFFSET(x) x
+#endif
+
+/* See INTERNAL_OPTION(hw_cache_consistency). */
+#if defined(AARCH64) || defined(X86)
+#    define ARCH_SUPPORTS_HW_CACHE_CONSISTENCY
 #endif
 
 #endif /* _ARCH_EXPORTS_H_ */

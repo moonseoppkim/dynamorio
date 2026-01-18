@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -38,7 +38,9 @@
 /* decode.c -- a full x86 decoder */
 
 #include "../globals.h"
+#include "../isa_regdeps/decode.h"
 #include "arch.h"
+#include "encode_api.h"
 #include "instr.h"
 #include "decode.h"
 #include "decode_fast.h"
@@ -80,30 +82,56 @@
 
 /* used for VEX decoding */
 #define xx TYPE_NONE, OPSZ_NA
-static const instr_info_t escape_instr = { ESCAPE, 0x000000, "(bad)", xx, xx, xx,
-                                           xx,     xx,       0,       0,  0 };
-static const instr_info_t escape_38_instr = {
-    ESCAPE_3BYTE_38, 0x000000, "(bad)", xx, xx, xx, xx, xx, 0, 0, 0
+static const instr_info_t escape_instr = {
+    ESCAPE, 0x000000, DR_INSTR_CATEGORY_UNCATEGORIZED, "(bad)", xx, xx, xx, xx, xx, 0,
+    0,      0
 };
-static const instr_info_t escape_3a_instr = {
-    ESCAPE_3BYTE_3a, 0x000000, "(bad)", xx, xx, xx, xx, xx, 0, 0, 0
-};
+static const instr_info_t escape_38_instr = { ESCAPE_3BYTE_38,
+                                              0x000000,
+                                              DR_INSTR_CATEGORY_UNCATEGORIZED,
+                                              "(bad)",
+                                              xx,
+                                              xx,
+                                              xx,
+                                              xx,
+                                              xx,
+                                              0,
+                                              0,
+                                              0 };
+static const instr_info_t escape_3a_instr = { ESCAPE_3BYTE_3a,
+                                              0x000000,
+                                              DR_INSTR_CATEGORY_UNCATEGORIZED,
+                                              "(bad)",
+                                              xx,
+                                              xx,
+                                              xx,
+                                              xx,
+                                              xx,
+                                              0,
+                                              0,
+                                              0 };
 /* used for XOP decoding */
-static const instr_info_t xop_8_instr = { XOP_8_EXT, 0x000000, "(bad)", xx, xx, xx,
-                                          xx,        xx,       0,       0,  0 };
-static const instr_info_t xop_9_instr = { XOP_9_EXT, 0x000000, "(bad)", xx, xx, xx,
-                                          xx,        xx,       0,       0,  0 };
-static const instr_info_t xop_a_instr = { XOP_A_EXT, 0x000000, "(bad)", xx, xx, xx,
-                                          xx,        xx,       0,       0,  0 };
+static const instr_info_t xop_8_instr = {
+    XOP_8_EXT, 0x000000, DR_INSTR_CATEGORY_UNCATEGORIZED, "(bad)", xx, xx, xx, xx, xx, 0,
+    0,         0
+};
+static const instr_info_t xop_9_instr = {
+    XOP_9_EXT, 0x000000, DR_INSTR_CATEGORY_UNCATEGORIZED, "(bad)", xx, xx, xx, xx, xx, 0,
+    0,         0
+};
+static const instr_info_t xop_a_instr = {
+    XOP_A_EXT, 0x000000, DR_INSTR_CATEGORY_UNCATEGORIZED, "(bad)", xx, xx, xx, xx, xx, 0,
+    0,         0
+};
 #undef xx
 
 bool
 is_isa_mode_legal(dr_isa_mode_t mode)
 {
 #ifdef X64
-    return (mode == DR_ISA_IA32 || mode == DR_ISA_AMD64);
+    return (mode == DR_ISA_IA32 || mode == DR_ISA_AMD64 || mode == DR_ISA_REGDEPS);
 #else
-    return (mode == DR_ISA_IA32);
+    return (mode == DR_ISA_IA32 || mode == DR_ISA_REGDEPS);
 #endif
 }
 
@@ -166,7 +194,8 @@ is_variable_size(opnd_size_t sz)
     case OPSZ_16_vex32:
     case OPSZ_16_vex32_evex64:
     case OPSZ_vex32_evex64:
-    case OPSZ_8x16: return true;
+    case OPSZ_8x16:
+    case OPSZ_addr: return true;
     default: return false;
     }
 }
@@ -288,6 +317,9 @@ resolve_variable_size(decode_info_t *di /*IN: x86_mode, prefixes*/, opnd_size_t 
                     ? OPSZ_8
                     : (TEST(PREFIX_VEX_L, di->prefixes) ? OPSZ_4 : OPSZ_2));
     case OPSZ_8x16: return IF_X64_ELSE(OPSZ_16, OPSZ_8);
+    case OPSZ_addr:
+        return (TEST(PREFIX_ADDR, di->prefixes) ? (X64_MODE(di) ? OPSZ_4 : OPSZ_2)
+                                                : (X64_MODE(di) ? OPSZ_8 : OPSZ_4));
     }
 
     return sz;
@@ -634,7 +666,7 @@ read_modrm(byte *pc, decode_info_t *di)
  */
 static byte *
 read_vex(byte *pc, decode_info_t *di, byte instr_byte,
-         const instr_info_t **ret_info INOUT, bool *is_vex /*or xop*/)
+         const instr_info_t **ret_info DR_PARAM_INOUT, bool *is_vex /*or xop*/)
 {
     int idx = 0;
     const instr_info_t *info;
@@ -761,12 +793,11 @@ read_vex(byte *pc, decode_info_t *di, byte instr_byte,
  */
 static byte *
 read_evex(byte *pc, decode_info_t *di, byte instr_byte,
-          const instr_info_t **ret_info INOUT, bool *is_evex)
+          const instr_info_t **ret_info DR_PARAM_INOUT, bool *is_evex)
 {
-    const instr_info_t *info;
     byte prefix_byte = 0, evex_pp = 0;
     ASSERT(ret_info != NULL && *ret_info != NULL && is_evex != NULL);
-    info = *ret_info;
+    IF_DEBUG(const instr_info_t *info = *ret_info);
 
     CLIENT_ASSERT(info->type == EVEX_PREFIX_EXT, "internal evex decoding error");
     /* If 32-bit mode and mod selects for memory, this is not evex */
@@ -777,7 +808,7 @@ read_evex(byte *pc, decode_info_t *di, byte instr_byte,
             return pc;
         }
         *is_evex = true;
-        info = &evex_prefix_extensions[0][1];
+        IF_DEBUG(info = &evex_prefix_extensions[0][1];)
     } else {
         /* not evex */
         *is_evex = false;
@@ -934,8 +965,9 @@ read_prefix_ext(const instr_info_t *info, decode_info_t *di)
  * Returns NULL on an invalid instruction
  */
 static byte *
-read_instruction(byte *pc, byte *orig_pc, const instr_info_t **ret_info,
-                 decode_info_t *di, bool just_opcode _IF_DEBUG(bool report_invalid))
+read_instruction(dcontext_t *dcontext, byte *pc, byte *orig_pc,
+                 const instr_info_t **ret_info, decode_info_t *di,
+                 bool just_opcode _IF_DEBUG(bool report_invalid))
 {
     DEBUG_DECLARE(byte *post_suffix_pc = NULL;)
     byte instr_byte;
@@ -961,7 +993,7 @@ read_instruction(byte *pc, byte *orig_pc, const instr_info_t **ret_info,
     di->vex_encoded = false;
     di->evex_encoded = false;
     di->disp_abs = 0;
-    /* FIXME: set data and addr sizes to current mode
+    /* XXX: set data and addr sizes to current mode
      * for now I assume always 32-bit mode (or 64 for X64_MODE(di))!
      */
     di->prefixes = 0;
@@ -1261,7 +1293,7 @@ read_instruction(byte *pc, byte *orig_pc, const instr_info_t **ret_info,
         info->type > OP_LAST || (X64_MODE(di) && TEST(X64_INVALID, info->flags)) ||
         (!X64_MODE(di) && TEST(X86_INVALID, info->flags))) {
         /* invalid instruction: up to caller to decide what to do with it */
-        /* FIXME case 10672: provide a runtime option to specify new
+        /* XXX case 10672: provide a runtime option to specify new
          * instruction formats */
         DODEBUG({
             /* don't report when decoding DR addresses, as we sometimes try to
@@ -1276,7 +1308,6 @@ read_instruction(byte *pc, byte *orig_pc, const instr_info_t **ret_info,
                         di->start_pc, info->opcode);
                 } else {
                     int i;
-                    dcontext_t *dcontext = get_thread_private_dcontext();
                     IF_X64(bool old_mode = set_x86_mode(dcontext, di->x86_mode);)
                     int sz = decode_sizeof(dcontext, di->start_pc, NULL _IF_X64(NULL));
                     IF_X64(set_x86_mode(dcontext, old_mode));
@@ -1320,7 +1351,6 @@ read_instruction(byte *pc, byte *orig_pc, const instr_info_t **ret_info,
               if (spurious) {
                   char bytes[17 * 3];
                   int i;
-                  dcontext_t *dcontext = get_thread_private_dcontext();
                   IF_X64(bool old_mode = set_x86_mode(dcontext, di->x86_mode);)
                   int sz = decode_sizeof(dcontext, di->start_pc, NULL _IF_X64(NULL));
                   IF_X64(set_x86_mode(dcontext, old_mode));
@@ -1558,10 +1588,14 @@ decode_reg(decode_reg_t which_reg, decode_info_t *di, byte optype, opnd_size_t o
     case TYPE_FLOATMEM:
         /* GPR: fall-through since variable subset of full register */
         break;
+    case TYPE_G_ES_VAR_REG_SIZE: {
+        opsize = OPSZ_addr;
+        break;
+    }
     default: CLIENT_ASSERT(false, "internal unknown reg error");
     }
 
-    /* Do not allow a register for 'p' or 'a' types.  FIXME: maybe *_far_ind_* should
+    /* Do not allow a register for 'p' or 'a' types.  XXX: maybe *_far_ind_* should
      * use TYPE_INDIR_M instead of TYPE_INDIR_E?  What other things are going to turn
      * into asserts or crashes instead of invalid instrs based on events as fragile
      * as these decode routines moving sizes around?
@@ -1745,7 +1779,7 @@ decode_modrm(decode_info_t *di, byte optype, opnd_size_t opsize, opnd_t *reg_opn
             }
         }
         /* We go ahead and preserve the force bools if the original really had a 0
-         * disp; up to user to unset bools when changing disp value (FIXME: should
+         * disp; up to user to unset bools when changing disp value (XXX: should
          * we auto-unset on first mod?)
          */
         encode_zero_disp = di->has_disp && disp == 0 &&
@@ -2074,7 +2108,7 @@ decode_operand(decode_info_t *di, byte optype, opnd_size_t opsize, opnd_t *opnd)
         }
         return true;
     case TYPE_INDIR_REG:
-        /* FIXME: how know data size?  for now just use reg size: our only use
+        /* XXX: how know data size?  for now just use reg size: our only use
          * of this does not have a varying hardcoded reg, fortunately. */
         *opnd = opnd_create_base_disp(opsize, REG_NULL, 0, 0, reg_get_size(opsize));
         return true;
@@ -2187,6 +2221,15 @@ decode_operand(decode_info_t *di, byte optype, opnd_size_t opsize, opnd_t *opnd)
         return true;
     }
     case TYPE_T_MODRM: return decode_modrm(di, optype, opsize, NULL, opnd);
+    case TYPE_G_ES_VAR_REG_SIZE: {
+        /* NB: we want the register size to match the address size, not opsize. */
+        if (!decode_modrm(di, optype, OPSZ_addr, opnd, NULL)) {
+            return false;
+        }
+        reg_id_t reg = opnd_get_reg(*opnd);
+        *opnd = opnd_create_far_base_disp(DR_SEG_ES, reg, REG_NULL, 0, 0, opsize);
+        return true;
+    }
     default:
         /* ok to assert, types coming only from instr_info_t */
         CLIENT_ASSERT(false, "decode error: unknown operand type");
@@ -2410,6 +2453,34 @@ decode_get_tuple_type_input_size(const instr_info_t *info, decode_info_t *di)
         di->input_size = OPSZ_NA;
 }
 
+/* TODO i#6238: Not all opcodes have been reviewed.
+ * In case an opcode has not been reviewed,
+ * the default category assigned to it is DR_INSTR_CATEGORY_UNCATEGORIZED.
+ */
+static inline void
+decode_category(instr_t *instr)
+{
+    if (instr != NULL) {
+        if (op_instr[instr->opcode] != NULL) {
+            uint category = op_instr[instr->opcode]->category;
+            if (instr_operands_valid(instr)) {
+                if (instr_reads_memory(instr)) {
+                    category |= DR_INSTR_CATEGORY_LOAD;
+                    category &= ~DR_INSTR_CATEGORY_MOVE;
+                }
+                if (instr_writes_memory(instr)) {
+                    category |= DR_INSTR_CATEGORY_STORE;
+                    category &= ~DR_INSTR_CATEGORY_MOVE;
+                }
+            }
+            instr_set_category(instr, category);
+        } else {
+            /* nonvalid opcode */
+            instr_set_category(instr, DR_INSTR_CATEGORY_UNCATEGORIZED);
+        }
+    }
+}
+
 /****************************************************************************
  * Exported routines
  */
@@ -2437,7 +2508,8 @@ decode_eflags_usage(void *drcontext, byte *pc, uint *usage, dr_opnd_query_flags_
     IF_X64(di.x86_mode = get_x86_mode(dcontext));
 
     /* don't decode immeds, instead use decode_next_pc, it's faster */
-    read_instruction(pc, pc, &info, &di, true /* just opcode */ _IF_DEBUG(true));
+    read_instruction(dcontext, pc, pc, &info, &di,
+                     true /* just opcode */ _IF_DEBUG(true));
 
     *usage = instr_eflags_conditionally(
         info->eflags, decode_predicate_from_instr_info(info->type, info), flags);
@@ -2472,7 +2544,7 @@ decode_opcode(dcontext_t *dcontext, byte *pc, instr_t *instr)
      * so have to call decode_next_pc, but that ends up being faster
      * than decoding immeds!
      */
-    read_instruction(pc, pc, &info, &di,
+    read_instruction(dcontext, pc, pc, &info, &di,
                      true /* just opcode */
                      _IF_DEBUG(!TEST(INSTR_IGNORE_INVALID, instr->flags)));
     sz = decode_sizeof_ex(dcontext, pc, NULL, &rip_rel_pos);
@@ -2525,6 +2597,14 @@ check_is_variable_size(opnd_t op)
 static byte *
 decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
 {
+    /* #DR_ISA_REGDEPS synthetic ISA has its own decoder.
+     * XXX i#1684: when DR can be built with full dynamic architecture selection we won't
+     * need to pollute the decoding of other architectures with this synthetic ISA special
+     * case.
+     */
+    if (dr_get_isa_mode(dcontext) == DR_ISA_REGDEPS)
+        return decode_isa_regdeps(dcontext, pc, instr);
+
     const instr_info_t *info;
     decode_info_t di;
     byte *next_pc;
@@ -2536,7 +2616,7 @@ decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
                   "decode: instr is already decoded, may need to call instr_reset()");
 
     IF_X64(di.x86_mode = get_x86_mode(dcontext));
-    next_pc = read_instruction(pc, orig_pc, &info, &di,
+    next_pc = read_instruction(dcontext, pc, orig_pc, &info, &di,
                                false /* not just opcode,
                                         decode operands too */
                                _IF_DEBUG(!TEST(INSTR_IGNORE_INVALID, instr->flags)));
@@ -2685,6 +2765,8 @@ decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
         instr_set_rip_rel_pos(instr, (int)(di.disp_abs - di.start_pc));
     }
 
+    decode_category(instr);
+
     return next_pc;
 
 decode_invalid:
@@ -2725,6 +2807,13 @@ const char *
 decode_opcode_name(int opcode)
 {
     const instr_info_t *info = op_instr[opcode];
+    if (info == NULL) {
+        switch (opcode) {
+        case OP_INVALID: return "<invalid>";
+        case OP_UNDECODED: return "<undecoded>";
+        default: return "<unknown>";
+        }
+    }
     return info->name;
 }
 
@@ -2757,10 +2846,10 @@ decode_debug_checks_arch(void)
 #ifdef DECODE_UNIT_TEST
 #    include "instr_create_shared.h"
 
-/* FIXME: Tried putting this inside a separate unit-decode.c file, but
+/* XXX: Tried putting this inside a separate unit-decode.c file, but
  *        required creating a unit-decode_table.c file.  Since the
  *        infrastructure is not fully set up, currently leaving this here
- * FIXME: beef up to check if something went wrong
+ * XXX: beef up to check if something went wrong
  */
 static bool
 unit_check_decode_ff_opcode()
@@ -2805,11 +2894,11 @@ unit_check_decode_ff_opcode()
         instr_encode(dcontext, instr, pc);                               \
         instr_reset(dcontext, instr);                                    \
         decode(dcontext, pc, instr);                                     \
-        /* FIXME: use EXPECT */                                          \
+        /* XXX: use EXPECT */                                          \
         CLIENT_ASSERT(instr_get_opcode(instr) == OP_##opc, "unit test"); \
         instr_destroy(dcontext, instr);
 
-/* FIXME: case 8212: add checks for every single instr type */
+/* XXX: case 8212: add checks for every single instr type */
 static bool
 unit_check_sse3()
 {

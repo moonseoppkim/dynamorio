@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2010-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * ******************************************************************************/
 
 /*
@@ -356,10 +356,12 @@ Include the issue number using the syntax `i#<number>`.  For example (ignore lea
   */
  \endverbatim
 
--# Use `FIXME` or `TODO` in comments to indicate missing features that are required and not just optimizations or optional improvements (use `XXX` for those).
+-# Use `TODO` in comments to indicate missing features that are required and not just optimizations or optional improvements (use `XXX` for those).
+(Avoid `XXX` in new comments as its connotations are too negative and too easily
+mis-interpreted in code audits.)
 Include the issue number using the syntax `i#<number>`.  For example (ignore leading dots -- only there to work around GitHub markdown problems with leading spaces in literal blocks in list entries):
  \verbatim
- /* FIXME i#999: we do not yet handle a corner case where ...
+ /* TODO i#999: we do not yet handle a corner case where ...
   */
  \endverbatim
 
@@ -591,6 +593,8 @@ in `core/unix/` and `core/windows/`.
 
 
 -# While the core DynamoRIO library and API are C, we do support C++ clients and have some C++ tests and clients ourselves.  For broad compiler support we limit our code to C++11.
+
+-# C++ exception use is not allowed, for maximum interoperability to enable using libraries and source code in other environments where exceptions are not permitted.
 
 
  ****************************************************************************

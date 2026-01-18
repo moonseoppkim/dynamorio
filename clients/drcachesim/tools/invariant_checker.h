@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,7 +34,7 @@
  */
 
 #ifndef _INVARIANT_CHECKER_H_
-#define _INVARIANT_CHECKER_H_ 1
+#define _INVARIANT_CHECKER_H_
 
 #include <stdint.h>
 
@@ -42,6 +42,7 @@
 #include <iostream>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <stack>
 #include <string>
 #include <unordered_map>
@@ -49,8 +50,10 @@
 
 #include "analysis_tool.h"
 #include "dr_api.h"
+#include "decode_cache.h"
 #include "memref.h"
 #include "memtrace_stream.h"
+#include "schedule_file.h"
 #include "trace_entry.h"
 
 namespace dynamorio {
@@ -86,8 +89,13 @@ public:
     invariant_checker_t(bool offline = true, unsigned int verbose = 0,
                         std::string test_name = "",
                         std::istream *serial_schedule_file = nullptr,
-                        std::istream *cpu_schedule_file = nullptr);
+                        std::istream *cpu_schedule_file = nullptr,
+                        bool abort_on_invariant_error = true,
+                        bool dynamic_syscall_trace_injection = false,
+                        bool trace_incomplete = false);
     virtual ~invariant_checker_t();
+    std::string
+    initialize_shard_type(shard_type_t shard_type) override;
     std::string
     initialize_stream(memtrace_stream_t *serial_stream) override;
     bool
@@ -125,19 +133,54 @@ protected:
         memref_t last_branch_ = {};
         memtrace_stream_t *stream = nullptr;
         memref_t prev_entry_ = {};
-        memref_t prev_instr_ = {};
-        std::unique_ptr<instr_autoclean_t> prev_instr_decoded_ = nullptr;
+        memref_t prev_prev_entry_ = {};
         memref_t prev_xfer_marker_ = {}; // Cleared on seeing an instr.
         memref_t last_xfer_marker_ = {}; // Not cleared: just the prior xfer marker.
         uintptr_t prev_func_id_ = 0;
-        addr_t last_retaddr_ = 0;
+        // We keep track of return addresses of nested function calls.
+        std::stack<addr_t> retaddr_stack_;
         uintptr_t trace_version_ = 0;
+        // Struct to store decoding related attributes.
+#ifdef X86
+        int64_t instrs_since_sti = -1;
+#endif
+        class decoding_info_t : public decode_info_base_t {
+        public:
+            bool is_syscall_ = false;
+            bool writes_memory_ = false;
+            bool is_predicated_ = false;
+            uint num_memory_read_access_ = 0;
+            uint num_memory_write_access_ = 0;
+            addr_t branch_target_ = 0;
+            bool is_prefetch_ = false;
+            int opcode_ = 0;
+#ifdef X86
+            bool is_xsave_ = false;
+            bool is_xrstor_ = false;
+#endif
+        private:
+            std::string
+            set_decode_info_derived(
+                void *dcontext,
+                const dynamorio::drmemtrace::_memref_instr_t &memref_instr,
+                instr_t *instr, app_pc decode_pc) override;
+        };
+        struct instr_info_t {
+            memref_t memref = {};
+            // We let this stay the default if we are unable to get decoding info for
+            // the instruction. The data member defaults and is_valid() allow
+            // simplifying various conditional checks.
+            decoding_info_t decoding;
+            bool is_kernel_instr = false;
+        };
+        std::unique_ptr<decode_cache_t<decoding_info_t>> decode_cache_;
+        // On UNIX generally last_instr_in_cur_context_ should be used instead.
+        instr_info_t prev_instr_;
 #ifdef UNIX
         // We keep track of some state per nested signal depth.
         struct signal_context {
             addr_t xfer_int_pc;
-            memref_t pre_signal_instr;
-            bool xfer_aborted_rseq;
+            instr_info_t pre_signal_instr;
         };
         // We only support sigreturn-using handlers so we have pairing: no longjmp.
         std::stack<signal_context> signal_stack_;
@@ -149,23 +192,27 @@ protected:
         // The defaults are set to skip various signal-related checks in case we
         // see a signal-return before a signal-start (which happens when the trace
         // starts inside the app signal handler).
-        signal_context last_signal_context_ = { 0, {}, false };
+        signal_context last_signal_context_ = { 0, {} };
 
         // For the outer-most scope, like other nested signal scopes, we start with an
         // empty memref_t to denote absence of any pre-signal instr.
-        memref_t last_instr_in_cur_context_ = {};
+        instr_info_t last_instr_in_cur_context_;
 
         bool saw_rseq_abort_ = false;
-        memref_t prev_prev_entry_ = {};
         // These are only available via annotations in signal_invariants.cpp.
         int instrs_until_interrupt_ = -1;
         int memrefs_until_interrupt_ = -1;
 #endif
+        bool saw_thread_exit_ = false;
         bool saw_timestamp_but_no_instr_ = false;
         bool found_cache_line_size_marker_ = false;
         bool found_instr_count_marker_ = false;
         bool found_page_size_marker_ = false;
         bool found_syscall_marker_ = false;
+        bool prev_was_syscall_marker_ = false;
+        int last_syscall_marker_value_ = -1;
+        bool expect_syscall_trace_ = false;
+        int syscall_trace_num_after_last_userspace_instr_ = -1;
         bool found_blocking_marker_ = false;
         uint64_t syscall_count_ = 0;
         uint64_t last_instr_count_marker_ = 0;
@@ -173,28 +220,58 @@ protected:
         // Track the location of errors.
         memref_tid_t tid_ = -1;
         uint64_t ref_count_ = 0;
+        uint64_t dyn_injected_syscall_ref_count_ = 0;
         // We do not expect these to vary by thread but it is simpler to keep
         // separate values per thread as we discover their values during parallel
         // operation.
         addr_t app_handler_pc_ = 0;
         offline_file_type_t file_type_ = OFFLINE_FILE_TYPE_DEFAULT;
+        bool saw_filetype_ = false;
         uintptr_t last_window_ = 0;
         bool window_transition_ = false;
         uint64_t chunk_instr_count_ = 0;
         uint64_t instr_count_ = 0;
+        uint64_t dyn_injected_syscall_instr_count_ = 0;
         uint64_t last_timestamp_ = 0;
         uint64_t instr_count_since_last_timestamp_ = 0;
-        std::vector<schedule_entry_t> sched_;
-        std::unordered_map<uint64_t, std::vector<schedule_entry_t>> cpu2sched_;
+        schedule_file_t::per_shard_t sched_data_;
         bool skipped_instrs_ = false;
-        // We could move this to per-worker data and still not need a lock
-        // (we don't currently have per-worker data though so leaving it as per-shard).
-        std::unordered_map<addr_t, addr_t> branch_target_cache;
         // Rseq region state.
         bool in_rseq_region_ = false;
         addr_t rseq_start_pc_ = 0;
         addr_t rseq_end_pc_ = 0;
         bool saw_filter_endpoint_marker_ = false;
+        // Used to check markers after each system call.
+        bool expect_syscall_marker_ = false;
+        // Counters for expected read and write records.
+        int expected_read_records_ = 0;
+        int expected_write_records_ = 0;
+        bool between_kernel_syscall_trace_markers_ = false;
+        bool between_kernel_context_switch_markers_ = false;
+        // The kernel-trace-end branch target marker may have a zero value if it's at the
+        // end of some thread's trace. If we find a zero-value branch_target marker, we
+        // set this flag to verify that there's a thread exit next.
+        bool verify_next_thread_exit_ = false;
+        instr_info_t pre_syscall_trace_instr_;
+        instr_info_t pre_context_switch_trace_instr_;
+#ifdef UNIX
+        int signal_stack_depth_at_syscall_trace_start_ = -1;
+        int signal_stack_depth_at_context_switch_trace_start_ = -1;
+#endif
+        addr_t prev_kernel_end_branch_target_ = 0;
+        // Relevant when -no_abort_on_invariant_error.
+        uint64_t error_count_ = 0;
+        int64_t last_chunk_ordinal_ = -1;
+        bool adjusted_ordinal_for_incomplete_ = false;
+        // Initializing to a non-zero constant so that invalid zero values
+        // are detected properly.
+        uint64_t last_next_trace_pc_ = static_cast<uint64_t>(-1);
+        std::set<switch_type_t> saw_switch_trace_;
+        std::set<int> saw_syscall_trace_;
+
+        // Resets specific state on context switch to a different thread.
+        void
+        reset_at_context_switch(const memref_t &memref, bool core_sharded_on_disk);
     };
 
     // We provide this for subclasses to run these invariants with custom
@@ -207,19 +284,50 @@ protected:
     virtual void
     check_schedule_data(per_shard_t *global_shard);
 
+    virtual bool
+    is_a_unit_test(per_shard_t *shard);
+
     // Check for invariant violations caused by PC discontinuities. Return an error string
     // for such violations.
     std::string
-    check_for_pc_discontinuity(
-        per_shard_t *shard, const memref_t &memref, const memref_t &prev_instr,
-        addr_t cur_pc, const std::unique_ptr<instr_autoclean_t> &cur_instr_decoded,
-        bool expect_encoding, bool at_kernel_event);
+    check_for_pc_discontinuity(per_shard_t *shard,
+                               const per_shard_t::instr_info_t &prev_instr_info,
+                               const per_shard_t::instr_info_t &cur_memref_info,
+                               bool expect_encoding, bool at_kernel_event);
 
-    // The keys here are int for parallel, tid for serial.
-    std::unordered_map<memref_tid_t, std::unique_ptr<per_shard_t>> shard_map_;
-    // This mutex is only needed in parallel_shard_init.  In all other accesses to
-    // shard_map (process_memref, print_results) we are single-threaded.
-    std::mutex shard_map_mutex_;
+    // Check for invariant violations related to OFFLINE_FILE_TYPE_ARCH_REGDEPS traces.
+    // Checks both instructions and markers.
+    void
+    check_regdeps_invariants(per_shard_t *shard, const memref_t &memref);
+
+    // Creates and initializes a decode cache object in the given shard. Made virtual
+    // to allow subclasses to customize.
+    virtual bool
+    init_decode_cache(per_shard_t *shard, void *dcontext);
+#ifdef X86
+    // Whether the expected write entry count check should be relaxed for the kernel
+    // part of the trace.
+    bool
+    relax_expected_write_count_check_for_kernel(per_shard_t *shard);
+
+    // Whether the expected read entry count check should be relaxed for the kernel
+    // part of the trace.
+    bool
+    relax_expected_read_count_check_for_kernel(per_shard_t *shard);
+#endif
+
+    // Returns whether the trace being processed is dynamically core-sharded. The
+    // caller must use this only after the file type has been set in the per_shard_t.
+    bool
+    is_dynamically_core_sharded(per_shard_t *shard);
+
+    void *drcontext_ = dr_standalone_init();
+    std::unordered_map<int, std::unique_ptr<per_shard_t>> shard_map_;
+    // This mutex is only needed in parallel_shard_init to initialize shard_map_ with
+    // per_shard_t data and set dcontext_t.isa_mode, which is a global resource.
+    // In all other accesses to shard_map_ (process_memref, print_results) we are
+    // single-threaded.
+    std::mutex init_mutex_;
 
     bool knob_offline_;
     unsigned int knob_verbose_;
@@ -230,6 +338,11 @@ protected:
     std::istream *cpu_schedule_file_ = nullptr;
 
     memtrace_stream_t *serial_stream_ = nullptr;
+
+    bool core_sharded_ = false;
+    bool abort_on_invariant_error_ = true;
+    bool dynamic_syscall_trace_injection_ = false;
+    bool trace_incomplete_ = false;
 };
 
 } // namespace drmemtrace

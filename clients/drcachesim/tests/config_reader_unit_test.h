@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,13 +31,15 @@
  */
 
 #ifndef _CONFIG_READER_UNIT_TEST_H_
-#define _CONFIG_READER_UNIT_TEST_H_ 1
+#define _CONFIG_READER_UNIT_TEST_H_
+
+#include <string>
 
 namespace dynamorio {
 namespace drmemtrace {
 
 void
-unit_test_config_reader(const char *testdir);
+unit_test_config_reader(const std::string &testdir);
 
 } // namespace drmemtrace
 } // namespace dynamorio

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2018 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2023 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -250,7 +250,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         strncpy(stats->names[i], stat_names[i], CLIENTSTAT_NAME_MAX_LEN);
         stats->names[i][CLIENTSTAT_NAME_MAX_LEN - 1] = '\0';
     }
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(event_analyze_bb,
                                                  event_insert_instrumentation, NULL))
         DR_ASSERT(false);
@@ -306,14 +306,15 @@ event_analyze_bb(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
     uint num_instrs = 0;
     uint num_flops = 0;
     uint num_syscalls = 0;
-    dr_fp_type_t fp_type;
+    dr_instr_category_t fp_type;
 
     for (instr = instrlist_first_app(bb); instr != NULL;
          instr = instr_get_next_app(instr)) {
         num_instrs++;
-        if (instr_is_floating_ex(instr, &fp_type) &&
+        if (instr_is_floating_type(instr, &fp_type) &&
             /* We exclude loads and stores (and reg-reg moves) and state preservation */
-            (fp_type == DR_FP_CONVERT || fp_type == DR_FP_MATH)) {
+            (DR_INSTR_CATEGORY_CONVERT && fp_type != 0 ||
+             DR_INSTR_CATEGORY_MATH && fp_type != 0)) {
 #ifdef VERBOSE
             dr_print_instr(drcontext, STDOUT, instr, "Found flop: ");
 #endif

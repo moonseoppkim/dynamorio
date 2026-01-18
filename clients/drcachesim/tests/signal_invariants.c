@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,6 +37,12 @@
  */
 
 #ifndef ASM_CODE_ONLY /* C code */
+
+/* Enable asserts in release build testing too.
+ * XXX: We should remove NDEBUG from suite/tests/CMakeLists-created binaries;
+ * we already do this for clients/drcachesim/CMakeLists-created binaries.
+ */
+#    undef NDEBUG
 
 #    include "tools.h"
 #    include <stdio.h>
@@ -190,8 +196,11 @@ GLOBAL_LABEL(FUNCNAME:)
 #define FUNCNAME test_signal_midbb
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [3]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [2]
         nop
         nop
         ud2
@@ -205,8 +214,11 @@ GLOBAL_LABEL(FUNCNAME:)
 #define FUNCNAME test_signal_startbb
         DECLARE_FUNC(FUNCNAME)
 GLOBAL_LABEL(FUNCNAME:)
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [2]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [1]
         jmp      new_bb
     new_bb:
         ud2
@@ -221,10 +233,15 @@ GLOBAL_LABEL(FUNCNAME:)
          * XXX i#3958: Today the 2nd movs memref is incorrectly included *before*
          * the fault.
          */
-        /* prefetcht2's address is the instr count until a signal */
-        prefetcht2 [5]
-        /* prefetcht1's address is the memref count until a signal */
-        prefetcht1 [3]
+        /* prefetcht2's address is the instr count until a signal not counting
+         * the faulting instr because the faulting instr is removed from the
+         * trace.
+         */
+        prefetcht2 [4]
+        /* prefetcht1's address is the memref count until a signal not counting
+         * the faulting memref because the faulting memref is removed from the trace.
+         */
+        prefetcht1 [1]
         mov      REG_XSI, HEX(42)
         mov      REG_XDI, REG_XSP
         push     REG_XAX

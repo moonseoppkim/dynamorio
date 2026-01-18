@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2009 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -57,17 +57,18 @@
 
 /* in disassemble_shared.c */
 void
-internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+internal_opnd_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                           dcontext_t *dcontext, opnd_t opnd, bool use_size_sfx);
 void
-reg_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT, reg_id_t reg,
+reg_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, reg_id_t reg,
                 dr_opnd_flags_t flags, const char *prefix, const char *suffix);
 
 #define BYTES_PER_LINE 7
 
 int
-print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                      byte *next_pc, instr_t *instr)
+d_r_print_encoding_first_line_to_buffer(char *buf, size_t bufsz,
+                                        size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                        byte *next_pc, instr_t *instr)
 {
     int sz = (int)(next_pc - pc);
     int i, extra_sz;
@@ -89,8 +90,10 @@ print_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
 }
 
 void
-print_extra_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *pc,
-                            byte *next_pc, int extra_sz, const char *extra_bytes_prefix)
+d_r_print_encoding_second_line_to_buffer(char *buf, size_t bufsz,
+                                         size_t *sofar DR_PARAM_INOUT, byte *pc,
+                                         byte *next_pc, int extra_sz,
+                                         const char *extra_bytes_prefix)
 {
     int i;
     if (extra_sz > 0) {
@@ -102,7 +105,7 @@ print_extra_bytes_to_buffer(char *buf, size_t bufsz, size_t *sofar INOUT, byte *
 }
 
 void
-opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                                  opnd_t opnd)
 {
     int scale = opnd_get_scale(opnd);
@@ -115,7 +118,7 @@ opnd_base_disp_scale_disassemble(char *buf, size_t bufsz, size_t *sofar INOUT,
 }
 
 bool
-opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar INOUT, opnd_t opnd)
+opnd_disassemble_arch(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT, opnd_t opnd)
 {
     /* nothing */
     return false;
@@ -147,10 +150,10 @@ instr_implicit_reg(instr_t *instr)
 }
 
 bool
-opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
+opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar DR_PARAM_INOUT,
                             dcontext_t *dcontext, instr_t *instr, byte optype,
                             opnd_t opnd, bool prev, bool multiple_encodings, bool dst,
-                            int *idx INOUT)
+                            int *idx DR_PARAM_OUT)
 {
     switch (optype) {
     case TYPE_REG:
@@ -205,11 +208,18 @@ opnd_disassemble_noimplicit(char *buf, size_t bufsz, size_t *sofar INOUT,
             print_to_buffer(buf, bufsz, sofar, ", ");
         internal_opnd_disassemble(buf, bufsz, sofar, dcontext, opnd, false);
         return true;
+    case TYPE_G_ES_VAR_REG_SIZE: {
+        if (prev)
+            print_to_buffer(buf, bufsz, sofar, ", ");
+        reg_id_t reg = opnd_get_base(opnd);
+        reg_disassemble(buf, bufsz, sofar, reg, 0, "", "");
+        return true;
+    }
     case TYPE_X:
     case TYPE_XLAT:
     case TYPE_MASKMOVQ:
         if (opnd_get_segment(opnd) != SEG_DS) {
-            /* FIXME: really we should put before opcode */
+            /* XXX: really we should put before opcode */
             if (prev)
                 print_to_buffer(buf, bufsz, sofar, ", ");
             reg_disassemble(buf, bufsz, sofar, opnd_get_segment(opnd), 0, "", "");
@@ -273,6 +283,20 @@ instr_opcode_name(instr_t *instr)
     return NULL;
 }
 
+static bool
+suppress_memory_size_annotations(instr_t *instr)
+{
+    /* A more principled approach would be to examine all operands for the presence of
+     * TYPE_G_ES_VAR_REG_SIZE but this is sufficient for now.
+     */
+    switch (instr_get_opcode(instr)) {
+    case OP_movdir64b:
+    case OP_enqcmd:
+    case OP_enqcmds: return true;
+    default: return false;
+    }
+}
+
 static const char *
 instr_opcode_name_suffix(instr_t *instr)
 {
@@ -333,7 +357,8 @@ instr_opcode_name_suffix(instr_t *instr)
          * and then go back and add the suffix.  This will do for now.
          */
         if (instr_num_srcs(instr) > 0 && !opnd_is_reg(instr_get_src(instr, 0)) &&
-            instr_num_dsts(instr) > 0 && !opnd_is_reg(instr_get_dst(instr, 0))) {
+            instr_num_dsts(instr) > 0 && !opnd_is_reg(instr_get_dst(instr, 0)) &&
+            !suppress_memory_size_annotations(instr)) {
             uint sz = instr_memory_reference_size(instr);
             if (sz == 1)
                 return "b";
@@ -350,7 +375,7 @@ instr_opcode_name_suffix(instr_t *instr)
 
 void
 print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
-                  size_t *sofar INOUT)
+                  size_t *sofar DR_PARAM_OUT)
 {
     const char *subst_name = instr_opcode_name(instr);
     print_to_buffer(buf, bufsz, sofar, "%s%s", subst_name == NULL ? name : subst_name,
@@ -359,7 +384,7 @@ print_opcode_name(instr_t *instr, const char *name, char *buf, size_t bufsz,
 
 void
 print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t bufsz,
-                     size_t *sofar INOUT)
+                     size_t *sofar DR_PARAM_OUT)
 {
     if (TEST(PREFIX_XACQUIRE, instr->prefixes))
         print_to_buffer(buf, bufsz, sofar, "xacquire ");
@@ -379,7 +404,8 @@ print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t buf
     if (!TEST(DR_DISASM_INTEL, DYNAMO_OPTION(disasm_mask))) {
         if (TEST(PREFIX_DATA, instr->prefixes))
             print_to_buffer(buf, bufsz, sofar, "data16 ");
-        if (TEST(PREFIX_ADDR, instr->prefixes)) {
+        if (TEST(PREFIX_ADDR, instr->prefixes) &&
+            !suppress_memory_size_annotations(instr)) {
             print_to_buffer(buf, bufsz, sofar,
                             X64_MODE_DC(dcontext) ? "addr32 " : "addr16 ");
         }
@@ -391,7 +417,7 @@ print_instr_prefixes(dcontext_t *dcontext, instr_t *instr, char *buf, size_t buf
 }
 
 int
-print_opcode_suffix(instr_t *instr, char *buf, size_t bufsz, size_t *sofar INOUT)
+print_opcode_suffix(instr_t *instr, char *buf, size_t bufsz, size_t *sofar DR_PARAM_OUT)
 {
     if (TEST(PREFIX_JCC_TAKEN, instr->prefixes)) {
         print_to_buffer(buf, bufsz, sofar, ",pt");
@@ -401,4 +427,10 @@ print_opcode_suffix(instr_t *instr, char *buf, size_t bufsz, size_t *sofar INOUT
         return 2;
     }
     return 0;
+}
+
+bool
+optype_is_evex_mask_arch(byte optype)
+{
+    return optype == TYPE_K_EVEX;
 }

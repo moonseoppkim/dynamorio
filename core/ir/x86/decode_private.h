@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -125,7 +125,7 @@ enum {
  *   (pusha,shld,shrd,cmpxchg,cmpxhchg8b,rep outs,rep cmps, rep scas)
  * => no separate immed field
  *
- * FIXMEs:
+ * XXXs:
  * lea = computes addr, doesn't touch mem!  how encode?
  * in & out, ins & outs: are I/O ports in memory?!?
  * Should we model fp stack changes?!?
@@ -477,6 +477,11 @@ enum {
     TYPE_T_MODRM,                /* modrm.rm selects bnd0-bnd3 register or 8 bytes
                                   * memory in 32-bit mode, or 16 bytes memory in 64-bit
                                   * mode.
+                                  */
+    TYPE_G_ES_VAR_REG_SIZE,      /* modrm.reg selects register (like TYPE_G)
+                                  * containing an offset from ES, but (unlike TYPE_G)
+                                  * treated as a memory operand, with size controlled
+                                  * by PREFIX_ADDR.
                                   */
     /* when adding new types, update type_names[] in encode.c */
     TYPE_BEYOND_LAST_ENUM,

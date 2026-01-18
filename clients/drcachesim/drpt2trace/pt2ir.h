@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2023-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,7 +33,7 @@
 /* pt2ir: convert a PT raw trace to DynamoRIO's IR format. */
 
 #ifndef _PT2IR_H_
-#define _PT2IR_H_ 1
+#define _PT2IR_H_
 
 /**
  * @file pt2ir.h
@@ -53,14 +53,14 @@
 #include "drir.h"
 #include "elf_loader.h"
 
-#ifndef IN
-#    define IN // nothing
+#ifndef DR_PARAM_IN
+#    define DR_PARAM_IN // nothing
 #endif
-#ifndef OUT
-#    define OUT // nothing
+#ifndef DR_PARAM_OUT
+#    define DR_PARAM_OUT // nothing
 #endif
-#ifndef INOUT
-#    define INOUT // nothing
+#ifndef DR_PARAM_INOUT
+#    define DR_PARAM_INOUT // nothing
 #endif
 
 // libipt global types.
@@ -305,7 +305,7 @@ public:
      * This function is used to parse the metadata of the PT raw trace.
      */
     bool
-    init_with_metadata(IN const void *metadata_buffer)
+    init_with_metadata(DR_PARAM_IN const void *metadata_buffer)
     {
         if (metadata_buffer == NULL)
             return false;
@@ -347,31 +347,42 @@ public:
      * @param pt2ir_config The configuration of PT raw trace.
      * @param verbosity  The verbosity level for notifications. If set to 0, only error
      * logs are printed. If set to 1, all logs are printed. Default value is 0.
+     * @param allow_non_fatal_decode_errors Whether PT decode errors that are not
+     * fatal to the syscall PT trace's conversion are simply skipped past.
      * @return true if the instance is successfully initialized.
      */
     bool
-    init(IN pt2ir_config_t &pt2ir_config, IN int verbosity = 0);
+    init(DR_PARAM_IN pt2ir_config_t &pt2ir_config, DR_PARAM_IN int verbosity = 0,
+         DR_PARAM_IN bool allow_non_fatal_decode_errors = false);
 
     /**
      * The convert function performs two processes: (1) decode the PT raw trace into
      * libipt's IR format pt_insn; (2) convert pt_insn into the DynamoRIO's IR format
-     * instr_t and append it to ilist inside the drir object.
+     * #instr_t and append it to ilist inside the drir object.
      * @param pt_data The PT raw trace.
      * @param pt_data_size The size of PT raw trace.
      * @param drir The drir object.
+     * @param non_fatal_decode_error_count_out Pointer to the integer where the count
+     * of non-fatal decode errors seen during conversion will be stored. Used only if
+     * allow_non_fatal_decode_errors was set to true in the init call. This is set
+     * only if we were still able to generate a converted trace, albeit with some
+     * PC discontinuities.
      * @return pt2ir_convert_status_t. If the conversion is successful, the function
      * returns #PT2IR_CONV_SUCCESS. Otherwise, the function returns the corresponding
      * error code.
      */
     pt2ir_convert_status_t
-    convert(IN const uint8_t *pt_data, IN size_t pt_data_size, INOUT drir_t &drir);
+    convert(DR_PARAM_IN const uint8_t *pt_data, DR_PARAM_IN size_t pt_data_size,
+            DR_PARAM_INOUT drir_t *drir,
+            DR_PARAM_OUT uint64_t *non_fatal_decode_error_count_out = nullptr);
 
 private:
     /* Diagnose converting errors and output diagnostic results.
      * It will used to generate the error message during the decoding process.
      */
     void
-    dx_decoding_error(IN int errcode, IN const char *errtype, IN uint64_t ip);
+    dx_decoding_error(DR_PARAM_IN int errcode, DR_PARAM_IN const char *errtype,
+                      DR_PARAM_IN uint64_t ip);
 
     /* It indicate if the instance of pt2ir_t has been initialized, signifying the
      * readiness of the conversion process from PT data to DR's IR.
@@ -403,6 +414,9 @@ private:
 
     /* Integer value representing the verbosity level for notifications. */
     int verbosity_;
+
+    /* Whether non-fatal errors are allowed during PT trace decode. */
+    bool allow_non_fatal_decode_errors_;
 };
 
 } // namespace drmemtrace

@@ -1,6 +1,6 @@
 /* **********************************************************
- * Copyright (c) 2014-2022 Google, Inc.  All rights reserved.
- * Copyright (c) 2016 ARM Limited. All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2024 ARM Limited. All rights reserved.
  * **********************************************************/
 
 /*
@@ -37,6 +37,9 @@
 #include "instrument.h" /* instrlist_meta_preinsert */
 #include "../clean_call_opt.h"
 #include "disassemble.h"
+#ifdef AARCH64
+#    include "../aarch64/mangle_aarch64.h"
+#endif
 
 /* Make code more readable by shortening long lines.
  * We mark everything we add as non-app instr.
@@ -44,51 +47,20 @@
 #define POST instrlist_meta_postinsert
 #define PRE instrlist_meta_preinsert
 
+static reg_id_t
+pick_scratch_reg(dcontext_t *dcontext, instr_t *instr, reg_id_t do_not_pick_a,
+                 reg_id_t do_not_pick_b, reg_id_t do_not_pick_c, bool dead_reg_ok,
+                 ushort *scratch_slot DR_PARAM_OUT, bool *should_restore DR_PARAM_OUT);
+
 /* For ARM and AArch64, we always use TLS and never use hardcoded
  * dcontext (xref USE_SHARED_GENCODE_ALWAYS() and -private_ib_in_tls).
  * Thus we use instr_create_{save_to,restore_from}_tls() directly.
  */
 
-#ifdef AARCH64
-/* Defined in aarch64.asm. */
-void
-icache_op_ic_ivau_asm(void);
-void
-icache_op_isb_asm(void);
-
-typedef struct ALIGN_VAR(16) _icache_op_struct_t {
-    /* This flag is set if any icache lines have been invalidated. */
-    unsigned int flag;
-    /* The lower half of the address of "lock" must be non-zero as we want to
-     * acquire the lock using only two free registers and STXR Ws, Wt, [Xn]
-     * requires s != t and s != n, so we use t == n. With this ordering of the
-     * members alignment guarantees that bit 2 of the address of "lock" is set.
-     */
-    unsigned int lock;
-    /* The icache line size. This is discovered using the system register
-     * ctr_el0 and will be (1 << (2 + n)) with 0 <= n < 16.
-     */
-    size_t linesize;
-    /* If these are equal then no icache lines have been invalidated. Otherwise
-     * they are both aligned to the icache line size and describe a set of
-     * consecutive icache lines (which could wrap around the top of memory).
-     */
-    void *begin, *end;
-    /* Some space to spill registers. */
-    ptr_uint_t spill[2];
-} icache_op_struct_t;
-
-/* Used in aarch64.asm. */
-icache_op_struct_t icache_op_struct;
-#endif
-
 void
 mangle_arch_init(void)
 {
-#ifdef AARCH64
-    /* Check address of "lock" is unaligned. See comment in icache_op_struct_t. */
-    ASSERT(!ALIGNED(&icache_op_struct.lock, 16));
-#endif
+    /* Nothing yet. */
 }
 
 void
@@ -439,11 +411,11 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
     if (cci == NULL)
         cci = &default_clean_call_info;
     if (cci->preserve_mcontext || cci->num_simd_skip != proc_num_simd_registers()) {
-        /* FIXME i#1551: once we add skipping of regs, need to keep shape here.
+        /* XXX i#1551: once we add skipping of regs, need to keep shape here.
          * Also, num_opmask_skip is not applicable to ARM/AArch64.
          */
     }
-    /* FIXME i#1551: once we have cci->num_simd_skip, skip this if possible */
+    /* XXX i#1551: once we have cci->num_simd_skip, skip this if possible */
 #ifdef AARCH64
     ASSERT(proc_num_simd_registers() ==
            (MCXT_NUM_SIMD_SVE_SLOTS +
@@ -565,7 +537,9 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
                               DR_REG_Q0, SIMD_REG_TYPE);
     }
 
-    dstack_offs += MCXT_NUM_SIMD_SLOTS * sizeof(dr_simd_t);
+    dstack_offs += (MCXT_NUM_SIMD_SVE_SLOTS * sizeof(dr_simd_t)) +
+        (MCXT_NUM_SVEP_SLOTS * sizeof(dr_svep_t)) +
+        (MCXT_NUM_FFR_SLOTS * sizeof(dr_ffr_t));
 
     /* Restore the registers we used. */
     /* ldp x0, x1, [sp] */
@@ -577,6 +551,10 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
         INSTR_CREATE_ldr(dcontext, opnd_create_reg(DR_REG_X2),
                          opnd_create_base_disp(DR_REG_SP, DR_REG_NULL, 0,
                                                REG_OFFSET(DR_REG_X2), OPSZ_8)));
+
+    /* Make dstack_offs 16-byte aligned. */
+    dstack_offs = ALIGN_FORWARD(dstack_offs, get_ABI_stack_alignment());
+
 #else
     /* vstmdb always does writeback */
     PRE(ilist, instr,
@@ -585,18 +563,23 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
     PRE(ilist, instr,
         INSTR_CREATE_vstmdb(dcontext, OPND_CREATE_MEMLIST(DR_REG_SP), SIMD_REG_LIST_LEN,
                             SIMD_REG_LIST_0_15));
-
     dstack_offs += proc_num_simd_registers() * sizeof(dr_simd_t);
     ASSERT(proc_num_simd_registers() == MCXT_NUM_SIMD_SLOTS);
+    ASSERT(ALIGNED(dstack_offs, get_ABI_stack_alignment()));
+
+    /* padding */
+    PRE(ilist, instr,
+        XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP), OPND_CREATE_INT(XSP_SZ)));
+    dstack_offs += XSP_SZ;
 
     /* pc and aflags */
     if (cci->skip_save_flags) {
         /* even if we skip flag saves we want to keep mcontext shape */
         int offs_beyond_xmm = 2 * XSP_SZ;
-        dstack_offs += offs_beyond_xmm;
         PRE(ilist, instr,
             XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP),
                              OPND_CREATE_INT(offs_beyond_xmm)));
+        dstack_offs += offs_beyond_xmm;
     } else {
         uint slot = TLS_REG0_SLOT;
         bool spill = scratch == REG_NULL;
@@ -622,13 +605,14 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
             PRE(ilist, instr,
                 XINST_CREATE_load_int(dcontext, opnd_create_reg(scratch), push_pc));
             PRE(ilist, instr, INSTR_CREATE_push(dcontext, opnd_create_reg(scratch)));
+            dstack_offs += XSP_SZ;
         } else {
             ASSERT(opnd_is_reg(push_pc));
             PRE(ilist, instr, INSTR_CREATE_push(dcontext, push_pc));
+            dstack_offs += XSP_SZ;
         }
         if (spill)
             PRE(ilist, instr, instr_create_restore_from_tls(dcontext, scratch, slot));
-        dstack_offs += XSP_SZ;
     }
 
     /* We rely on dr_get_mcontext_priv() to fill in the app's stolen reg value
@@ -637,27 +621,29 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
     if (dr_get_isa_mode(dcontext) == DR_ISA_ARM_THUMB) {
         /* We can't use sp with stm */
         PRE(ilist, instr, INSTR_CREATE_push(dcontext, opnd_create_reg(DR_REG_LR)));
+        dstack_offs += XSP_SZ;
         /* We can't push sp w/ writeback, and in fact dr_get_mcontext() gets
          * sp from the stack swap so we can leave this empty.
          */
         PRE(ilist, instr,
             XINST_CREATE_sub(dcontext, opnd_create_reg(DR_REG_SP),
                              OPND_CREATE_INT(XSP_SZ)));
+        dstack_offs += XSP_SZ;
         PRE(ilist, instr,
             INSTR_CREATE_stmdb_wb(dcontext, OPND_CREATE_MEMLIST(DR_REG_SP),
                                   DR_REG_LIST_LENGTH_T32, DR_REG_LIST_T32));
+        dstack_offs += DR_REG_LIST_LENGTH_T32 * XSP_SZ;
     } else {
         PRE(ilist, instr,
             INSTR_CREATE_stmdb_wb(dcontext, OPND_CREATE_MEMLIST(DR_REG_SP),
                                   DR_REG_LIST_LENGTH_ARM, DR_REG_LIST_ARM));
+        dstack_offs += DR_REG_LIST_LENGTH_ARM * XSP_SZ;
     }
-    dstack_offs += 15 * XSP_SZ;
+    ASSERT(ALIGNED(dstack_offs, get_ABI_stack_alignment()));
 
-    /* Make dstack_offs 8-byte algined, as we only accounted for 17 4-byte slots. */
-    dstack_offs += XSP_SZ;
+#endif
     ASSERT(cci->skip_save_flags || cci->num_simd_skip != 0 || cci->num_regs_skip != 0 ||
            dstack_offs == (uint)get_clean_call_switch_stack_size());
-#endif
     return dstack_offs;
 }
 
@@ -678,8 +664,11 @@ insert_pop_all_registers(dcontext_t *dcontext, clean_call_info_t *cci, instrlist
         XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X0),
                           opnd_create_reg(DR_REG_SP)));
 
-    current_offs =
-        get_clean_call_switch_stack_size() - (MCXT_NUM_SIMD_SLOTS * sizeof(dr_simd_t));
+    current_offs = ALIGN_BACKWARD(get_clean_call_switch_stack_size() -
+                                      (MCXT_NUM_SIMD_SVE_SLOTS * sizeof(dr_simd_t)) -
+                                      (MCXT_NUM_SVEP_SLOTS * sizeof(dr_svep_t)) -
+                                      (MCXT_NUM_FFR_SLOTS * sizeof(dr_ffr_t)),
+                                  16);
 
     /* add x0, x0, current_offs */
     PRE(ilist, instr,
@@ -789,7 +778,12 @@ insert_pop_all_registers(dcontext_t *dcontext, clean_call_info_t *cci, instrlist
                              OPND_CREATE_INT_MSR_NZCVQG(), opnd_create_reg(scratch)));
         PRE(ilist, instr, instr_create_restore_from_tls(dcontext, scratch, slot));
     }
-    /* FIXME i#1551: once we have cci->num_simd_skip, skip this if possible */
+
+    /* padding */
+    PRE(ilist, instr,
+        XINST_CREATE_add(dcontext, opnd_create_reg(DR_REG_SP), OPND_CREATE_INT(XSP_SZ)));
+
+    /* XXX i#1551: once we have cci->num_simd_skip, skip this if possible */
     PRE(ilist, instr,
         INSTR_CREATE_vldm_wb(dcontext, OPND_CREATE_MEMLIST(DR_REG_SP), SIMD_REG_LIST_LEN,
                              SIMD_REG_LIST_0_15));
@@ -806,249 +800,6 @@ shrink_reg_for_param(reg_id_t regular, opnd_t arg)
     return regular;
 }
 #endif /* !AARCH64 */
-
-/* Return true if opnd is a register, but not XSP, or immediate zero on AArch64. */
-static bool
-opnd_is_reglike(opnd_t opnd)
-{
-    return ((opnd_is_reg(opnd) && opnd_get_reg(opnd) != DR_REG_XSP)
-                IF_X64(|| (opnd_is_immed_int(opnd) && opnd_get_immed_int(opnd) == 0)));
-}
-
-uint
-insert_parameter_preparation(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
-                             bool clean_call, uint num_args, opnd_t *args)
-{
-    uint num_regs = num_args < NUM_REGPARM ? num_args : NUM_REGPARM;
-    signed char regs[NUM_REGPARM];
-    int usecount[NUM_REGPARM];
-    ptr_int_t stack_inc = 0;
-    uint i, j;
-
-    /* We expect every arg to be an immediate integer, a full-size register,
-     * or a simple memory reference (NYI).
-     */
-    for (i = 0; i < num_args; i++) {
-        CLIENT_ASSERT(opnd_is_immed_int((args[i])) ||
-                          (opnd_is_reg(args[i]) &&
-                           reg_get_size(opnd_get_reg(args[i])) == OPSZ_PTR) ||
-                          opnd_is_base_disp(args[i]),
-                      "insert_parameter_preparation: bad argument type");
-        ASSERT_NOT_IMPLEMENTED(!opnd_is_base_disp(args[i])); /* FIXME i#2210 */
-    }
-
-    /* The strategy here is to first set up the arguments that can be set up
-     * without using a temporary register: stack arguments that are registers and
-     * register arguments that are not involved in a cycle. When this has been done,
-     * the value in the link register (LR) will be dead, so we can use LR as a
-     * temporary for setting up the remaining arguments.
-     */
-
-    /* Set up stack arguments that are registers (not SP) or zero (on AArch64). */
-    if (num_args > NUM_REGPARM) {
-        uint n = num_args - NUM_REGPARM;
-        /* On both ARM and AArch64 the stack pointer is kept (2 * XSP_SZ)-aligned. */
-        stack_inc = ALIGN_FORWARD(n, 2) * XSP_SZ;
-#ifdef AARCH64
-        for (i = 0; i < n; i += 2) {
-            opnd_t *arg0 = &args[NUM_REGPARM + i];
-            opnd_t *arg1 = i + 1 < n ? &args[NUM_REGPARM + i + 1] : NULL;
-            if (i == 0) {
-                if (i + 1 < n && opnd_is_reglike(*arg1)) {
-                    /* stp x(...), x(...), [sp, #-(stack_inc)]! */
-                    PRE(ilist, instr,
-                        instr_create_2dst_4src(
-                            dcontext, OP_stp,
-                            opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, -stack_inc,
-                                                  OPSZ_16),
-                            opnd_create_reg(DR_REG_XSP),
-                            opnd_is_reg(*arg0) ? *arg0 : opnd_create_reg(DR_REG_XZR),
-                            opnd_is_reg(*arg1) ? *arg1 : opnd_create_reg(DR_REG_XZR),
-                            opnd_create_reg(DR_REG_XSP),
-                            opnd_create_immed_int(-stack_inc, OPSZ_PTR)));
-                } else if (opnd_is_reglike(*arg0)) {
-                    /* str x(...), [sp, #-(stack_inc)]! */
-                    PRE(ilist, instr,
-                        instr_create_2dst_3src(
-                            dcontext, OP_str,
-                            opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, -stack_inc,
-                                                  OPSZ_PTR),
-                            opnd_create_reg(DR_REG_XSP),
-                            opnd_is_reg(*arg0) ? *arg0 : opnd_create_reg(DR_REG_XZR),
-                            opnd_create_reg(DR_REG_XSP),
-                            opnd_create_immed_int(-stack_inc, OPSZ_PTR)));
-                } else {
-                    /* sub sp, sp, #(stack_inc) */
-                    PRE(ilist, instr,
-                        INSTR_CREATE_sub(dcontext, opnd_create_reg(DR_REG_XSP),
-                                         opnd_create_reg(DR_REG_XSP),
-                                         OPND_CREATE_INT32(stack_inc)));
-                }
-            } else if (opnd_is_reglike(*arg0)) {
-                if (i + 1 < n && opnd_is_reglike(*arg1)) {
-                    /* stp x(...), x(...), [sp, #(i * XSP_SZ)] */
-                    PRE(ilist, instr,
-                        instr_create_1dst_2src(
-                            dcontext, OP_stp,
-                            opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, i * XSP_SZ,
-                                                  OPSZ_16),
-                            opnd_is_reg(*arg0) ? *arg0 : opnd_create_reg(DR_REG_XZR),
-                            opnd_is_reg(*arg1) ? *arg1 : opnd_create_reg(DR_REG_XZR)));
-                } else {
-                    /* str x(...), [sp, #(i * XSP_SZ)] */
-                    PRE(ilist, instr,
-                        instr_create_1dst_1src(
-                            dcontext, OP_str,
-                            opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, i * XSP_SZ,
-                                                  OPSZ_PTR),
-                            opnd_is_reg(*arg0) ? *arg0 : opnd_create_reg(DR_REG_XZR)));
-                }
-            } else if (i + 1 < n && opnd_is_reglike(*arg1)) {
-                /* str x(...), [sp, #((i + 1) * XSP_SZ)] */
-                PRE(ilist, instr,
-                    instr_create_1dst_1src(
-                        dcontext, OP_str,
-                        opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0,
-                                              (i + 1) * XSP_SZ, OPSZ_PTR),
-                        opnd_is_reg(*arg1) ? *arg1 : opnd_create_reg(DR_REG_XZR)));
-            }
-        }
-#else /* ARM */
-        /* XXX: We could use OP_stm here, but with lots of awkward corner cases. */
-        PRE(ilist, instr,
-            INSTR_CREATE_sub(dcontext, opnd_create_reg(DR_REG_XSP),
-                             opnd_create_reg(DR_REG_XSP), OPND_CREATE_INT32(stack_inc)));
-        for (i = 0; i < n; i++) {
-            opnd_t arg = args[NUM_REGPARM + i];
-            if (opnd_is_reglike(arg)) {
-                /* str r(...), [sp, #(i * XSP_SZ)] */
-                PRE(ilist, instr,
-                    XINST_CREATE_store(dcontext,
-                                       opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0,
-                                                             i * XSP_SZ, OPSZ_PTR),
-                                       arg));
-            }
-        }
-#endif
-    }
-
-    /* Initialise regs[], which encodes the contents of parameter registers.
-     * A non-negative value x means d_r_regparms[x];
-     * -1 means an immediate integer;
-     * -2 means a non-parameter register.
-     */
-    for (i = 0; i < num_regs; i++) {
-        if (opnd_is_immed_int(args[i]))
-            regs[i] = -1;
-        else {
-            reg_id_t reg = opnd_get_reg(args[i]);
-            regs[i] = -2;
-            for (j = 0; j < NUM_REGPARM; j++) {
-                if (reg == d_r_regparms[j]) {
-                    regs[i] = j;
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Initialise usecount[]: how many other registers use the value in a reg. */
-    for (i = 0; i < num_regs; i++)
-        usecount[i] = 0;
-    for (i = 0; i < num_regs; i++) {
-        if (regs[i] >= 0 && regs[i] != i)
-            ++usecount[regs[i]];
-    }
-
-    /* Set up register arguments that are not part of a cycle. */
-    {
-        bool changed;
-        do {
-            changed = false;
-            for (i = 0; i < num_regs; i++) {
-                if (regs[i] == i || usecount[i] != 0)
-                    continue;
-                if (regs[i] == -1) {
-                    insert_mov_immed_ptrsz(dcontext, opnd_get_immed_int(args[i]),
-                                           opnd_create_reg(d_r_regparms[i]), ilist, instr,
-                                           NULL, NULL);
-                } else if (regs[i] == -2 && opnd_get_reg(args[i]) == DR_REG_XSP) {
-                    /* XXX: We could record which register has been set to the SP to
-                     * avoid repeating this load if several arguments are set to SP.
-                     */
-                    insert_get_mcontext_base(dcontext, ilist, instr, d_r_regparms[i]);
-                    PRE(ilist, instr,
-                        instr_create_restore_from_dc_via_reg(
-                            dcontext, d_r_regparms[i], d_r_regparms[i], XSP_OFFSET));
-                } else {
-                    PRE(ilist, instr,
-                        XINST_CREATE_move(dcontext, opnd_create_reg(d_r_regparms[i]),
-                                          args[i]));
-                    if (regs[i] != -2)
-                        --usecount[regs[i]];
-                }
-                regs[i] = i;
-                changed = true;
-            }
-        } while (changed);
-    }
-
-    /* From now on it is safe to use LR as a temporary. */
-
-    /* Set up register arguments that are in cycles. A rotation of n values is
-     * realised with (n + 1) moves.
-     */
-    for (;;) {
-        int first, tmp;
-        for (i = 0; i < num_regs; i++) {
-            if (regs[i] != i)
-                break;
-        }
-        if (i >= num_regs)
-            break;
-        first = i;
-        PRE(ilist, instr,
-            XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_LR),
-                              opnd_create_reg(d_r_regparms[i])));
-        do {
-            tmp = regs[i];
-            ASSERT(0 <= tmp && tmp < num_regs);
-            PRE(ilist, instr,
-                XINST_CREATE_move(dcontext, opnd_create_reg(d_r_regparms[i]),
-                                  tmp == first ? opnd_create_reg(DR_REG_LR)
-                                               : opnd_create_reg(d_r_regparms[tmp])));
-            regs[i] = i;
-            i = tmp;
-        } while (tmp != first);
-    }
-
-    /* Set up stack arguments that are (non-zero) constants or SP. */
-    for (i = NUM_REGPARM; i < num_args; i++) {
-        uint off = (i - NUM_REGPARM) * XSP_SZ;
-        opnd_t arg = args[i];
-        if (!opnd_is_reglike(arg)) {
-            if (opnd_is_reg(arg)) {
-                ASSERT(opnd_get_reg(arg) == DR_REG_XSP);
-                insert_get_mcontext_base(dcontext, ilist, instr, DR_REG_LR);
-                PRE(ilist, instr,
-                    instr_create_restore_from_dc_via_reg(dcontext, DR_REG_LR, DR_REG_LR,
-                                                         XSP_OFFSET));
-            } else {
-                ASSERT(opnd_is_immed_int(arg));
-                insert_mov_immed_ptrsz(dcontext, opnd_get_immed_int(arg),
-                                       opnd_create_reg(DR_REG_LR), ilist, instr, NULL,
-                                       NULL);
-            }
-            PRE(ilist, instr,
-                XINST_CREATE_store(
-                    dcontext,
-                    opnd_create_base_disp(DR_REG_XSP, DR_REG_NULL, 0, off, OPSZ_PTR),
-                    opnd_create_reg(DR_REG_LR)));
-        }
-    }
-
-    return (uint)stack_inc;
-}
 
 bool
 insert_reachable_cti(dcontext_t *dcontext, instrlist_t *ilist, instr_t *where,
@@ -1122,7 +873,7 @@ insert_out_of_line_context_switch(dcontext_t *dcontext, instrlist_t *ilist,
 
     return get_clean_call_switch_stack_size();
 #else
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1621: NYI on AArch32. */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1621: NYI on AArch32. */
     return 0;
 #endif
 }
@@ -1180,7 +931,7 @@ insert_save_to_tls_if_necessary(dcontext_t *dcontext, instrlist_t *ilist, instr_
                                 reg_id_t reg, ushort slot)
 {
 #ifdef AARCH64
-    /* FIXME i#1569: not yet optimized */
+    /* XXX i#1569: not yet optimized */
     PRE(ilist, where, instr_create_save_to_tls(dcontext, reg, slot));
 #else
     instr_t *prev;
@@ -1405,30 +1156,6 @@ instr_check_xsp_mangling(dcontext_t *dcontext, instr_t *inst, int *xsp_adjust)
     return false;
 }
 
-void
-mangle_syscall_arch(dcontext_t *dcontext, instrlist_t *ilist, uint flags, instr_t *instr,
-                    instr_t *next_instr)
-{
-    /* inlined conditional system call mangling is not supported */
-    ASSERT(!instr_is_predicated(instr));
-
-    /* Shared routine already checked method, handled INSTR_NI_SYSCALL*,
-     * and inserted the signal barrier and non-auto-restart nop.
-     * If we get here, we're dealing with an ignorable syscall.
-     */
-
-    /* We assume that the stolen register will, in effect, be neither
-     * read nor written by a system call as it is above the highest
-     * register used for the syscall arguments or number. This assumption
-     * currently seems to be valid on arm/arm64 Linux, which only writes the
-     * return value (with system calls that return). When other kernels are
-     * supported it may be necessary to move the stolen register value to a
-     * safer register (one that is "callee-saved" and not used by the gateway
-     * mechanism) before the system call, and restore it afterwards.
-     */
-    ASSERT(DR_REG_STOLEN_MIN > DR_REG_SYSNUM);
-}
-
 #ifdef UNIX
 /* Inserts code to handle clone into ilist.
  * instr is the syscall instr itself.
@@ -1462,7 +1189,7 @@ void
 mangle_interrupt(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                  instr_t *next_instr)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1551, i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1551, i#1569 */
 }
 
 #ifndef AARCH64
@@ -1604,6 +1331,207 @@ mangle_direct_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
 #endif
 }
 
+#if defined(AARCH64)
+/* Insert instructions to perform pointer authentication on the target of a combined
+ * branch and authenticate instruction.
+ * `instr` must be a direct/indirect branch instruction with pointer authentication.
+ */
+static void
+insert_authenticate_pointer(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
+{
+    /* There are three scenarios here depending on which architecture features are
+     * implemented.
+     *
+     * FEAT_PAUTH:
+     *     None of the pauth instructions fault if authenication fails.
+     *     Instead AUTI* inserts an error code in to the pointer to leave it with a
+     *     non-canonical value so a subsequent branch to the address will fault.
+     *     On Linux SIGSEGV is raised with the non-canonical target address as the PC.
+     *
+     * FEAT_FPAC: (implies FEAT_PAUTH is also implemented)
+     *     AUTI* instructions generate a fault when authentication fails.
+     *     On Linux SIGILL will be raised with the faulting AUTI* instruction as the PC.
+     *     Combined authenticate and branch instructions (RETA*, BLRA*, BRA*) behaviour
+     *     is the same as FEAT_PAUTH.
+     *
+     * FEAT_FPACCOMBINE: (implies FEAT_PAUTH and FEAT_FPAC are also implemented)
+     *     AUTI* instructions behave the same as with FEAT_FPAC.
+     *     Combined authenicate and branch instructions behave the same way as AUTI*
+     *     when authentication fails.
+     *     On Linux SIGILL will be raised with the faulting instruction as the PC.
+     *
+     * For the FEAT_PAUTH and FEAT_PAUTHCOMBINE cases AUTI* and the combined auth+branch
+     * instructions we are mangling behave the same way so we can just insert an AUTI*
+     * to authenticate the pointer in IBL_TARGET_REG.
+     * For the FEAT_FPAC case AUTI* and the combined auth+branch instructions behave
+     * differently so we need to perform the authentication ourselves (see below).
+     */
+    ASSERT(proc_has_feature(FEATURE_PAUTH));
+    if (proc_has_feature(FEATURE_FPACCOMBINE) || !proc_has_feature(FEATURE_FPAC)) {
+        switch (instr_get_opcode(instr)) {
+        case OP_retaa:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autia(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                                             opnd_create_reg(DR_REG_SP)),
+                          instr_get_app_pc(instr)));
+            break;
+        case OP_retab:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autib(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                                             opnd_create_reg(DR_REG_SP)),
+                          instr_get_app_pc(instr)));
+            break;
+        case OP_braa:
+        case OP_blraa:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autia(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                                             instr_get_src(instr, 1)),
+                          instr_get_app_pc(instr)));
+            break;
+        case OP_brab:
+        case OP_blrab:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autib(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                                             instr_get_src(instr, 1)),
+                          instr_get_app_pc(instr)));
+            break;
+        case OP_braaz:
+        case OP_blraaz:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autiza(dcontext, opnd_create_reg(IBL_TARGET_REG)),
+                          instr_get_app_pc(instr)));
+            break;
+        case OP_brabz:
+        case OP_blrabz:
+            PRE(ilist, instr,
+                INSTR_XL8(INSTR_CREATE_autizb(dcontext, opnd_create_reg(IBL_TARGET_REG)),
+                          instr_get_app_pc(instr)));
+            break;
+        default: ASSERT_NOT_REACHED();
+        }
+    } else {
+        /* If FEAT_FPAC is implemented, auti* instructions will generate a fault when
+         * authentication fails, but combined auth+branch instructions won't.
+         * We need to perform the authentication ourselves by stripping and re-signing
+         * the target pointer and comparing that to the original value.
+         * If they match the authentication passes. If they don't match the
+         * authentication has failed and we need to insert a 2-bit error code into the
+         * address in IBL_TARGET_REG to leave it with a non-canonical value that should
+         * fault when the app tries to branch to it.
+         *
+         *     mov      scratch, IBL_TARGET_REG
+         *     xpaci    scratch                          ; Remove PAC
+         *     paci*    scratch                          ; Re-sign pointer
+         *     sub      scratch, scratch, IBL_TARGET_REG ; Check addresses match
+         *                                               ; (avoiding CMP so we don't
+         *                                               ; clobber the app's flags)
+         *     xpaci    IBL_TARGET_REG                   ; Remove PAC from target address
+         *     cbz      end                              ; Skip inserting error code if
+         *                                               ; addresses match
+         * insert_error_code:
+         *     and      IBL_TARGET_REG, IBL_TARGET_REG, #error_code_mask
+         *     orr      IBL_TARGET_REG, IBL_TARGET_REG, #error_code
+         * end:
+         *     ...
+         */
+
+        reg_id_t modifier_reg = DR_REG_NULL;
+        switch (instr_get_opcode(instr)) {
+        case OP_braa:
+        case OP_blraa:
+        case OP_brab:
+        case OP_blrab: modifier_reg = opnd_get_reg(instr_get_src(instr, 1));
+        }
+
+        ushort slot;
+        bool should_restore;
+        reg_id_t scratch = pick_scratch_reg(dcontext, instr, IBL_TARGET_REG, modifier_reg,
+                                            DR_REG_NULL, true, &slot, &should_restore);
+        if (should_restore)
+            insert_save_to_tls_if_necessary(dcontext, ilist, instr, scratch, slot);
+
+        PRE(ilist, instr,
+            XINST_CREATE_move(dcontext, opnd_create_reg(scratch),
+                              opnd_create_reg(IBL_TARGET_REG)));
+        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(scratch)));
+
+        bool key_a;
+        switch (instr_get_opcode(instr)) {
+        case OP_retaa:
+            key_a = true;
+            PRE(ilist, instr,
+                INSTR_CREATE_pacia(dcontext, opnd_create_reg(scratch),
+                                   opnd_create_reg(DR_REG_SP)));
+            break;
+        case OP_retab:
+            key_a = false;
+            PRE(ilist, instr,
+                INSTR_CREATE_pacib(dcontext, opnd_create_reg(scratch),
+                                   opnd_create_reg(DR_REG_SP)));
+            break;
+        case OP_braa:
+        case OP_blraa:
+            key_a = true;
+            PRE(ilist, instr,
+                INSTR_CREATE_pacia(dcontext, opnd_create_reg(scratch),
+                                   instr_get_src(instr, 1)));
+            break;
+        case OP_brab:
+        case OP_blrab:
+            key_a = false;
+            PRE(ilist, instr,
+                INSTR_CREATE_pacib(dcontext, opnd_create_reg(scratch),
+                                   instr_get_src(instr, 1)));
+            break;
+        case OP_braaz:
+        case OP_blraaz:
+            key_a = true;
+            PRE(ilist, instr, INSTR_CREATE_paciza(dcontext, opnd_create_reg(scratch)));
+            break;
+        case OP_brabz:
+        case OP_blrabz:
+            key_a = false;
+            PRE(ilist, instr, INSTR_CREATE_pacizb(dcontext, opnd_create_reg(scratch)));
+            break;
+        default:
+            ASSERT_NOT_REACHED();
+            key_a = true; /* Quell compiler maybe-uninitialized warning. */
+        }
+
+        PRE(ilist, instr,
+            INSTR_CREATE_sub(dcontext, opnd_create_reg(scratch), opnd_create_reg(scratch),
+                             opnd_create_reg(IBL_TARGET_REG)));
+
+        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(IBL_TARGET_REG)));
+
+        instr_t *end_label = INSTR_CREATE_label(dcontext);
+        PRE(ilist, instr,
+            INSTR_CREATE_cbz(dcontext, opnd_create_instr(end_label),
+                             opnd_create_reg(scratch)));
+
+        /* Insert the error code to make the address fault.
+         * To match the hardware behaviour we use a 2-bit code:
+         *  0b01 if the instruction used key A,
+         *  0b10 if the instruction used key B.
+         */
+        const uint64 error_code = key_a ? 1 : 2;
+        PRE(ilist, instr,
+            INSTR_CREATE_and(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                             opnd_create_reg(IBL_TARGET_REG),
+                             OPND_CREATE_INT(~(3ULL << 53))));
+        PRE(ilist, instr,
+            INSTR_CREATE_orr(dcontext, opnd_create_reg(IBL_TARGET_REG),
+                             opnd_create_reg(IBL_TARGET_REG),
+                             OPND_CREATE_INT(error_code << 53)));
+
+        PRE(ilist, instr, end_label);
+
+        if (should_restore)
+            PRE(ilist, instr, instr_create_restore_from_tls(dcontext, scratch, slot));
+    }
+}
+#endif
+
 instr_t *
 mangle_indirect_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                      instr_t *next_instr, bool mangle_calls, uint flags)
@@ -1623,12 +1551,14 @@ mangle_indirect_call(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
             XINST_CREATE_move(dcontext, opnd_create_reg(IBL_TARGET_REG),
                               instr_get_target(instr)));
     }
+
+    /* If the instruction is a branch with pointer authentication we need to authenticate
+     * the target pointer and restore its canonical value. */
     switch (opc) {
     case OP_blraa:
     case OP_blrab:
     case OP_blraaz:
-    case OP_blrabz:
-        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(IBL_TARGET_REG)));
+    case OP_blrabz: insert_authenticate_pointer(dcontext, ilist, instr);
     }
     insert_mov_immed_ptrsz(dcontext, get_call_return_address(dcontext, ilist, instr),
                            opnd_create_reg(DR_REG_X30), ilist, next_instr, NULL, NULL);
@@ -1715,8 +1645,7 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     case OP_braa:
     case OP_brab:
     case OP_braaz:
-    case OP_brabz:
-        PRE(ilist, instr, INSTR_CREATE_xpaci(dcontext, opnd_create_reg(IBL_TARGET_REG)));
+    case OP_brabz: insert_authenticate_pointer(dcontext, ilist, instr);
     }
 
     instrlist_remove(ilist, instr); /* remove OP_br or OP_ret */
@@ -1744,7 +1673,7 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         /* must be simple cases like "pop pc" */
         ASSERT(opnd_is_base_disp(memop));
         ASSERT(opnd_get_reg(instr_get_dst(instr, 0)) == DR_REG_PC);
-        /* FIXME i#1551: on A32, ldm* can have only one reg in the reglist,
+        /* XXX i#1551: on A32, ldm* can have only one reg in the reglist,
          * i.e., "ldm r10, {pc}" is valid, so we should check dr_reg_stolen usage.
          */
         ASSERT_NOT_IMPLEMENTED(!opnd_uses_reg(memop, dr_reg_stolen));
@@ -1838,7 +1767,7 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         remove_instr = true;
     } else if (opc == OP_rfe || opc == OP_rfedb || opc == OP_rfeda || opc == OP_rfeib ||
                opc == OP_eret) {
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         ASSERT_NOT_IMPLEMENTED(false);
     } else {
         /* Explicitly writes just the pc */
@@ -1926,14 +1855,14 @@ mangle_indirect_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
 static reg_id_t
 pick_scratch_reg(dcontext_t *dcontext, instr_t *instr, reg_id_t do_not_pick_a,
                  reg_id_t do_not_pick_b, reg_id_t do_not_pick_c, bool dead_reg_ok,
-                 ushort *scratch_slot OUT, bool *should_restore OUT)
+                 ushort *scratch_slot DR_PARAM_OUT, bool *should_restore DR_PARAM_OUT)
 {
     reg_id_t reg;
     ushort slot = 0;
     if (should_restore != NULL)
         *should_restore = true;
 
-#ifndef AARCH64 /* FIXME i#1569: not yet optimized */
+#ifndef AARCH64 /* XXX i#1569: not yet optimized */
     if (find_prior_scratch_reg_restore(dcontext, instr, &reg) != NULL &&
         reg != REG_NULL && !instr_uses_reg(instr, reg) &&
         !reg_overlap(reg, do_not_pick_a) && !reg_overlap(reg, do_not_pick_b) &&
@@ -2211,7 +2140,7 @@ restore_app_value_to_stolen_reg(dcontext_t *dcontext, instrlist_t *ilist, instr_
     }
 }
 
-/* store app value from dr_reg_stolen to slot if writback is true and
+/* store app value from dr_reg_stolen to slot if writeback is true and
  * restore tls_base from reg back to dr_reg_stolen
  */
 static void
@@ -2220,12 +2149,14 @@ restore_tls_base_to_stolen_reg(dcontext_t *dcontext, instrlist_t *ilist, instr_t
 {
     /* store app val back if it might be written  */
     if (instr_writes_to_reg(instr, dr_reg_stolen, DR_QUERY_INCLUDE_COND_DSTS)) {
+        instr_t *store = XINST_CREATE_store(
+            dcontext,
+            opnd_create_base_disp(reg, REG_NULL, 0, os_tls_offset(TLS_REG_STOLEN_SLOT),
+                                  OPSZ_PTR),
+            opnd_create_reg(dr_reg_stolen));
         PRE(ilist, next_instr,
-            XINST_CREATE_store(dcontext,
-                               opnd_create_base_disp(reg, REG_NULL, 0,
-                                                     os_tls_offset(TLS_REG_STOLEN_SLOT),
-                                                     OPSZ_PTR),
-                               opnd_create_reg(dr_reg_stolen)));
+            instr_set_translation_mangling_epilogue(dcontext, ilist, store));
+        ASSERT(instr_is_our_mangling(store));
     } else {
         DOLOG(4, LOG_INTERP, {
             LOG(THREAD, LOG_INTERP, 4, "skip save stolen reg app value for: ");
@@ -2235,9 +2166,11 @@ restore_tls_base_to_stolen_reg(dcontext_t *dcontext, instrlist_t *ilist, instr_t
     }
     /* restore stolen reg from spill reg */
     /* This precise opcode (OP_orr) is checked for in instr_is_stolen_reg_move(). */
+    instr_t *move =
+        XINST_CREATE_move(dcontext, opnd_create_reg(dr_reg_stolen), opnd_create_reg(reg));
     PRE(ilist, next_instr,
-        XINST_CREATE_move(dcontext, opnd_create_reg(dr_reg_stolen),
-                          opnd_create_reg(reg)));
+        instr_set_translation_mangling_epilogue(dcontext, ilist, move));
+    ASSERT(instr_is_our_mangling(move));
 }
 
 /* Mangle simple dr_reg_stolen access.
@@ -2260,7 +2193,7 @@ mangle_stolen_reg(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
      */
     ASSERT(!instr_is_meta(instr) && instr_uses_reg(instr, dr_reg_stolen));
 
-#ifndef AARCH64 /* FIXME i#1569: recognise "move" on AArch64 */
+#ifndef AARCH64 /* XXX i#1569: recognise "move" on AArch64 */
     /* optimization, convert simple mov to ldr/str:
      * - "mov r0  -> r10"  ==> "str r0 -> [r10_slot]"
      * - "mov r10 -> r0"   ==> "ldr [r10_slot] -> r0"
@@ -2305,8 +2238,12 @@ mangle_stolen_reg(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
     /* restore tls_base back to dr_reg_stolen */
     restore_tls_base_to_stolen_reg(dcontext, ilist, instr, next_instr, tmp, slot);
     /* restore tmp if necessary */
-    if (should_restore)
-        PRE(ilist, next_instr, instr_create_restore_from_tls(dcontext, tmp, slot));
+    if (should_restore) {
+        instr_t *restore = instr_create_restore_from_tls(dcontext, tmp, slot);
+        PRE(ilist, next_instr,
+            instr_set_translation_mangling_epilogue(dcontext, ilist, restore));
+        ASSERT(instr_is_our_mangling(restore));
+    }
 }
 
 /* replace thread register read instruction with a TLS load instr */
@@ -2612,7 +2549,7 @@ normalize_ldm_instr(dcontext_t *dcontext, instr_t *instr, /* ldm */
     dr_pred_type_t pred = instr_get_predicate(instr);
     app_pc pc = get_app_instr_xl8(instr);
 
-    /* FIXME i#1551: NYI on case like "ldm r10, {r10, pc}": if base reg
+    /* TODO i#1551: NYI on case like "ldm r10, {r10, pc}": if base reg
      * is clobbered, "ldr pc [base, disp]" will use wrong base value.
      * It seems the only solution is load the target value first and store
      * it into some TLS slot for later "ldr pc".
@@ -3021,7 +2958,7 @@ mangle_special_registers(dcontext_t *dcontext, instrlist_t *ilist, instr_t *inst
         PRE(ilist, instr, bound_start);
     }
 
-    /* FIXME i#1551: for indirect branch mangling, we first mangle the instr here
+    /* XXX i#1551: for indirect branch mangling, we first mangle the instr here
      * for possible pc read and dr_reg_stolen read/write,
      * and leave pc write mangling later in mangle_indirect_jump, which is
      * error-prone and inefficient.
@@ -3057,11 +2994,30 @@ mangle_special_registers(dcontext_t *dcontext, instrlist_t *ilist, instr_t *inst
 void
 float_pc_update(dcontext_t *dcontext)
 {
-    /* FIXME i#1551, i#1569: NYI on ARM */
+    /* TODO i#1551, i#1569: NYI on ARM */
     ASSERT_NOT_REACHED();
 }
 
 #ifdef AARCH64
+void
+mangle_ctr_read(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr)
+{
+    if (instr_get_opcode(instr) == OP_mrs && instr_num_srcs(instr) == 1 &&
+        opnd_is_reg(instr_get_src(instr, 0)) &&
+        opnd_get_reg(instr_get_src(instr, 0)) == DR_REG_CTR_EL0 &&
+        instr_num_dsts(instr) == 1 && opnd_is_reg(instr_get_dst(instr, 0))) {
+        // Insert an AND (immediate) instruction after the MRS so that the
+        // app thinks the bit is clear. This will (one hopes) make the app
+        // execute the OP_ic_ivau instruction that DynamoRIO currently relies
+        // on for detecting code modifications.
+        const int CTR_EL0_DIC_BIT = 29;
+        reg_t reg = opnd_get_reg(instr_get_dst(instr, 0));
+        POST(ilist, instr,
+             INSTR_CREATE_and(dcontext, opnd_create_reg(reg), opnd_create_reg(reg),
+                              OPND_CREATE_INT64(~(1UL << CTR_EL0_DIC_BIT))));
+    }
+}
+
 instr_t *
 mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                  instr_t *next_instr, app_pc pc)
@@ -3099,55 +3055,13 @@ mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         PRE(ilist, instr, /* mov x0, x28 */
             XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X0),
                               opnd_create_reg(dr_reg_stolen)));
-        PRE(ilist, instr, /* blr x30 */
-            INSTR_CREATE_blr(dcontext, opnd_create_reg(DR_REG_X30)));
-        PRE(ilist, instr, /* ldp x0, x30, [x28] */
-            INSTR_CREATE_ldp(
-                dcontext, opnd_create_reg(DR_REG_X0), opnd_create_reg(DR_REG_X30),
-                opnd_create_base_disp(dr_reg_stolen, DR_REG_NULL, 0, 0, OPSZ_16)));
+        PRE(ilist, instr, /* br x30 */
+            INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_X30)));
+        /* Does not return. */
+
         /* Remove original instruction. */
         instrlist_remove(ilist, instr);
         instr_destroy(dcontext, instr);
-    } else if (opc == OP_isb) {
-        instr_t *label = INSTR_CREATE_label(dcontext);
-        instr = next_instr;
-        /* isb is followed by: */
-        PRE(ilist, instr, /* str x0, [x28] */
-            instr_create_save_to_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
-        insert_mov_immed_arch(dcontext, NULL, NULL, (ptr_int_t)&icache_op_struct.flag,
-                              opnd_create_reg(DR_REG_X0), ilist, instr, NULL, NULL);
-        PRE(ilist, instr, /* ldr w0, [x0] */
-            XINST_CREATE_load(
-                dcontext, opnd_create_reg(DR_REG_W0),
-                opnd_create_base_disp(DR_REG_X0, DR_REG_NULL, 0, 0, OPSZ_4)));
-        PRE(ilist, instr, /* cbz ... */
-            INSTR_CREATE_cbz(dcontext, opnd_create_instr(label),
-                             opnd_create_reg(DR_REG_W0)));
-        PRE(ilist, instr, /* stp x1, x2, [x28, #8] */
-            INSTR_CREATE_stp(
-                dcontext,
-                opnd_create_base_disp(dr_reg_stolen, DR_REG_NULL, 0, 8, OPSZ_16),
-                opnd_create_reg(DR_REG_X1), opnd_create_reg(DR_REG_X2)));
-#    ifdef DR_HOST_NOT_TARGET
-        /* We built all our asm code for the host, but here we need it for the target.
-         * We have to ifdef it out to separate.  Xref i#1684.
-         */
-        ASSERT_NOT_REACHED();
-#    else
-        insert_mov_immed_arch(dcontext, NULL, NULL, (ptr_int_t)icache_op_isb_asm,
-                              opnd_create_reg(DR_REG_X2), ilist, instr, NULL, NULL);
-#    endif
-        insert_mov_immed_arch(dcontext, NULL, NULL, (ptr_int_t)pc,
-                              opnd_create_reg(DR_REG_X1), ilist, instr, NULL, NULL);
-        PRE(ilist, instr, /* mov x0, x28 */
-            XINST_CREATE_move(dcontext, opnd_create_reg(DR_REG_X0),
-                              opnd_create_reg(dr_reg_stolen)));
-        PRE(ilist, instr, /* br x2 */
-            INSTR_CREATE_br(dcontext, opnd_create_reg(DR_REG_X2)));
-        PRE(ilist, instr, label);
-        PRE(ilist, instr, /* ldr x0, [x28] */
-            instr_create_restore_from_tls(dcontext, DR_REG_X0, TLS_REG0_SLOT));
-        /* Leave original instruction. */
     } else
         ASSERT_NOT_REACHED();
     return next_instr;
@@ -3197,7 +3111,8 @@ create_ld_from_ldex(dcontext_t *dcontext, instr_t *ldex)
 }
 
 static instr_t *
-create_ldax_from_stex(dcontext_t *dcontext, instr_t *strex, reg_id_t *dest_reg INOUT,
+create_ldax_from_stex(dcontext_t *dcontext, instr_t *strex,
+                      reg_id_t *dest_reg DR_PARAM_INOUT,
                       /* For a pair, we need a caller-set-up scratch reg for the 2nd. */
                       reg_id_t dest_reg2,
                       /* Whether to merge a pair of 4-bytes into one 8-byte. */
@@ -3329,6 +3244,36 @@ instr_is_ldstex_mangling(dcontext_t *dcontext, instr_t *inst)
     return false;
 }
 
+#if defined(AARCH64)
+bool
+instr_is_pauth_branch_mangling(dcontext_t *dcontext, instr_t *inst)
+{
+    /*
+     * Look for a mov to IBL_TARGET_REG followed by an auti* instruction.
+     */
+    if (!instr_is_our_mangling(inst))
+        return false;
+
+    /* mov is an alias of orr so we actually look for OP_orr. */
+    if (!(instr_get_opcode(inst) == OP_orr &&
+          opnd_get_reg(instr_get_dst(inst, 0)) == IBL_TARGET_REG))
+        return false;
+
+    inst = instr_get_next(inst);
+    if (!instr_is_our_mangling(inst))
+        return false;
+
+    const int op = instr_get_opcode(inst);
+    switch (op) {
+    case OP_autia:
+    case OP_autib:
+    case OP_autiza:
+    case OP_autizb: return true;
+    default: return false;
+    }
+}
+#endif
+
 static bool
 is_cbnz_available(dcontext_t *dcontext, reg_id_t reg_strex_dst)
 {
@@ -3415,7 +3360,8 @@ mangle_exclusive_load(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
         if (instr_is_app(in) && instr_is_exclusive_store(in)) {
             /* Warn on a mismatched pair. */
             if (opnd_get_size(instr_get_dst(in, 0)) !=
-                opnd_get_size(instr_get_src(instr, 0))) {
+                    opnd_get_size(instr_get_src(instr, 0)) ||
+                instr_num_srcs(in) != instr_num_dsts(instr)) {
                 /* See comment below about CONSTRAINED UNPREDICTABLE. */
                 SYSLOG_INTERNAL_WARNING_ONCE(
                     "Encountered mismatched-size ldex-stex pair: behavior may not "
@@ -3883,7 +3829,64 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                                           opnd_create_reg(reg_orig_ld_val2), no_match);
     }
 
-    /* <---- The original store is here. ----> */
+#if defined(AARCH64)
+    /* The exclusive store is next. To ensure the code we emit works reliably on all
+     * AArch64 implementations the exclusive store must match the exclusive load created
+     * by create_ldax_from_stex() above. In most cases it will automatically match
+     * because create_ldax_from_stex() derives the load instruction from the store we are
+     * mangling, but in order to support ldxr ldx/stx pairs with mismatched numbers of
+     * registers create_ldax_from_stex() always creates an 8-byte ldxr load for 2x4-byte
+     * stxp instructions.
+     * If this is the case we need to modify the store instruction to match the load.
+     *
+     * In the AArch64 specification the behaviour of ldx/stx pairs with mismatched
+     * numbers of registers is CONSTRAINED UNPREDICTABLE so it may not work on all
+     * hardware, however it does work reliably on some AArch64 implementations so it is
+     * possible we will find it in app code and we have decided that DynamoRIO should be
+     * able to handle it.
+     */
+    instr_t *orig_instr_clone = instr;
+    if (!is_pair && instr_num_srcs(instr) > 1) {
+        /* We are mangling a 2x4-byte stxp and we need to replace it with a 1x8-byte
+         * stxr.
+         *
+         * First we need to combine the values of the 2 32-bit source registers into a
+         * single 64-bit source register:
+         *
+         * orr  scratch, src0, src1 lsl 32  ; scratch = src0 | (src1 << 32);
+         */
+        opnd_t src0 = opnd_create_reg(
+            reg_resize_to_opsz(opnd_get_reg(instr_get_src(instr, 0)), OPSZ_8));
+        opnd_t src1 = opnd_create_reg(
+            reg_resize_to_opsz(opnd_get_reg(instr_get_src(instr, 1)), OPSZ_8));
+        PRE(ilist, instr,
+            INSTR_CREATE_orr_shift(dcontext, opnd_create_reg(scratch), src0, src1,
+                                   OPND_CREATE_LSL(), OPND_CREATE_INT(32)));
+
+        /* Now we can can create a replacement instruction that uses the same destination
+         * operands but the single combined source register.
+         */
+        instr_t *replacement_instr =
+            INSTR_CREATE_stxr(dcontext, instr_get_dst(instr, 0), instr_get_dst(instr, 1),
+                              opnd_create_reg(scratch));
+        PRE(ilist, instr, replacement_instr);
+        /* Remove the original stxp instruction, but don't destroy it. It gets reinserted
+         * later in the no_match path below.
+         * It doesn't matter that the store on the no_match path does not match the load
+         * because it is intended to always fail anyway.
+         */
+        instrlist_remove(ilist, instr);
+        instr = replacement_instr;
+    } else {
+        /* Keep the original store exclusive. We don't need to emit anything because it
+         * is already in the ilist, but we do need to create a clone of the instruction
+         * to insert in the no_match path below.
+         */
+        orig_instr_clone = instr_clone(dcontext, instr);
+    }
+#else
+    instr_t *orig_instr_clone = instr_clone(dcontext, instr);
+#endif
 
     instr_t *post_store = instr_get_next(instr);
     instr_t *skip_clrex = INSTR_CREATE_label(dcontext);
@@ -3895,7 +3898,7 @@ mangle_exclusive_store(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
      * If we don't do this, the app will likely loop back and might loop forever or
      * might fault incorrectly on the load if its base is now bad.
      */
-    PRE(ilist, post_store, instr_clone(dcontext, instr));
+    PRE(ilist, post_store, orig_instr_clone);
     PRE(ilist, post_store, skip_clrex);
     if (should_restore) {
 #ifdef ARM
@@ -3980,7 +3983,26 @@ mangle_exclusive_monitor_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *i
     return next_instr;
 }
 
-/* END OF MANGLING ROUTINES
+/* END OF CONTROL-FLOW MANGLING ROUTINES
  *###########################################################################
  *###########################################################################
  */
+
+#ifdef ARCH_SUPPORTS_HW_CACHE_CONSISTENCY
+/* SELF-MODIFYING-CODE SANDBOXING
+ *
+ * When we detect it, we take an exit that targets our own routine
+ * fragment_self_write. Dispatch checks for that target and if it
+ * finds it, it calls that routine, so don't worry about building a bb
+ * for it. Returns false if the bb has invalid instrs or CTIs and
+ * should be rebuilt from scratch.
+ */
+bool
+insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
+                       app_pc start_pc, app_pc end_pc, /* end is open */
+                       bool record_translation, bool for_cache)
+{
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#7585 */
+    return true;
+}
+#endif /* ARCH_SUPPORTS_HW_CACHE_CONSISTENCY */

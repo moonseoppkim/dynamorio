@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2022, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _DR_TOOLS_H_
-#define _DR_TOOLS_H_ 1
+#define _DR_TOOLS_H_
 
 /**************************************************
  * TOP-LEVEL ROUTINES
@@ -48,8 +48,20 @@ DR_API
  * \warning This context cannot be used as the drcontext for a thread
  * running under DR control!  It is only for standalone programs that
  * wish to use DR as a library of disassembly, etc. routines.
+ * \warning This context is not fully thread-safe as it stores some state
+ * (such as #dr_isa_mode_t and other fields related to AArch32 encoding
+ * and decoding) that is global and may be prone to data races.
+ * For example, having different threads use dr_set_isa_mode() to set
+ * different ISA modes at the same time can result in a data race.
+ * Furthermore, encoding and decoding of AArch32 instructions in parallel
+ * may also result in a data race.
+ * Code that uses a standalone DR context across multiple threads should
+ * implement its own lock/unlock mechanism to avoid such data races
+ * when using dr_set_isa_mode() or encoding/decoding AArch32 instructions.
  * \return NULL on failure, such as running on an unsupported operating
  * system version.
+ */
+/* TODO i#6690: Add better multi-thread standalone decoding support.
  */
 void *
 dr_standalone_init(void);
@@ -66,6 +78,9 @@ dr_standalone_exit(void);
 /**
  * Use this dcontext for use with the standalone static decoder library.
  * Pass it whenever a decoding-related API routine asks for a context.
+ * Note that this GLOBAL_DCONTEXT is returned by dr_standalone_init();
+ * beware of its limitations (especially about thread-safety) described
+ * there.
  */
 #    define GLOBAL_DCONTEXT ((void *)-1)
 #endif
@@ -104,6 +119,16 @@ bool
 dr_using_all_private_caches(void);
 
 DR_API
+/**
+ * Returns false if DynamoRIO is being used as a "regular" standalone library
+ * (see dr_standalone_init() and \ref page_standalone).
+ * Returns true if DynamoRIO is controlling the application by running
+ * its code through a software code cache.
+ */
+bool
+dr_running_under_dynamorio(void);
+
+DR_API
 /** \deprecated Replaced by dr_set_process_exit_behavior() */
 void
 dr_request_synchronized_exit(void);
@@ -131,7 +156,8 @@ DR_API
  * to the dr_client_main() routine.
  */
 bool
-dr_get_option_array(client_id_t client_id, int *argc OUT, const char ***argv OUT);
+dr_get_option_array(client_id_t client_id, int *argc DR_PARAM_OUT,
+                    const char ***argv DR_PARAM_OUT);
 
 DR_API
 /**
@@ -143,7 +169,7 @@ DR_API
  * \return false if no option named \p option_name exists, and true otherwise.
  */
 bool
-dr_get_string_option(const char *option_name, char *buf OUT, size_t len);
+dr_get_string_option(const char *option_name, char *buf DR_PARAM_OUT, size_t len);
 
 DR_API
 /**
@@ -156,7 +182,7 @@ DR_API
  * \return false if no option named \p option_name exists, and true otherwise.
  */
 bool
-dr_get_integer_option(const char *option_name, uint64 *val OUT);
+dr_get_integer_option(const char *option_name, uint64 *val DR_PARAM_OUT);
 
 DR_API
 /**
@@ -295,7 +321,7 @@ DR_API
  * \note Calling this from \p dr_client_main or from the primary thread's
  * initialization event is not guaranteed to always work, as DR may
  * invoke a thread exit event where a thread init event was never
- * called.  We recommend using dr_abort_ex() or waiting for full
+ * called.  We recommend using dr_abort_with_code() or waiting for full
  * initialization prior to use of this routine.
  */
 void
@@ -315,6 +341,13 @@ typedef enum {
      * \note Windows only.
      */
     DR_MEMORY_DUMP_LDMP = 0x0001,
+    /**
+     * Memory dump in Executable and Linkable Format. This API has the same
+     * restrictions in where it can be called from as dr_suspend_all_other_threads_ex().
+     *
+     * \note X64 Linux only.
+     */
+    DR_MEMORY_DUMP_ELF = 0x0002,
 } dr_memory_dump_flags_t;
 
 /** Indicates the type of memory dump for dr_create_memory_dump(). */
@@ -324,20 +357,36 @@ typedef struct _dr_memory_dump_spec_t {
     /** The type of memory dump requested. */
     dr_memory_dump_flags_t flags;
     /**
-     * This field only applies to DR_MEMORY_DUMP_LDMP.  This string is
+     * This field only applies to #DR_MEMORY_DUMP_LDMP.  This string is
      * stored inside the ldmp as the reason for the dump.
      */
     const char *label;
     /**
-     * This field only applies to DR_MEMORY_DUMP_LDMP.  This is an optional output
+     * This field only applies to #DR_MEMORY_DUMP_LDMP.  This is an optional output
      * field that, if non-NULL, will be written with the path to the created file.
      */
     char *ldmp_path;
     /**
-     * This field only applies to DR_MEMORY_DUMP_LDMP.  This is the maximum size,
+     * This field only applies to #DR_MEMORY_DUMP_LDMP.  This is the maximum size,
      * in bytes, of ldmp_path.
      */
     size_t ldmp_path_size;
+    /**
+     * This field only applies to #DR_MEMORY_DUMP_ELF.  This is an optional output
+     * field that, if non-NULL, will be written with the path to the created file.
+     */
+    char *elf_path;
+    /**
+     * This field only applies to #DR_MEMORY_DUMP_ELF.  This is the maximum size,
+     * in bytes, of elf_path.
+     */
+    size_t elf_path_size;
+    /**
+     * This field only applies to #DR_MEMORY_DUMP_ELF. This is an optional input
+     * field that, if non-NULL, specifies the output directory of the created
+     * file.
+     */
+    char *elf_output_directory;
 } dr_memory_dump_spec_t;
 
 DR_API
@@ -347,7 +396,11 @@ DR_API
  *
  * \return whether successful.
  *
- * \note this function is only supported on Windows for now.
+ * \note this function is only supported on Windows and X64 Linux only. For X64
+ * Linux, this API has the same restriction as
+ * dr_suspend_all_other_threads_ex(). For X86_64 platform, fast FP save and
+ * restore (fxsave64) support is required. And mixed mode (a process mixing
+ * 64-bit and 32-bit code) is not supported.
  */
 bool
 dr_create_memory_dump(dr_memory_dump_spec_t *spec);
@@ -963,7 +1016,7 @@ DR_API
  */
 byte *
 dr_map_executable_file(const char *filename, dr_map_executable_flags_t flags,
-                       size_t *size OUT);
+                       size_t *size DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1077,9 +1130,15 @@ dr_syscall_get_param(void *drcontext, int param_num);
 DR_API
 /**
  * Usable only from a pre-syscall (dr_register_pre_syscall_event())
- * event, or from a post-syscall (dr_register_post_syscall_event())
- * event when also using dr_syscall_invoke_another().  Sets the value
- * of system call parameter number \p param_num to \p new_value.
+ * event or a post-syscall (dr_register_post_syscall_event()) event.
+ * From a post-syscall event this will not affect the syscall that
+ * just happened (but it will affect a second syscall when using
+ * dr_syscall_invoke_another(); additionally, be careful when using
+ * from a post-syscall event as for some architectures the first
+ * syscall parameter becomes the return value.
+ *
+ * Sets the value of system call parameter number \p param_num to \p
+ * new_value.
  *
  * It is up to the caller to ensure that writing this parameter is
  * safe: this routine does not know the number of parameters for each
@@ -1124,7 +1183,7 @@ DR_API
  * See the fields of #dr_syscall_result_info_t for details.
  */
 bool
-dr_syscall_get_result_ex(void *drcontext, dr_syscall_result_info_t *info INOUT);
+dr_syscall_get_result_ex(void *drcontext, dr_syscall_result_info_t *info DR_PARAM_OUT);
 
 DR_API
 /**
@@ -1211,6 +1270,21 @@ DR_API
 bool
 dr_syscall_intercept_natively(const char *name, int sysnum, int num_args,
                               int wow64_index);
+#endif
+
+#ifdef UNIX
+DR_API
+/**
+ * Invokes a system call and applies handling as though the application had executed it,
+ * but does not trigger system call events such as dr_register_pre_syscall_event().
+ * This is safer than a client invoking raw system calls that bypass DR's handling, which
+ * can cause numerous problems such as breaking DR's timer multiplexing or file
+ * descriptor isolation.
+ *
+ * \note UNIX only.
+ */
+reg_t
+dr_invoke_syscall_as_app(void *drcontext, int sysnum, int arg_count, ...);
 #endif
 
 /**************************************************
@@ -1411,7 +1485,7 @@ DR_API
  * \return whether successful.
  */
 bool
-dr_file_size(file_t fd, OUT uint64 *size);
+dr_file_size(file_t fd, DR_PARAM_OUT uint64 *size);
 
 /** Flags for use with dr_map_file(). */
 enum {
@@ -1466,7 +1540,7 @@ DR_API
  * \return the start address of the mapping, or NULL if unsuccessful.
  */
 void *
-dr_map_file(file_t f, INOUT size_t *size, uint64 offs, app_pc addr, uint prot,
+dr_map_file(file_t f, DR_PARAM_INOUT size_t *size, uint64 offs, app_pc addr, uint prot,
             uint flags);
 
 DR_API
@@ -1832,6 +1906,12 @@ DR_API
  * - \%x: Matches an unsigned hexadecimal integer, with or without a leading 0x.
  * - \%p: Matches a pointer-sized hexadecimal integer as %x does.
  * - \%%: Matches a literal % character.  Does not store output.
+ * - \%[..]: Matches characters in the set within the brackets, or all other
+ *   characters if the first character after the open bracket is ^.
+ *   To include a close bracket in the set, make it the first set character.
+ *   A range of characters can be specified with a hyphen.
+ *   The result is copied into the provided output string buffer.
+ *   To avoid buffer overflow, the caller should use a width specifier.
  *
  * Supported format modifiers:
  * - *: The * modifier causes the scan to match the specifier, but not store any
@@ -1944,7 +2024,7 @@ DR_API
  * See #dr_register_thread_exit_event for details.
  */
 void *
-dr_get_dr_segment_base(IN reg_id_t tls_register);
+dr_get_dr_segment_base(DR_PARAM_IN reg_id_t tls_register);
 
 DR_API
 /**
@@ -1978,8 +2058,8 @@ DR_API
  * \note On Mac OS, TLS slots may not be initialized to zero.
  */
 bool
-dr_raw_tls_calloc(OUT reg_id_t *tls_register, OUT uint *offset, IN uint num_slots,
-                  IN uint alignment);
+dr_raw_tls_calloc(DR_PARAM_OUT reg_id_t *tls_register, DR_PARAM_OUT uint *offset,
+                  DR_PARAM_IN uint num_slots, DR_PARAM_IN uint alignment);
 
 DR_API
 /**
@@ -2118,7 +2198,7 @@ typedef enum {
     DR_SUSPEND_NATIVE = 0x0001,
 } dr_suspend_flags_t;
 
-/* FIXME - xref PR 227619 - some other event handler are safe (image_load/unload for*
+/* XXX - xref PR 227619 - some other event handler are safe (image_load/unload for*
  * example) which we could note here. */
 DR_API
 /**
@@ -2158,14 +2238,17 @@ DR_API
  * nudge callback.
  */
 bool
-dr_suspend_all_other_threads_ex(OUT void ***drcontexts, OUT uint *num_suspended,
-                                OUT uint *num_unsuspended, dr_suspend_flags_t flags);
+dr_suspend_all_other_threads_ex(DR_PARAM_OUT void ***drcontexts,
+                                DR_PARAM_OUT uint *num_suspended,
+                                DR_PARAM_OUT uint *num_unsuspended,
+                                dr_suspend_flags_t flags);
 
 DR_API
 /** Identical to dr_suspend_all_other_threads_ex() with \p flags set to 0. */
 bool
-dr_suspend_all_other_threads(OUT void ***drcontexts, OUT uint *num_suspended,
-                             OUT uint *num_unsuspended);
+dr_suspend_all_other_threads(DR_PARAM_OUT void ***drcontexts,
+                             DR_PARAM_OUT uint *num_suspended,
+                             DR_PARAM_OUT uint *num_unsuspended);
 
 DR_API
 /**
@@ -2178,7 +2261,8 @@ DR_API
  * return value indicates whether all resumption attempts were successful.
  */
 bool
-dr_resume_all_other_threads(IN void **drcontexts, IN uint num_suspended);
+dr_resume_all_other_threads(DR_PARAM_IN void **drcontexts,
+                            DR_PARAM_IN uint num_suspended);
 
 DR_API
 /**
@@ -2292,7 +2376,7 @@ DR_API
  * during process initialization for more accurate results.
  */
 dr_where_am_i_t
-dr_where_am_i(void *drcontext, app_pc pc, OUT void **tag);
+dr_where_am_i(void *drcontext, app_pc pc, DR_PARAM_OUT void **tag);
 
 /****************************************************************************
  * ADAPTIVE OPTIMIZATION SUPPORT
@@ -2353,7 +2437,7 @@ DR_API
 bool
 dr_delete_fragment(void *drcontext, void *tag);
 
-/* FIXME - xref PR 227619 - some other event handler are safe (image_load/unload for*
+/* XXX - xref PR 227619 - some other event handler are safe (image_load/unload for*
  * example) which we could note here. */
 DR_API
 /**
@@ -2402,15 +2486,15 @@ DR_API
 bool
 dr_flush_region(app_pc start, size_t size);
 
-/* FIXME - get rid of the no locks requirement by making event callbacks !couldbelinking
+/* XXX - get rid of the no locks requirement by making event callbacks !couldbelinking
  * and no dr locks (see PR 227619) so that client locks owned by this thread can't block
- * any couldbelinking thread.  FIXME - would be nice to make this available for
+ * any couldbelinking thread.  XXX - would be nice to make this available for
  * windows since there's less of a performance hit than using synch_all flushing, but
  * with coarse_units can't tell if we need a synch all flush or not and that confuses
- * the interface a lot. FIXME - xref PR 227619 - some other event handler are safe
+ * the interface a lot. XXX - xref PR 227619 - some other event handler are safe
  * (image_load/unload for example) which we could note here. */
-/* FIXME - add a completion callback (see vm_area_check_shared_pending()). */
-/* FIXME - could enable on windows when -thread_private since no coarse then. */
+/* XXX - add a completion callback (see vm_area_check_shared_pending()). */
+/* XXX - could enable on windows when -thread_private since no coarse then. */
 DR_API
 /**
  * Flush all fragments containing any code from the region [\p start, \p start + \p size).
@@ -2437,7 +2521,7 @@ DR_API
 bool
 dr_unlink_flush_region(app_pc start, size_t size);
 
-/* FIXME - can we better bound when the flush will happen?  Maybe unlink shared syscalls
+/* XXX - can we better bound when the flush will happen?  Maybe unlink shared syscalls
  * or similar or check the queue in more locations?  Should always hit the flush before
  * executing new code in the cache, and I think we'll always hit it before a nudge is
  * processed too.  Could trigger a nudge, or do this in a nudge, but that's rather

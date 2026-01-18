@@ -1,5 +1,5 @@
 /* *******************************************************************************
- * Copyright (c) 2010-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * *******************************************************************************/
@@ -145,7 +145,7 @@ dl_iterate_get_path_cb(struct dl_phdr_info *info, size_t size, void *data)
         info->dlpi_addr, info->dlpi_phdr, base, info->dlpi_name);
     /* all we have is an addr somewhere in the module, so we need the end */
     if (module_walk_program_headers(base,
-                                    /* FIXME: don't have view size: but
+                                    /* XXX: don't have view size: but
                                      * anything larger than header sizes works
                                      */
                                     PAGE_SIZE, false,
@@ -308,7 +308,7 @@ dl_iterate_get_areas_cb(struct dl_phdr_info *info, size_t size, void *data)
  * if the probe was successful, returns in prot the results.
  */
 static app_pc
-probe_address(dcontext_t *dcontext, app_pc pc_in, OUT uint *prot)
+probe_address(dcontext_t *dcontext, app_pc pc_in, DR_PARAM_OUT uint *prot)
 {
     app_pc base;
     size_t size;
@@ -488,7 +488,8 @@ find_vm_areas_via_probe(void)
  */
 
 bool
-memquery_from_os(const byte *pc, OUT dr_mem_info_t *info, OUT bool *have_type)
+memquery_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info,
+                 DR_PARAM_OUT bool *have_type)
 {
     app_pc probe_pc, next_pc;
     app_pc start_pc = (app_pc)pc, end_pc = (app_pc)pc + PAGE_SIZE;
@@ -499,7 +500,7 @@ memquery_from_os(const byte *pc, OUT dr_mem_info_t *info, OUT bool *have_type)
     /* don't crash if no dcontext, which happens (PR 452174) */
     if (dcontext == NULL)
         return false;
-    /* FIXME PR 235433: replace w/ real query to avoid all these probes */
+    /* XXX PR 235433: replace w/ real query to avoid all these probes */
 
     next_pc = probe_address(dcontext, (app_pc)pc, &cur_prot);
     if (next_pc != pc) {
@@ -509,7 +510,7 @@ memquery_from_os(const byte *pc, OUT dr_mem_info_t *info, OUT bool *have_type)
             end_pc = our_heap_end;
             cur_prot = MEMPROT_READ;
         } else {
-            /* FIXME: should iterate rest of cases */
+            /* XXX: should iterate rest of cases */
             return false;
         }
     } else {
@@ -535,7 +536,7 @@ memquery_from_os(const byte *pc, OUT dr_mem_info_t *info, OUT bool *have_type)
     info->size = end_pc - start_pc;
     info->prot = cur_prot;
     if (cur_prot == MEMPROT_NONE) {
-        /* FIXME: how distinguish from reserved but inaccessable?
+        /* XXX: how distinguish from reserved but inaccessable?
          * Could try mprotect() and see whether it fails
          */
         info->type = DR_MEMTYPE_FREE;

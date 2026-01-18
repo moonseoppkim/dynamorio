@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -39,7 +39,7 @@
  * inject.c - injects dynamo into a new thread
  */
 
-/* FIXME: Unicode support?!?! case 61 */
+/* XXX: Unicode support?!?! case 61 */
 #include "../globals.h"       /* for pragma warning's and assert defines */
 #include "../module_shared.h" /* for d_r_get_proc_address() */
 
@@ -61,7 +61,7 @@
 #include "os_private.h" /* for d_r_get_proc_address() and load_dynamo */
 #define GET_PROC_ADDR d_r_get_proc_address
 
-/* this entry point is hardcoded, FIXME : abstract */
+/* this entry point is hardcoded, XXX : abstract */
 #define DYNAMORIO_ENTRY "dynamo_auto_start"
 
 #ifdef DEBUG
@@ -123,7 +123,7 @@ inject_into_thread(HANDLE phandle, CONTEXT *cxt, HANDLE thandle, char *dynamo_pa
     ASSERT(cxt != NULL);
 
 #ifndef NOT_DYNAMORIO_CORE_PROPER
-    /* FIXME - if we were early injected we couldn't call inject_init during
+    /* XXX - if we were early injected we couldn't call inject_init during
      * startup because kernel32 wasn't loaded yet, so we call it here which
      * isn't safe because it uses app locks. If we want to support a mix
      * of early and late follow children injection we should change load_dynamo
@@ -248,7 +248,7 @@ inject_into_thread(HANDLE phandle, CONTEXT *cxt, HANDLE thandle, char *dynamo_pa
                 for (j = 0; j < XMM_REG_SIZE / sizeof(*bufptr); j++) {
                     *bufptr++ = CXT_XMM(cxt, i)->reg[j];
                 }
-                /* FIXME i#437: save ymm fields.  For now we assume we're
+                /* XXX i#437: save ymm fields.  For now we assume we're
                  * not saving and we just skip the upper 128 bits.
                  */
                 bufptr += (ZMM_REG_SIZE - XMM_REG_SIZE) / sizeof(*bufptr);
@@ -352,7 +352,7 @@ error:
     return success;
 }
 
-/* FIXME - would be nicer to use instrlist etc. to generate and emit the code
+/* XXX - would be nicer to use instrlist etc. to generate and emit the code
  * (with patch list for the calls), but we'll also likely want to use this for
  * drinject which would mean getting most of the core compiled into that. Prob.
  * should still do it, but writing like this isn't that hard. Another
@@ -576,16 +576,19 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
     uint old_prot;
 
     GET_NTDLL(LdrLoadDll,
-              (IN PCWSTR PathToFile OPTIONAL, IN PULONG Flags OPTIONAL,
-               IN PUNICODE_STRING ModuleFileName, OUT PHANDLE ModuleHandle));
-    GET_NTDLL(LdrGetProcedureAddress,
-              (IN HANDLE ModuleHandle, IN PANSI_STRING ProcedureName OPTIONAL,
-               IN ULONG Ordinal OPTIONAL, OUT FARPROC * ProcedureAddress));
+              (DR_PARAM_IN PCWSTR PathToFile OPTIONAL, DR_PARAM_IN PULONG Flags OPTIONAL,
+               DR_PARAM_IN PUNICODE_STRING ModuleFileName,
+               DR_PARAM_OUT PHANDLE ModuleHandle));
+    GET_NTDLL(
+        LdrGetProcedureAddress,
+        (DR_PARAM_IN HANDLE ModuleHandle, DR_PARAM_IN PANSI_STRING ProcedureName OPTIONAL,
+         DR_PARAM_IN ULONG Ordinal OPTIONAL, DR_PARAM_OUT FARPROC * ProcedureAddress));
 #define GET_PROC_ADDR_BAD_ADDR 0xffbadd11
     GET_NTDLL(NtProtectVirtualMemory,
-              (IN HANDLE ProcessHandle, IN OUT PVOID * BaseAddress,
-               IN OUT PULONG ProtectSize, IN ULONG NewProtect, OUT PULONG OldProtect));
-    GET_NTDLL(NtContinue, (IN PCONTEXT Context, IN BOOLEAN TestAlert));
+              (DR_PARAM_IN HANDLE ProcessHandle, DR_PARAM_INOUT PVOID * BaseAddress,
+               DR_PARAM_INOUT PULONG ProtectSize, DR_PARAM_IN ULONG NewProtect,
+               DR_PARAM_OUT PULONG OldProtect));
+    GET_NTDLL(NtContinue, (DR_PARAM_IN PCONTEXT Context, DR_PARAM_IN BOOLEAN TestAlert));
 
     /* get buffer for emitted code and data */
     remote_code_buffer = allocate_remote_code_buffer(phandle, 2 * PAGE_SIZE, must_reach);
@@ -594,7 +597,7 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
     remote_data_buffer = remote_code_buffer + PAGE_SIZE;
 
     /* write data */
-    /* FIXME the two writes are similar (unicode vs ascii), could combine */
+    /* XXX the two writes are similar (unicode vs ascii), could combine */
     /* First UNICODE_STRING to library */
     cur_remote_pos = remote_data_buffer;
     cur_local_pos = local_buf;
@@ -784,7 +787,7 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
         *cur_local_pos++ = 0x24
 #endif /* X64 */
 
-/* FIXME - all values are small use imm8 version */
+/* XXX - all values are small use imm8 version */
 #define ADD_TO_EAX(value)             \
     IF_X64(*cur_local_pos++ = REX_W;) \
     *cur_local_pos++ = ADD_EAX_IMM32; \
@@ -847,7 +850,7 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
     PUSH_IMMEDIATE((int)(ptr_int_t)NT_CURRENT_PROCESS); /* arg ProcessHandle */     \
     IF_X64(MOV_TOS_TO_PARAM_0());                                                   \
     CALL(NtProtectVirtualMemory); /* 8 pushes => still aligned to 16 */             \
-    /* no error checking, can't really do anything about it, FIXME */               \
+    /* no error checking, can't really do anything about it, XXX */               \
     /* stdcall so just the three slots we made for the ptr arguments                \
      * left on the stack for 32-bit */                                              \
     IF_X64(ADD_IMM8_TO_ESP(5 * XSP_SZ)); /* clean up 5 slots */                     \
@@ -947,10 +950,10 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
     IF_X64(ADD_IMM8_TO_ESP(5 * XSP_SZ)); /* clean up 5 slots */
 
     /* Top of stack is now the dr init and takeover function (stdcall removed
-     * args). Check for errors and bail (FIXME debug build report somehow?) */
+     * args). Check for errors and bail (XXX debug build report somehow?) */
     CMP_TO_EAX(STATUS_SUCCESS);
     *cur_local_pos++ = POP_EAX;   /* dr init_and_takeover function */
-    *cur_local_pos++ = JNZ_REL8;  /* FIXME - should check >= 0 instead? */
+    *cur_local_pos++ = JNZ_REL8;  /* XXX - should check >= 0 instead? */
     jmp_fixup1 = cur_local_pos++; /* jmp to after call below */
     /* Xref case 8373, LdrGetProcedureAdderss sometimes returns an
      * address of 0xffbadd11 even though it returned STATUS_SUCCESS */
@@ -1010,7 +1013,7 @@ inject_gencode_at_ldr(HANDLE phandle, char *dynamo_path, uint inject_location,
     /* Our emitted code above is much less then the sizeof local_buf,
      * but we'll add a check here (after the fact so not robust if really
      * overflowed) that we didn't even come close (someon adding large amounts
-     * of code should hit this. FIXME - do better? */
+     * of code should hit this. XXX - do better? */
     ASSERT_ROOM(cur_local_pos, local_buf, MAX_PATH);
     num_bytes_in = cur_local_pos - local_buf;
     if (!nt_write_virtual_memory(phandle, cur_remote_pos, local_buf, num_bytes_in,
@@ -1124,7 +1127,7 @@ generate_switch_mode_jmp_to_hook(HANDLE phandle, byte *local_code_buf,
      */
     *(uint *)(local_code_buf + 1) = target;
 
-    /* FIXME: Need to free this page after jumping to the hook location b/c
+    /* XXX: Need to free this page after jumping to the hook location b/c
      * after that it is no longer necessary
      */
 
@@ -1395,7 +1398,7 @@ inject_gencode_mapped(HANDLE phandle, char *dynamo_path, uint64 hook_location,
 
     /* map DR dll into child
      *
-     * FIXME i#625: check memory in child for conflict w/ DR from executable
+     * XXX i#625: check memory in child for conflict w/ DR from executable
      * (PEB->ImageBaseAddress doesn't seem to be set by kernel so how
      * locate executable easily?) and fall back to late injection.
      * Eventually we'll have to support rebasing from parent, or from
@@ -1464,9 +1467,11 @@ inject_into_new_process(HANDLE phandle, HANDLE thandle, char *dynamo_path, bool 
 
     /* Possible child hook points */
     GET_NTDLL(KiUserApcDispatcher,
-              (IN PVOID Unknown1, IN PVOID Unknown2, IN PVOID Unknown3,
-               IN PVOID ContextStart, IN PVOID ContextBody));
-    GET_NTDLL(KiUserExceptionDispatcher, (IN PVOID Unknown1, IN PVOID Unknown2));
+              (DR_PARAM_IN PVOID Unknown1, DR_PARAM_IN PVOID Unknown2,
+               DR_PARAM_IN PVOID Unknown3, DR_PARAM_IN PVOID ContextStart,
+               DR_PARAM_IN PVOID ContextBody));
+    GET_NTDLL(KiUserExceptionDispatcher,
+              (DR_PARAM_IN PVOID Unknown1, DR_PARAM_IN PVOID Unknown2));
 
     switch (inject_location) {
     case INJECT_LOCATION_LdrLoadDll:
@@ -1482,7 +1487,7 @@ inject_into_new_process(HANDLE phandle, HANDLE thandle, char *dynamo_path, bool 
         }
         break;
     case INJECT_LOCATION_KiUserApc: {
-        /* FIXME i#234 NYI: for wow64 need to hook ntdll64 NtMapViewOfSection */
+        /* TODO i#234 NYI: for wow64 need to hook ntdll64 NtMapViewOfSection */
 #ifdef NOT_DYNAMORIO_CORE_PROPER
         PEB *peb = get_own_peb();
         if (peb->OSMajorVersion >= 6) {

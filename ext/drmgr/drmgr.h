@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.   All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,7 +35,7 @@
  */
 
 #ifndef _DRMGR_H_
-#define _DRMGR_H_ 1
+#define _DRMGR_H_
 
 /**
  * @file drmgr.h
@@ -66,13 +66,25 @@ extern "C" {
 #    define dr_insert_read_tls_field DO_NOT_USE_tls_field_USE_drmgr_tls_field_instead
 #    define dr_insert_write_tls_field DO_NOT_USE_tls_field_USE_drmgr_tls_field_instead
 
-/* drmgr replaces these events in order to provide ordering control */
+/* drmgr replaces these events in order to provide ordering control and
+ * priorities and user_data parameters.
+ */
+#    define dr_register_exit_event DO_NOT_USE_exit_event_USE_drmgr_events_instead
+#    define dr_unregister_exit_event DO_NOT_USE_exit_event_USE_drmgr_events_instead
+#    define dr_register_post_attach_event \
+        DO_NOT_USE_post_attach_event_USE_drmgr_events_instead
+#    define dr_unregister_post_attach_event \
+        DO_NOT_USE_post_attach_event_USE_drmgr_events_instead
 #    define dr_register_thread_init_event DO_NOT_USE_thread_event_USE_drmgr_events_instead
 #    define dr_unregister_thread_init_event \
         DO_NOT_USE_thread_event_USE_drmgr_events_instead
 #    define dr_register_thread_exit_event DO_NOT_USE_thread_event_USE_drmgr_events_instead
 #    define dr_unregister_thread_exit_event \
         DO_NOT_USE_thread_event_USE_drmgr_events_instead
+#    define dr_register_filter_syscall_event \
+        DO_NOT_USE_filter_syscall_USE_drmgr_events_instead
+#    define dr_unregister_filter_syscall_event \
+        DO_NOT_USE_filter_syscall_USE_drmgr_events_instead
 #    define dr_register_pre_syscall_event DO_NOT_USE_pre_syscall_USE_drmgr_events_instead
 #    define dr_unregister_pre_syscall_event \
         DO_NOT_USE_pre_syscall_USE_drmgr_events_instead
@@ -129,7 +141,8 @@ typedef dr_emit_flags_t (*drmgr_xform_cb_t)(void *drcontext, void *tag, instrlis
  */
 typedef dr_emit_flags_t (*drmgr_analysis_cb_t)(void *drcontext, void *tag,
                                                instrlist_t *bb, bool for_trace,
-                                               bool translating, OUT void **user_data);
+                                               bool translating,
+                                               DR_PARAM_OUT void **user_data);
 
 /**
  * Callback function for the first stage when using a user data parameter:
@@ -244,7 +257,7 @@ DR_EXPORT
  * Initializes the drmgr extension.  Must be called prior to any of the
  * other routines.  Can be called multiple times (by separate components,
  * normally) but each call must be paired with a corresponding call to
- * drmgr_exit().
+ * drmgr_exit()
  *
  * \return whether successful.
  */
@@ -280,7 +293,7 @@ DR_EXPORT
  * All instrumentation must follow the guidelines for
  * #dr_register_bb_event() with the exception that multiple
  * application control transfer instructions are supported so long as
- * all but one have intra-block \p instr_t targets.  This is to
+ * all but one have intra-block \p #instr_t targets.  This is to
  * support internal control flow that may be necessary for some
  * application-to-application transformations.  These control transfer
  * instructions should have a translation set so that later passes
@@ -1013,7 +1026,7 @@ drmgr_is_emulation_end(instr_t *instr);
  */
 DR_EXPORT
 bool
-drmgr_get_emulated_instr_data(instr_t *instr, OUT emulated_instr_t *emulated);
+drmgr_get_emulated_instr_data(instr_t *instr, DR_PARAM_OUT emulated_instr_t *emulated);
 
 /**
  * Must be called during drmgr's insertion phase.  Returns whether the current
@@ -1047,7 +1060,8 @@ drmgr_get_emulated_instr_data(instr_t *instr, OUT emulated_instr_t *emulated);
  */
 DR_EXPORT
 bool
-drmgr_in_emulation_region(void *drcontext, OUT const emulated_instr_t **emulation_info);
+drmgr_in_emulation_region(void *drcontext,
+                          DR_PARAM_OUT const emulated_instr_t **emulation_info);
 
 DR_EXPORT
 /**
@@ -1099,6 +1113,123 @@ drmgr_decode_sysnum_from_wrapper(app_pc entry);
 /***************************************************************************
  * DR EVENT REPLACEMENTS WITH NO SEMANTIC CHANGES
  */
+
+DR_EXPORT
+/**
+ * Registers a callback function for the exit event, which behaves
+ * just like the event registered by dr_register_exit_event().
+ * \return whether successful.
+ */
+bool
+drmgr_register_exit_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the exit event, which behaves
+ * just like the event registered by dr_register_exit_event() but is
+ * ordered by \p priority. Allows for the passing of user data \p user_data
+ * which is available upon the execution of the callback.
+ * \return whether successful.
+ */
+bool
+drmgr_register_exit_event_user_data(void (*func)(void *user_data),
+                                    drmgr_priority_t *priority, void *user_data);
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the exit event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_exit_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the exit event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_exit_event_user_data(void (*func)(void *user_data));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the post_attach event, which behaves
+ * just like the event registered by dr_register_post_attach_event().
+ * \return whether successful.
+ */
+bool
+drmgr_register_post_attach_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the post_attach event, which behaves
+ * just like the event registered by dr_register_post_attach_event() but is
+ * ordered by \p priority. Allows for the passing of user data \p user_data
+ * which is available upon the execution of the callback.
+ * \return whether successful.
+ */
+bool
+drmgr_register_post_attach_event_user_data(void (*func)(void *user_data),
+                                           drmgr_priority_t *priority, void *user_data);
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the post_attach event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_post_attach_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the post_attach event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_post_attach_event_user_data(void (*func)(void *user_data));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the pre_detach event, which behaves
+ * just like the event registered by dr_register_pre_detach_event().
+ * \return whether successful.
+ */
+bool
+drmgr_register_pre_detach_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the pre_detach event, which behaves
+ * just like the event registered by dr_register_pre_detach_event() but is
+ * ordered by \p priority. Allows for the passing of user data \p user_data
+ * which is available upon the execution of the callback.
+ * \return whether successful.
+ */
+bool
+drmgr_register_pre_detach_event_user_data(void (*func)(void *user_data),
+                                          drmgr_priority_t *priority, void *user_data);
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the pre_detach event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_pre_detach_event(void (*func)(void));
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the pre_detach event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_pre_detach_event_user_data(void (*func)(void *user_data));
 
 DR_EXPORT
 /**
@@ -1209,10 +1340,52 @@ drmgr_unregister_thread_exit_event_user_data(void (*func)(void *drcontext,
 
 DR_EXPORT
 /**
+ * Registers a callback function for the syscall filter event, which
+ * behaves just like DR's pre-syscall event dr_register_filter_syscall_event().
+ * \return whether successful.
+ */
+bool
+drmgr_register_filter_syscall_event(bool (*func)(void *drcontext, int sysnum));
+
+DR_EXPORT
+/**
+ * Registers a callback function for the syscall filter event, which
+ * behaves just like DR's pre-syscall event dr_register_filter_syscall_event(),
+ * ordered by \p priority. Allows for the passing of user data \p user_data
+ * which is available upon the execution of the callback.
+ * \return whether successful.
+ */
+bool
+drmgr_register_filter_syscall_event_user_data(bool (*func)(void *drcontext, int sysnum,
+                                                           void *user_data),
+                                              drmgr_priority_t *priority,
+                                              void *user_data);
+
+DR_EXPORT
+/**
+ * Unregister a callback function for the syscall filter event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_filter_syscall_event(bool (*func)(void *drcontext, int sysnum));
+
+DR_EXPORT
+/**
+ * Unregister a callback function, which takes user data, for the syscall filter event.
+ * \return true if unregistration is successful and false if it is not
+ * (e.g., \p func was not registered).
+ */
+bool
+drmgr_unregister_filter_syscall_event_user_data(bool (*func)(void *drcontext, int sysnum,
+                                                             void *user_data));
+
+DR_EXPORT
+/**
  * Registers a callback function for the pre-syscall event, which
  * behaves just like DR's pre-syscall event dr_register_pre_syscall_event().
  * In particular, a filter event is still needed to ensure that a pre- or post-syscall
- * event is actually called: use dr_register_filter_syscall_event().
+ * event is actually called: use drmgr_register_filter_syscall_event_user_data().
  * \return whether successful.
  */
 bool

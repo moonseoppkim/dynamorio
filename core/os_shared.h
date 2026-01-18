@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -80,7 +80,7 @@ void
 os_thread_under_dynamo(dcontext_t *dcontext);
 /* must only be called for the executing thread */
 void
-os_thread_not_under_dynamo(dcontext_t *dcontext);
+os_thread_not_under_dynamo(dcontext_t *dcontext, bool restore_sigblocked);
 void
 os_process_under_dynamorio_initiate(dcontext_t *dcontext);
 void
@@ -204,15 +204,21 @@ is_thread_currently_native(thread_record_t *tr);
  */
 bool
 thread_get_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
+
+#ifdef LINUX
+bool
+thread_get_nudged_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
+#endif
+
 bool
 thread_set_mcontext(thread_record_t *tr, priv_mcontext_t *mc);
 
 /* Takes an os-specific context. Does not return. */
 void
-thread_set_self_context(void *cxt);
+thread_set_self_context(void *cxt, bool is_detach_external);
 /* Only sets the priv_mcontext_t state.  Does not return. */
 void
-thread_set_self_mcontext(priv_mcontext_t *mc);
+thread_set_self_mcontext(priv_mcontext_t *mc, bool is_detach_external);
 
 /* Assumes target thread is suspended */
 bool
@@ -259,7 +265,7 @@ get_app_segment_base(uint seg);
 
 /* Allocates num_slots tls slots aligned with alignment align */
 bool
-os_tls_calloc(OUT uint *offset, uint num_slots, uint alignment);
+os_tls_calloc(DR_PARAM_OUT uint *offset, uint num_slots, uint alignment);
 
 bool
 os_tls_cfree(uint offset, uint num_slots);
@@ -288,7 +294,7 @@ get_application_name(void);
 int
 num_app_args();
 int
-get_app_args(OUT dr_app_arg_t *args_array, int args_count);
+get_app_args(DR_PARAM_OUT dr_app_arg_t *args_array, int args_count);
 const char *
 get_application_short_name(void);
 char *
@@ -417,8 +423,9 @@ shared_library_error(char *buf, int maxlen);
  * for linux, one of addr or name is needed; for windows, neither is needed.
  */
 bool
-shared_library_bounds(IN shlib_handle_t lib, IN byte *addr, IN const char *name,
-                      OUT byte **start, OUT byte **end);
+shared_library_bounds(DR_PARAM_IN shlib_handle_t lib, DR_PARAM_IN byte *addr,
+                      DR_PARAM_IN const char *name, DR_PARAM_OUT byte **start,
+                      DR_PARAM_OUT byte **end);
 char *
 get_dynamorio_library_path(void);
 
@@ -461,15 +468,15 @@ os_minsigstksz(void);
 bool
 get_memory_info(const byte *pc, byte **base_pc, size_t *size, uint *prot);
 bool
-query_memory_ex(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_ex(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 /* We provide this b/c getting the bounds is expensive on Windows (i#1462) */
 bool
-query_memory_cur_base(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_cur_base(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 #ifdef UNIX
 bool
 get_memory_info_from_os(const byte *pc, byte **base_pc, size_t *size, uint *prot);
 bool
-query_memory_ex_from_os(const byte *pc, OUT dr_mem_info_t *info);
+query_memory_ex_from_os(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 void
 os_check_new_app_module(dcontext_t *dcontext, app_pc pc);
 #endif
@@ -557,7 +564,7 @@ enum {
     /* .data == variables written only at init or exit time or rarely in between */
     SELFPROT_DATA_RARE = 0x001,
     /* .fspdata == frequently written enough that we separate from .data.
-     * FIXME case 8073: currently these are unprotected on every cxt switch
+     * XXX case 8073: currently these are unprotected on every cxt switch
      */
     SELFPROT_DATA_FREQ = 0x002,
     /* .cspdata == so frequently written that to protect them requires unprotecting
@@ -575,24 +582,24 @@ enum {
     SELFPROT_DCONTEXT = 0x010, /* means we split out unprotected_context_t --
                                 * no actual protection unless SELFPROT_GLOBAL */
     SELFPROT_LOCAL = 0x020,
-    SELFPROT_CACHE = 0x040, /* FIXME: thread-safe NYI when doing all units */
+    SELFPROT_CACHE = 0x040, /* TODO: thread-safe NYI when doing all units */
     SELFPROT_STACK = 0x080, /* essentially always on with clean-dstack d_r_dispatch()
                              * design, leaving as a bit in case we do more later */
     /* protect our generated thread-shared and thread-private code */
     SELFPROT_GENCODE = 0x100,
-    /* FIXME: TEB page on Win32
+    /* XXX: TEB page on Win32
      * Other global structs, like thread-local callbacks on Win32?
      * PEB page?
      */
     /* options that require action on every context switch
-     * FIXME: global heap used to be much rarer before shared
+     * XXX: global heap used to be much rarer before shared
      * fragments, only containing "important" data, which is why we
      * un-protected on every context switch.  We should re-think that
      * now that most things are shared.
      */
     SELFPROT_ON_CXT_SWITCH = (SELFPROT_DATA_CXTSW |
                               SELFPROT_GLOBAL
-                              /* FIXME case 8073: this is only temporary until
+                              /* XXX case 8073: this is only temporary until
                                * we finish implementing .fspdata unprots */
                               | SELFPROT_DATA_FREQ),
     SELFPROT_ANY_DATA_SECTION =
@@ -822,7 +829,7 @@ os_rename_file(const char *orig_name, const char *new_name, bool replace);
  * and handling it is covered by PR 214097.
  */
 byte *
-os_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
+os_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr, uint prot,
             map_flags_t map_flags);
 bool
 os_unmap_file(byte *map, size_t size);
@@ -846,6 +853,10 @@ os_get_disk_free_space(/*IN*/ file_t file_handle,
                        /*OUT*/ uint64 *AvailableQuotaBytes /*OPTIONAL*/,
                        /*OUT*/ uint64 *TotalQuotaBytes /*OPTIONAL*/,
                        /*OUT*/ uint64 *TotalVolumeBytes /*OPTIONAL*/);
+file_t
+redirect_open(const char *fname, int flags, int mode);
+void
+redirect_close(file_t f);
 
 #ifdef PROFILE_RDTSC
 extern uint kilo_hertz;
@@ -1002,7 +1013,7 @@ rct_process_module_mmap(app_pc module_base, size_t module_size, bool add,
                         bool already_relocated);
 
 /* module boundary and code section analysis for RCT policies */
-/* FIXME: should be better abstracted by calling a routine that
+/* XXX: should be better abstracted by calling a routine that
  * enumerates code sections, while keeping the general driver in rct.c
  */
 bool
@@ -1077,14 +1088,14 @@ enum {
 };
 #elif defined(AARCHXX)
 enum {
-    /* FIXME i#1551, i#1569: this is for A32 for now to get things compiling */
+    /* XXX i#1551, i#1569: this is for A32 for now to get things compiling */
     JMP_REL32_OPCODE = 0xec000000,
     JMP_REL32_SIZE = 4,
     CALL_REL32_OPCODE = 0xed000000,
 };
 #elif defined(RISCV64)
 enum {
-    /* FIXME i#3544: Fix proper values. Those are for compilation only. */
+    /* XXX i#3544: Fix proper values. Those are for compilation only. */
     JMP_REL32_OPCODE = 0xec000000,
     JMP_REL32_SIZE = 4,
     CALL_REL32_OPCODE = 0xed000000,

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -802,7 +802,7 @@ read_module_list(const char *buf, module_table_t ***tables, uint *num_mods)
         modpath = info.path;
         if (info.size >= UINT_MAX)
             ASSERT(false, "module size is too large");
-        /* FIXME i#1445: we have seen the pdb convert paths to all-lowercase,
+        /* XXX i#1445: we have seen the pdb convert paths to all-lowercase,
          * so these should be case-insensitive on Windows.
          */
         if (strstr(info.path, "<unknown>") != NULL ||
@@ -814,7 +814,8 @@ read_module_list(const char *buf, module_table_t ***tables, uint *num_mods)
             mod_table = (module_table_t *)MODULE_TABLE_IGNORE;
         else {
             if (op_pathmap.specified()) {
-                const char *tofind = op_pathmap.get_value().first.c_str();
+                const twostring_t two_string = op_pathmap.get_value();
+                const char *tofind = two_string.first.c_str();
                 const char *match = strstr(info.path, tofind);
                 if (match != NULL) {
                     if (dr_snprintf(subst, BUFFER_SIZE_ELEMENTS(subst), "%.*s%s%s",
@@ -921,8 +922,8 @@ read_file_header(const char *buf)
 }
 
 static file_t
-open_input_file(const char *fname, const char **map_out OUT, size_t *map_size OUT,
-                uint64 *file_sz OUT)
+open_input_file(const char *fname, const char **map_out DR_PARAM_OUT,
+                size_t *map_size DR_PARAM_OUT, uint64 *file_sz DR_PARAM_OUT)
 {
     uint64 file_size;
     char *map;
@@ -1147,7 +1148,7 @@ enum_line_cb(drsym_line_info_t *info, void *data)
     module_table_t *table = (module_table_t *)data;
     line_table_t *line_table;
     const char *test_info = NULL;
-    /* FIXME i#1445: we have seen the pdb convert paths to all-lowercase,
+    /* XXX i#1445: we have seen the pdb convert paths to all-lowercase,
      * so these should be case-insensitive on Windows.
      */
     if (info->file == NULL ||

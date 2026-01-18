@@ -141,7 +141,7 @@ verify_buffers_nulled(drx_buf_t *client)
 
 static dr_emit_flags_t
 event_app_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                   bool translating, OUT void **user_data)
+                   bool translating, DR_PARAM_OUT void **user_data)
 {
     instr_t *inst, *label;
     bool prev_was_mov_const = false;
@@ -425,7 +425,7 @@ dr_init(client_id_t id)
           "event thread init failed");
 
     /* register events */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(event_app_analysis,
                                                  event_app_instruction, NULL))
         CHECK(false, "init failed");

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2024 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -73,7 +73,23 @@ instru_t::instr_to_instr_type(instr_t *instr, bool repstr_expanded)
     if (instr_is_cbr(instr))
         return TRACE_TYPE_INSTR_CONDITIONAL_JUMP;
 #ifdef X86
-    if (instr_get_opcode(instr) == OP_sysenter)
+    if (instr_get_opcode(instr) == OP_sysenter
+#    ifdef X86_32
+        // i#7340: On x86-32, we assume that an OP_syscall may be present only
+        // in the vdso __kernel_vsyscall on AMD machines. See notes in the
+        // Linux implementation: https://github.com/torvalds/linux/blob/v6.13/
+        // arch/x86/entry/entry_64_compat.S#L142
+        // Also, as noted in PR #5037, this 32-bit AMD OP_syscall does _not_
+        // return to the subsequent PC; the kernel sends control to a
+        // hardcoded address in the __kernel_vsyscall sequence, thus acting
+        // more like an OP_sysenter and requiring similar treatment.
+        // We decided to not add a new TRACE_TYPE_INSTR_ for such syscalls,
+        // as they are substantially similar to sysenter. However, note that
+        // the user can still figure out the underlying opcode using the
+        // instruction encodings in the trace.
+        || instr_get_opcode(instr) == OP_syscall
+#    endif
+    )
         return TRACE_TYPE_INSTR_SYSENTER;
 #endif
     // i#2051: to satisfy both cache and core simulators we mark subsequent iters
@@ -224,7 +240,7 @@ instru_t::instr_is_flush(instr_t *instr)
 {
     // Assuming we won't see any privileged instructions.
 #ifdef X86
-    if (instr_get_opcode(instr) == OP_clflush)
+    if (instr_get_opcode(instr) == OP_clflush || instr_get_opcode(instr) == OP_clflushopt)
         return true;
 #endif
 #ifdef AARCH64
@@ -239,9 +255,9 @@ instru_t::instr_to_flush_type(instr_t *instr)
 {
     DR_ASSERT(instr_is_flush(instr));
 #ifdef X86
-    // XXX: OP_clflush invalidates all levels of the processor cache
-    // hierarchy (data and instruction)
-    if (instr_get_opcode(instr) == OP_clflush)
+    // XXX: OP_clflush* invalidates all levels of the processor cache
+    // hierarchy (data and instruction).
+    if (instr_get_opcode(instr) == OP_clflush || instr_get_opcode(instr) == OP_clflushopt)
         return TRACE_TYPE_DATA_FLUSH;
 #endif
 #ifdef AARCH64
@@ -257,7 +273,7 @@ instru_t::instr_to_flush_type(instr_t *instr)
 void
 instru_t::insert_obtain_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
                              reg_id_t reg_addr, reg_id_t reg_scratch, opnd_t ref,
-                             OUT bool *scratch_used)
+                             DR_PARAM_OUT bool *scratch_used)
 {
     bool ok;
     bool we_used_scratch = false;

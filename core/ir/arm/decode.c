@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,6 +31,8 @@
  */
 
 #include "../globals.h"
+#include "../isa_regdeps/decode.h"
+#include "encode_api.h"
 #include "instr.h"
 #include "decode.h"
 #include "decode_private.h"
@@ -53,11 +55,11 @@
  *   widely varying unpredictable conditions when pc or lr is used:
  *   xref notes at the top of table_a32_pred.c.
  */
-/* FIXME i#1569: add A64 support: for now just A32 */
+/* XXX i#1569: add A64 support: for now just A32 */
 
 /* Global data structure to track the decode state,
  * it should be only used for drdecodelib or early init/late exit.
- * FIXME i#1595: add multi-dcontext support to drdecodelib.
+ * XXX i#1595: add multi-dcontext support to drdecodelib.
  */
 static decode_state_t global_decode_state;
 
@@ -172,7 +174,7 @@ decode_in_it_block(decode_state_t *state, app_pc pc, decode_info_t *di)
 bool
 is_isa_mode_legal(dr_isa_mode_t mode)
 {
-    return (mode == DR_ISA_ARM_THUMB || DR_ISA_ARM_A32);
+    return (mode == DR_ISA_ARM_THUMB || mode == DR_ISA_ARM_A32 || mode == DR_ISA_REGDEPS);
 }
 
 /* We need to call canonicalize_pc_target() on all next_tag-writing
@@ -251,7 +253,7 @@ decode_cur_pc(app_pc instr_pc, dr_isa_mode_t mode, uint opcode, instr_t *instr)
         } else
             return instr_pc + THUMB_CUR_PC_OFFS;
     } else {
-        /* FIXME i#1569: A64 NYI */
+        /* TODO i#1569: A64 NYI */
         ASSERT_NOT_IMPLEMENTED(false);
         return instr_pc;
     }
@@ -455,7 +457,7 @@ decode_immed(decode_info_t *di, uint start_bit, opnd_size_t opsize, bool is_sign
 /* This routine creates the decoded operand(s) itself */
 static bool
 decode_SIMD_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
-                           uint *counter INOUT)
+                           uint *counter DR_PARAM_OUT)
 {
     ptr_uint_t val; /* unsigned for logical shifts */
     /* This is a SIMD modified immedate: an 8-bit value with a 4-bit
@@ -546,7 +548,7 @@ decode_SIMD_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
 /* This routine creates the decoded operand(s) itself */
 static bool
 decode_VFP_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
-                          uint *counter INOUT)
+                          uint *counter DR_PARAM_OUT)
 {
     ptr_uint_t val; /* unsigned for logical shifts */
     /* This is a VFP modified immedate which is expanded.
@@ -582,7 +584,7 @@ decode_VFP_modified_immed(decode_info_t *di, byte optype, opnd_t *array,
 
 static bool
 decode_float_reglist(decode_info_t *di, opnd_size_t downsz, opnd_size_t upsz,
-                     opnd_t *array, uint *counter INOUT)
+                     opnd_t *array, uint *counter DR_PARAM_OUT)
 {
     uint i;
     uint count = (uint)decode_immed(di, 0, OPSZ_1, false /*unsigned*/);
@@ -632,7 +634,7 @@ decode_float_reglist(decode_info_t *di, opnd_size_t downsz, opnd_size_t upsz,
 }
 
 static dr_shift_type_t
-decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount OUT)
+decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount DR_PARAM_OUT)
 {
     if (sh2 == SHIFT_ENCODING_LSL && val == 0) {
         *amount = 0;
@@ -656,7 +658,7 @@ decode_shift_values(ptr_int_t sh2, ptr_int_t val, uint *amount OUT)
 }
 
 static dr_shift_type_t
-decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount OUT)
+decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount DR_PARAM_OUT)
 {
     ptr_int_t sh2, val;
     if (di->isa_mode == DR_ISA_ARM_THUMB) {
@@ -681,7 +683,7 @@ decode_index_shift(decode_info_t *di, ptr_int_t known_shift, uint *amount OUT)
 }
 
 static void
-decode_register_shift(decode_info_t *di, opnd_t *array, uint *counter IN)
+decode_register_shift(decode_info_t *di, opnd_t *array, uint *counter DR_PARAM_OUT)
 {
     if (*counter > 2 && di->shift_type_idx == *counter - 2) {
         /* Mark the register as shifted for proper disassembly. */
@@ -770,7 +772,7 @@ gpr_list_num_bits(byte optype)
 
 static bool
 decode_operand(decode_info_t *di, byte optype, opnd_size_t opsize, opnd_t *array,
-               uint *counter INOUT)
+               uint *counter DR_PARAM_OUT)
 {
     uint i;
     ptr_int_t val = 0;
@@ -2428,6 +2430,14 @@ decode_opcode(dcontext_t *dcontext, byte *pc, instr_t *instr)
 static byte *
 decode_common(dcontext_t *dcontext, byte *pc, byte *orig_pc, instr_t *instr)
 {
+    /* #DR_ISA_REGDEPS synthetic ISA has its own decoder.
+     * XXX i#1684: when DR can be built with full dynamic architecture selection we won't
+     * need to pollute the decoding of other architectures with this synthetic ISA special
+     * case.
+     */
+    if (dr_get_isa_mode(dcontext) == DR_ISA_REGDEPS)
+        return decode_isa_regdeps(dcontext, pc, instr);
+
     const instr_info_t *info = &invalid_instr;
     decode_info_t di;
     byte *next_pc;
@@ -3052,7 +3062,7 @@ decode_debug_checks_arch(void)
 #endif /* DEBUG */
 
 #ifdef DECODE_UNIT_TEST
-/* FIXME i#1551: add unit tests here.  How divide vs suite/tests/api/ tests? */
+/* XXX i#1551: add unit tests here.  How divide vs suite/tests/api/ tests? */
 #    include "instr_create_shared.h"
 
 int

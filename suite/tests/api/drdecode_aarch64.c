@@ -61,13 +61,17 @@ static void
 test_mov_instr_addr(void)
 {
 #if !defined(DR_HOST_NOT_TARGET)
+    const uint gencode_max_size = 1024;
+    byte *generated_code =
+        (byte *)allocate_mem(gencode_max_size, ALLOW_EXEC | ALLOW_READ | ALLOW_WRITE);
+
     instrlist_t *ilist = instrlist_create(GD);
     instr_t *callee = INSTR_CREATE_label(GD);
     instrlist_append(
         ilist,
         XINST_CREATE_move(GD, opnd_create_reg(DR_REG_X1), opnd_create_reg(DR_REG_LR)));
-    instrlist_insert_mov_instr_addr(GD, callee, (byte *)ilist, opnd_create_reg(DR_REG_X0),
-                                    ilist, NULL, NULL, NULL);
+    instrlist_insert_mov_instr_addr(GD, callee, generated_code,
+                                    opnd_create_reg(DR_REG_X0), ilist, NULL, NULL, NULL);
     instrlist_append(ilist, INSTR_CREATE_blr(GD, opnd_create_reg(DR_REG_X0)));
     instrlist_append(ilist, INSTR_CREATE_ret(GD, opnd_create_reg(DR_REG_X1)));
     instrlist_append(ilist, callee);
@@ -75,9 +79,6 @@ test_mov_instr_addr(void)
                                      NULL, NULL, NULL);
     instrlist_append(ilist, XINST_CREATE_return(GD));
 
-    uint gencode_max_size = 1024;
-    byte *generated_code =
-        (byte *)allocate_mem(gencode_max_size, ALLOW_EXEC | ALLOW_READ | ALLOW_WRITE);
     assert(generated_code != NULL);
     instrlist_encode(GD, ilist, generated_code, true);
     protect_mem(generated_code, gencode_max_size, ALLOW_EXEC | ALLOW_READ);
@@ -135,9 +136,9 @@ test_categories(void)
 {
     const uint raw[] = {
         0x00000000, /* no category, udf $0x0000 */
-        0x12020000, /* int math, and %w0 $0x40000000 -> %w0 */
-        0x0b010000, /* int math, add %w0 %w1 lsl $0x00 -> %w0 */
-        0x1E680821, /* fp math, fmul %d1 %d8 -> %d1 */
+        0x12020000, /* int, and %w0 $0x40000000 -> %w0 */
+        0x0b010000, /* int, add %w0 %w1 lsl $0x00 -> %w0 */
+        0x1E680821, /* fp, fmul %d1 %d8 -> %d1 */
         0xF8620621, /* load, ldraa -0x0f00(%x17)[8byte] -> %x1 */
         0x39000000, /* store, strb %w0 -> (%x0)[1byte] */
         0x3D800000, /* store, str %q0 -> (%x0)[16byte] */
@@ -159,30 +160,32 @@ test_categories(void)
     };
 
     size_t instr_count = sizeof(raw) / sizeof(uint);
-    const uint categories[] = { DR_INSTR_CATEGORY_UNCATEGORIZED,
-                                DR_INSTR_CATEGORY_INT_MATH,
-                                DR_INSTR_CATEGORY_INT_MATH,
-                                DR_INSTR_CATEGORY_FP_MATH,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_STORE,
-                                DR_INSTR_CATEGORY_STORE,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_STORE,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_LOAD | DR_INSTR_CATEGORY_SIMD,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_STORE,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_LOAD,
-                                DR_INSTR_CATEGORY_STORE,
-                                DR_INSTR_CATEGORY_BRANCH,
-                                DR_INSTR_CATEGORY_SIMD,
-                                DR_INSTR_CATEGORY_SIMD,
-                                DR_INSTR_CATEGORY_OTHER,
-                                DR_INSTR_CATEGORY_OTHER };
+    const uint categories[] = {
+        DR_INSTR_CATEGORY_UNCATEGORIZED,
+        DR_INSTR_CATEGORY_MATH,
+        DR_INSTR_CATEGORY_MATH,
+        DR_INSTR_CATEGORY_FP | DR_INSTR_CATEGORY_MATH,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_STORE,
+        DR_INSTR_CATEGORY_STORE | DR_INSTR_CATEGORY_SIMD | DR_INSTR_CATEGORY_FP,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_STORE,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_LOAD | DR_INSTR_CATEGORY_SIMD | DR_INSTR_CATEGORY_FP,
+        DR_INSTR_CATEGORY_LOAD | DR_INSTR_CATEGORY_SIMD | DR_INSTR_CATEGORY_FP,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_STORE,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_LOAD,
+        DR_INSTR_CATEGORY_STORE,
+        DR_INSTR_CATEGORY_BRANCH,
+        DR_INSTR_CATEGORY_SIMD,
+        DR_INSTR_CATEGORY_SIMD,
+        DR_INSTR_CATEGORY_OTHER,
+        DR_INSTR_CATEGORY_OTHER
+    };
     byte *pc = (byte *)raw;
-    for (int i = 0; i < instr_count; i++) {
+    for (size_t i = 0; i < instr_count; i++) {
         instr_t instr;
         instr_init(GD, &instr);
         instr_set_raw_bits(&instr, pc, 4);
@@ -199,6 +202,47 @@ test_categories(void)
     ASSERT(cat == DR_INSTR_CATEGORY_UNCATEGORIZED);
 }
 
+static void
+test_store_source(void)
+{
+    instr_t *in = XINST_CREATE_store(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 42),
+                                     opnd_create_reg(DR_REG_R1));
+    ASSERT(!instr_is_opnd_store_source(in, -1)); /* Out of bounds. */
+    ASSERT(instr_is_opnd_store_source(in, 0));   /* r1. */
+    ASSERT(!instr_is_opnd_store_source(in, 1));  /* Out of bounds. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_str_imm(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 16),
+                              opnd_create_reg(DR_REG_R1), opnd_create_reg(DR_REG_R0),
+                              OPND_CREATE_INT(16));
+    ASSERT(instr_is_opnd_store_source(in, 0));  /* r1. */
+    ASSERT(!instr_is_opnd_store_source(in, 1)); /* r0. */
+    ASSERT(!instr_is_opnd_store_source(in, 2)); /* immed. */
+    instr_destroy(GD, in);
+
+    /* Test data==addr reg. */
+    in = INSTR_CREATE_str_imm(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 16),
+                              opnd_create_reg(DR_REG_R0), opnd_create_reg(DR_REG_R0),
+                              OPND_CREATE_INT(16));
+    ASSERT(instr_is_opnd_store_source(in, 0));  /* r0. */
+    ASSERT(!instr_is_opnd_store_source(in, 1)); /* r0 address. */
+    ASSERT(!instr_is_opnd_store_source(in, 2)); /* immed. */
+    instr_destroy(GD, in);
+
+    in = INSTR_CREATE_stp(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 0),
+                          opnd_create_reg(DR_REG_R1), opnd_create_reg(DR_REG_R2));
+    ASSERT(instr_is_opnd_store_source(in, 0)); /* r1. */
+    ASSERT(instr_is_opnd_store_source(in, 1)); /* r2. */
+    instr_destroy(GD, in);
+
+    /* Test data==addr reg. */
+    in = INSTR_CREATE_stp(GD, OPND_CREATE_MEMPTR(DR_REG_R0, 0),
+                          opnd_create_reg(DR_REG_R0), opnd_create_reg(DR_REG_R1));
+    ASSERT(instr_is_opnd_store_source(in, 0)); /* r0. */
+    ASSERT(instr_is_opnd_store_source(in, 1)); /* r1. */
+    instr_destroy(GD, in);
+}
+
 int
 main()
 {
@@ -209,6 +253,8 @@ main()
     test_mov_instr_addr();
 
     test_categories();
+
+    test_store_source();
 
     print("done\n");
 

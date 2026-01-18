@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,7 +37,7 @@
 /* We disable formatting as it messes up the ${var} references: */
 /* clang-format off */
 #ifndef _CONFIGURE_H_
-#define _CONFIGURE_H_ 1
+#define _CONFIGURE_H_
 
 /* exposed options */
 #cmakedefine INTERNAL
@@ -56,6 +56,8 @@
 #cmakedefine VMKERNEL
 #cmakedefine MACOS
 #cmakedefine ANDROID
+#cmakedefine ANDROID64
+#cmakedefine ANDROID32
 #if defined(MACOS) || defined (LINUX) || defined(VMKERNEL) || defined(ANDROID)
 # define UNIX
 #endif
@@ -63,6 +65,7 @@
 /* Used a lot due to the different TLS.  We thus provide a convenience define. */
 # define MACOS64
 #endif
+#cmakedefine MUSL
 
 /* host, when different */
 #cmakedefine DR_HOST_X86
@@ -185,7 +188,7 @@
 
 # optimization of dynamo
 #    ($(D)RETURN_STACK: deprecated and now removed)
-#    $(D)TRACE_HEAD_CACHE_INCR   (incompatible with security FIXME:?)
+#    $(D)TRACE_HEAD_CACHE_INCR   (incompatible with security XXX:?)
 #    $(D)DISALLOW_CACHE_RESIZING (use as temporary hack when developing)
 # external interface
 #    $(D)ANNOTATIONS -- optional instrumentation of binary annotations
@@ -309,7 +312,7 @@
 # define DR_APP_EXPORTS
 #endif
 
-/* FIXME: some GBOP hooks depend on hotp_only HOT_PATCHING_INTERFACE */
+/* XXX: some GBOP hooks depend on hotp_only HOT_PATCHING_INTERFACE */
 
 #ifdef DEBUG
    /* for bug fixing this is useful so we turn on for all debug builds */

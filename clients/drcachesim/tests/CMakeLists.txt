@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2015-2017 Google, Inc.    All rights reserved.
+# Copyright (c) 2015-2025 Google, Inc.    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -31,20 +31,17 @@
 # This is NOT a CMake file for building the various test suite executables in
 # this tests/ directory: this is only for the --build-and-test test!
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 project(DynamoRIO_drmemtrace)
 
-if (UNIX) # The shipped drmemtrace on Windows has no zlib support.
+if (UNIX) # The shipped drmemtrace on Windows has no compression support.
+  # The CMake exported target rule for drmemtrace_analyzer includes linking in
+  # external libraries like zlib and lz4, but those libraries may not be on primary
+  # search paths, so we set up those paths if available.
   find_package(ZLIB)
-  if (NOT ZLIB_FOUND)
-    # Not a fatal error to succeed on AArch64 pre-commit and other places where
-    # zlib is not installed.
-    # XXX i#2006: Can we automate the zlib link somehow?  Should we provide two versions
-    # of our libs, one with and one without?  Can we include some version of zlib.a?
-    message(WARNING "zlib not found: linking will fail if drmemtrace has compressed "
-      "file support built-in")
-  endif()
+  find_library(liblz4 lz4)
+  find_library(libsnappy snappy)
 endif ()
 
 find_package(DynamoRIO)
@@ -59,6 +56,11 @@ use_DynamoRIO_extension(analyzer_separate droption) # for droption.h
 use_DynamoRIO_drmemtrace(analyzer_separate) # for analysis framework headers
 target_link_libraries(analyzer_separate drmemtrace_analyzer drmemtrace_histogram
   drfrontendlib)
-if (ZLIB_FOUND)
-  target_link_libraries(analyzer_separate ${ZLIB_LIBRARIES})
+
+# Test drmemtrace_static.
+if (UNIX) # XXX i#7560: Windows link errors remain but we don't have time to solve.
+  add_executable(burst_separate burst_static.cpp)
+  set_property(SOURCE burst_static.cpp APPEND PROPERTY COMPILE_DEFINITIONS "DEFINE_MAIN")
+  configure_DynamoRIO_static(burst_separate)
+  use_DynamoRIO_static_client(burst_separate drmemtrace_static)
 endif ()

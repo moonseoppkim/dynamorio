@@ -1,5 +1,5 @@
 /* ***************************************************************************
- * Copyright (c) 2012-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * ***************************************************************************/
 
 /*
@@ -31,6 +31,7 @@
  */
 
 #include "dr_api.h"
+#include "drmgr.h"
 #include "drvector.h"
 #include "drcovlib.h"
 #include "drcovlib_private.h"
@@ -81,7 +82,7 @@ static module_table_t module_table;
 /* Custom per-module field support. */
 static void *(*module_load_cb)(module_data_t *module, int seg_idx);
 static int (*module_print_cb)(void *data, char *dst, size_t max_len);
-static const char *(*module_parse_cb)(const char *src, OUT void **data);
+static const char *(*module_parse_cb)(const char *src, DR_PARAM_OUT void **data);
 static void (*module_free_cb)(void *data);
 
 /* we use direct map cache to avoid locking */
@@ -213,8 +214,8 @@ event_module_load(void *drcontext, const module_data_t *data, bool loaded)
             if (module_load_cb != NULL)
                 sub_entry->custom = module_load_cb(sub_entry->data, j);
             sub_entry->offset = data->segments[j].offset;
-            sub_entry->preferred_base =
-                (sub_entry->start - entry->start) + entry->preferred_base;
+            sub_entry->preferred_base = (app_pc)((sub_entry->start - entry->start) +
+                                                 (ptr_uint_t)entry->preferred_base);
             drvector_append(&module_table.vector, sub_entry);
             global_module_cache_add(module_table.cache, sub_entry);
         }
@@ -235,8 +236,8 @@ pc_is_in_module(module_entry_t *entry, app_pc pc)
 }
 
 static inline void
-lookup_helper_set_fields(module_entry_t *entry, OUT uint *mod_index, OUT app_pc *seg_base,
-                         OUT app_pc *mod_base)
+lookup_helper_set_fields(module_entry_t *entry, DR_PARAM_OUT uint *mod_index,
+                         DR_PARAM_OUT app_pc *seg_base, DR_PARAM_OUT app_pc *mod_base)
 {
     if (mod_index != NULL)
         *mod_index = entry->id; /* We expose the segment. */
@@ -247,8 +248,8 @@ lookup_helper_set_fields(module_entry_t *entry, OUT uint *mod_index, OUT app_pc 
 }
 
 static drcovlib_status_t
-drmodtrack_lookup_helper(void *drcontext, app_pc pc, OUT uint *mod_index,
-                         OUT app_pc *seg_base, OUT app_pc *mod_base)
+drmodtrack_lookup_helper(void *drcontext, app_pc pc, DR_PARAM_OUT uint *mod_index,
+                         DR_PARAM_OUT app_pc *seg_base, DR_PARAM_OUT app_pc *mod_base)
 {
     per_thread_t *data = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     module_entry_t *entry;
@@ -297,20 +298,22 @@ drmodtrack_lookup_helper(void *drcontext, app_pc pc, OUT uint *mod_index,
 }
 
 drcovlib_status_t
-drmodtrack_lookup(void *drcontext, app_pc pc, OUT uint *mod_index, OUT app_pc *mod_base)
+drmodtrack_lookup(void *drcontext, app_pc pc, DR_PARAM_OUT uint *mod_index,
+                  DR_PARAM_OUT app_pc *mod_base)
 {
     return drmodtrack_lookup_helper(drcontext, pc, mod_index, NULL, mod_base);
 }
 
 drcovlib_status_t
-drmodtrack_lookup_segment(void *drcontext, app_pc pc, OUT uint *segment_index,
-                          OUT app_pc *segment_base)
+drmodtrack_lookup_segment(void *drcontext, app_pc pc, DR_PARAM_OUT uint *segment_index,
+                          DR_PARAM_OUT app_pc *segment_base)
 {
     return drmodtrack_lookup_helper(drcontext, pc, segment_index, segment_base, NULL);
 }
 
 drcovlib_status_t
-drmodtrack_lookup_pc_from_index(void *drcontext, uint mod_index, OUT app_pc *mod_base)
+drmodtrack_lookup_pc_from_index(void *drcontext, uint mod_index,
+                                DR_PARAM_OUT app_pc *mod_base)
 {
     per_thread_t *data = (per_thread_t *)drmgr_get_tls_field(drcontext, tls_idx);
     module_entry_t *entry;
@@ -465,7 +468,8 @@ module_read_entry_print(module_read_entry_t *entry, uint idx, char *buf, size_t 
     len = dr_snprintf(buf, size,
                       "%3u, %3u, " PFX ", " PFX ", " PFX ", " ZHEX64_FORMAT_STRING
                       ", " PFX ", ",
-                      idx, entry->containing_id, entry->base, entry->base + entry->size,
+                      idx, entry->containing_id, entry->base,
+                      (app_pc)((ptr_uint_t)entry->base + (ptr_uint_t)entry->size),
                       entry->entry, entry->offset, entry->preferred_base);
     if (len == -1)
         return -1;
@@ -525,7 +529,8 @@ module_table_entry_print(module_entry_t *entry, char *buf, size_t size)
 }
 
 static drcovlib_status_t
-drmodtrack_dump_buf_headers(char *buf_in, size_t size, uint count, OUT int *len_out)
+drmodtrack_dump_buf_headers(char *buf_in, size_t size, uint count,
+                            DR_PARAM_OUT int *len_out)
 {
     int len;
     char *buf = buf_in;
@@ -572,7 +577,7 @@ drmodtrack_dump_buf_headers(char *buf_in, size_t size, uint count, OUT int *len_
 }
 
 drcovlib_status_t
-drmodtrack_dump_buf(char *buf_start, size_t size, OUT size_t *wrote)
+drmodtrack_dump_buf(char *buf_start, size_t size, DR_PARAM_OUT size_t *wrote)
 {
     uint i;
     module_entry_t *entry;
@@ -650,8 +655,8 @@ skip_commas_and_spaces(const char *ptr, uint num_skip)
 }
 
 drcovlib_status_t
-drmodtrack_offline_read(file_t file, const char *map, OUT const char **next_line,
-                        OUT void **handle, OUT uint *num_mods)
+drmodtrack_offline_read(file_t file, const char *map, DR_PARAM_OUT const char **next_line,
+                        DR_PARAM_OUT void **handle, DR_PARAM_OUT uint *num_mods)
 {
     module_read_info_t *info = NULL;
     uint i, mods_parsed = 0;
@@ -791,7 +796,7 @@ read_error:
 }
 
 drcovlib_status_t
-drmodtrack_offline_lookup(void *handle, uint index, OUT drmodtrack_info_t *out)
+drmodtrack_offline_lookup(void *handle, uint index, DR_PARAM_OUT drmodtrack_info_t *out)
 {
     module_read_info_t *info = (module_read_info_t *)handle;
     if (info == NULL || index >= info->num_mods || out == NULL ||
@@ -816,8 +821,8 @@ drmodtrack_offline_lookup(void *handle, uint index, OUT drmodtrack_info_t *out)
 }
 
 drcovlib_status_t
-drmodtrack_offline_write(void *handle, OUT char *buf_start, size_t size,
-                         OUT size_t *wrote)
+drmodtrack_offline_write(void *handle, DR_PARAM_OUT char *buf_start, size_t size,
+                         DR_PARAM_OUT size_t *wrote)
 {
     int len;
     uint i;
@@ -865,7 +870,8 @@ drmodtrack_offline_exit(void *handle)
 drcovlib_status_t
 drmodtrack_add_custom_data(void *(*load_cb)(module_data_t *module, int seg_idx),
                            int (*print_cb)(void *data, char *dst, size_t max_len),
-                           const char *(*parse_cb)(const char *src, OUT void **data),
+                           const char *(*parse_cb)(const char *src,
+                                                   DR_PARAM_OUT void **data),
                            void (*free_cb)(void *data))
 {
     /* We blindly replace if values already exist, as documented. */

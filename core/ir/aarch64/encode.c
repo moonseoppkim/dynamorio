@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020-2022 Google, Inc. All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc. All rights reserved.
  * Copyright (c) 2016 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -118,7 +118,11 @@ const char *const reg_names[] = {
     "p10", "p11", "p12", "p13", "p14", "p15",
     "ffr",
 
-    "cntvct_el0",
+    "cntvct_el0", "id_aa64isar0_el1", "id_aa64isar1_el1", "id_aa64isar2_el1",
+    "id_aa64pfr0_el1", "id_aa64mmfr1_el1", "id_aa64dfr0_el1", "id_aa64zfr0_el1",
+    "id_aa64pfr1_el1", "id_aa64mmfr2_el1", "midr_el1", "mpidr_el1", "revidr_el1",
+
+    "fpmr", "contextidr_el1", "elr_el1", "spsr_el1", "tpidr_el1", "accdata_el1"
 };
 
 
@@ -194,7 +198,206 @@ const reg_id_t dr_reg_fixer[] = { REG_NULL,
     DR_REG_P12, DR_REG_P13, DR_REG_P14, DR_REG_P15,
     DR_REG_FFR,
 
-    DR_REG_CNTVCT_EL0,
+    DR_REG_CNTVCT_EL0, DR_REG_ID_AA64ISAR0_EL1, DR_REG_ID_AA64ISAR1_EL1,
+    DR_REG_ID_AA64ISAR2_EL1, DR_REG_ID_AA64PFR0_EL1, DR_REG_ID_AA64MMFR1_EL1,
+    DR_REG_ID_AA64DFR0_EL1, DR_REG_ID_AA64ZFR0_EL1, DR_REG_ID_AA64PFR1_EL1,
+    DR_REG_ID_AA64MMFR2_EL1, DR_REG_MIDR_EL1, DR_REG_MPIDR_EL1, DR_REG_REVIDR_EL1,
+
+    DR_REG_FPMR, DR_REG_CONTEXTIDR_EL1, DR_REG_ELR_EL1, DR_REG_SPSR_EL1,
+    DR_REG_TPIDR_EL1, DR_REG_ACCDATA_EL1
+};
+
+/* Maps real ISA registers to their corresponding virtual DR_ISA_REGDEPS register.
+ * Note that we map real sub-registers to their corresponding containing virtual register.
+ * Same size as dr_reg_fixer[], keep them synched.
+ */
+const reg_id_t d_r_reg_id_to_virtual[] = {
+    DR_REG_NULL, /* DR_REG_NULL */
+    DR_REG_NULL, /* DR_REG_NULL */
+
+#define VIRTUAL_XREGS                                                                   \
+    DR_REG_VIRT0, DR_REG_VIRT1, DR_REG_VIRT2, DR_REG_VIRT3, DR_REG_VIRT4, DR_REG_VIRT5, \
+    DR_REG_VIRT6, DR_REG_VIRT7, DR_REG_VIRT8, DR_REG_VIRT9, DR_REG_VIRT10,              \
+    DR_REG_VIRT11, DR_REG_VIRT12, DR_REG_VIRT13, DR_REG_VIRT14, DR_REG_VIRT15,          \
+    DR_REG_VIRT16, DR_REG_VIRT17, DR_REG_VIRT18, DR_REG_VIRT19, DR_REG_VIRT20,          \
+    DR_REG_VIRT21, DR_REG_VIRT22, DR_REG_VIRT23, DR_REG_VIRT24, DR_REG_VIRT25,          \
+    DR_REG_VIRT26, DR_REG_VIRT27, DR_REG_VIRT28, DR_REG_VIRT29, DR_REG_VIRT30,          \
+    DR_REG_VIRT31, DR_REG_VIRT32,
+
+    VIRTUAL_XREGS /* from DR_REG_X0 to DR_REG_XZR */
+    VIRTUAL_XREGS /* from DR_REG_W0 to DR_REG_WZR */
+#undef VIRTUAL_XREGS
+
+#define VIRTUAL_ZREGS                                                          \
+    DR_REG_VIRT33, DR_REG_VIRT34, DR_REG_VIRT35, DR_REG_VIRT36, DR_REG_VIRT37, \
+    DR_REG_VIRT38, DR_REG_VIRT39, DR_REG_VIRT40, DR_REG_VIRT41, DR_REG_VIRT42, \
+    DR_REG_VIRT43, DR_REG_VIRT44, DR_REG_VIRT45, DR_REG_VIRT46, DR_REG_VIRT47, \
+    DR_REG_VIRT48, DR_REG_VIRT49, DR_REG_VIRT50, DR_REG_VIRT51, DR_REG_VIRT52, \
+    DR_REG_VIRT53, DR_REG_VIRT54, DR_REG_VIRT55, DR_REG_VIRT56, DR_REG_VIRT57, \
+    DR_REG_VIRT58, DR_REG_VIRT59, DR_REG_VIRT60, DR_REG_VIRT61, DR_REG_VIRT62, \
+    DR_REG_VIRT63, DR_REG_VIRT64,
+
+    VIRTUAL_ZREGS /* from DR_REG_Z0 to DR_REG_Z31 */
+    VIRTUAL_ZREGS /* from DR_REG_Q0 to DR_REG_Q31 */
+    VIRTUAL_ZREGS /* from DR_REG_D0 to DR_REG_D31 */
+    VIRTUAL_ZREGS /* from DR_REG_S0 to DR_REG_S31 */
+    VIRTUAL_ZREGS /* from DR_REG_H0 to DR_REG_H31 */
+    VIRTUAL_ZREGS /* from DR_REG_B0 to DR_REG_B31 */
+#undef VIRTUAL_ZREGS
+
+    DR_REG_VIRT65,  /* DR_REG_NZCV */
+    DR_REG_VIRT66,  /* DR_REG_FPCR */
+    DR_REG_VIRT67,  /* DR_REG_FPSR */
+    DR_REG_VIRT68,  /* DR_REG_MDCCSR_EL0 */
+    DR_REG_VIRT69,  /* DR_REG_DBGDTR_EL0 */
+    DR_REG_VIRT70,  /* DR_REG_DBGDTRRX_EL0 */
+    DR_REG_VIRT71,  /* DR_REG_SP_EL0 */
+    DR_REG_VIRT72,  /* DR_REG_SPSEL */
+    DR_REG_VIRT73,  /* DR_REG_DAIFSET */
+    DR_REG_VIRT74,  /* DR_REG_DAIFCLR */
+    DR_REG_VIRT75,  /* DR_REG_CURRENTEL */
+    DR_REG_VIRT76,  /* DR_REG_PAN */
+    DR_REG_VIRT77,  /* DR_REG_UAO */
+    DR_REG_VIRT78,  /* DR_REG_CTR_EL0 */
+    DR_REG_VIRT79,  /* DR_REG_DCZID_EL0 */
+    DR_REG_VIRT80,  /* DR_REG_RNDR */
+    DR_REG_VIRT81,  /* DR_REG_RNDRRS */
+    DR_REG_VIRT82,  /* DR_REG_DAIF */
+    DR_REG_VIRT83,  /* DR_REG_DIT */
+    DR_REG_VIRT84,  /* DR_REG_SSBS */
+    DR_REG_VIRT85,  /* DR_REG_TCO */
+    DR_REG_VIRT86,  /* DR_REG_DSPSR_EL0 */
+    DR_REG_VIRT87,  /* DR_REG_DLR_EL0 */
+    DR_REG_VIRT88,  /* DR_REG_PMCR_EL0 */
+    DR_REG_VIRT89,  /* DR_REG_PMCNTENSET_EL0 */
+    DR_REG_VIRT90,  /* DR_REG_PMCNTENCLR_EL0 */
+    DR_REG_VIRT91,  /* DR_REG_PMOVSCLR_EL0 */
+    DR_REG_VIRT92,  /* DR_REG_PMSWINC_EL0 */
+    DR_REG_VIRT93,  /* DR_REG_PMSELR_EL0 */
+    DR_REG_VIRT94,  /* DR_REG_PMCEID0_EL0 */
+    DR_REG_VIRT95,  /* DR_REG_PMCEID1_EL0 */
+    DR_REG_VIRT96,  /* DR_REG_PMCCNTR_EL0 */
+    DR_REG_VIRT97,  /* DR_REG_PMXEVTYPER_EL0 */
+    DR_REG_VIRT98,  /* DR_REG_PMXEVCNTR_EL0 */
+    DR_REG_VIRT99,  /* DR_REG_PMUSERENR_EL0 */
+    DR_REG_VIRT100, /* DR_REG_PMOVSSET_EL0 */
+    DR_REG_VIRT101, /* DR_REG_SCXTNUM_EL0 */
+    DR_REG_VIRT102, /* DR_REG_CNTFRQ_EL0 */
+    DR_REG_VIRT103, /* DR_REG_CNTPCT_EL0 */
+    DR_REG_VIRT104, /* DR_REG_CNTP_TVAL_EL0 */
+    DR_REG_VIRT105, /* DR_REG_CNTP_CTL_EL0 */
+    DR_REG_VIRT106, /* DR_REG_CNTP_CVAL_EL0 */
+    DR_REG_VIRT107, /* DR_REG_CNTV_TVAL_EL0 */
+    DR_REG_VIRT108, /* DR_REG_CNTV_CTL_EL0 */
+    DR_REG_VIRT109, /* DR_REG_CNTV_CVAL_EL0 */
+    DR_REG_VIRT110, /* DR_REG_PMEVCNTR0_EL0 */
+    DR_REG_VIRT111, /* DR_REG_PMEVCNTR1_EL0 */
+    DR_REG_VIRT112, /* DR_REG_PMEVCNTR2_EL0 */
+    DR_REG_VIRT113, /* DR_REG_PMEVCNTR3_EL0 */
+    DR_REG_VIRT114, /* DR_REG_PMEVCNTR4_EL0 */
+    DR_REG_VIRT115, /* DR_REG_PMEVCNTR5_EL0 */
+    DR_REG_VIRT116, /* DR_REG_PMEVCNTR6_EL0 */
+    DR_REG_VIRT117, /* DR_REG_PMEVCNTR7_EL0 */
+    DR_REG_VIRT118, /* DR_REG_PMEVCNTR8_EL0 */
+    DR_REG_VIRT119, /* DR_REG_PMEVCNTR9_EL0 */
+    DR_REG_VIRT120, /* DR_REG_PMEVCNTR10_EL0 */
+    DR_REG_VIRT121, /* DR_REG_PMEVCNTR11_EL0 */
+    DR_REG_VIRT122, /* DR_REG_PMEVCNTR12_EL0 */
+    DR_REG_VIRT123, /* DR_REG_PMEVCNTR13_EL0 */
+    DR_REG_VIRT124, /* DR_REG_PMEVCNTR14_EL0 */
+    DR_REG_VIRT125, /* DR_REG_PMEVCNTR15_EL0 */
+    DR_REG_VIRT126, /* DR_REG_PMEVCNTR16_EL0 */
+    DR_REG_VIRT127, /* DR_REG_PMEVCNTR17_EL0 */
+    DR_REG_VIRT128, /* DR_REG_PMEVCNTR18_EL0 */
+    DR_REG_VIRT129, /* DR_REG_PMEVCNTR19_EL0 */
+    DR_REG_VIRT130, /* DR_REG_PMEVCNTR20_EL0 */
+    DR_REG_VIRT131, /* DR_REG_PMEVCNTR21_EL0 */
+    DR_REG_VIRT132, /* DR_REG_PMEVCNTR22_EL0 */
+    DR_REG_VIRT133, /* DR_REG_PMEVCNTR23_EL0 */
+    DR_REG_VIRT134, /* DR_REG_PMEVCNTR24_EL0 */
+    DR_REG_VIRT135, /* DR_REG_PMEVCNTR25_EL0 */
+    DR_REG_VIRT136, /* DR_REG_PMEVCNTR26_EL0 */
+    DR_REG_VIRT137, /* DR_REG_PMEVCNTR27_EL0 */
+    DR_REG_VIRT138, /* DR_REG_PMEVCNTR28_EL0 */
+    DR_REG_VIRT139, /* DR_REG_PMEVCNTR29_EL0 */
+    DR_REG_VIRT140, /* DR_REG_PMEVCNTR30_EL0 */
+    DR_REG_VIRT141, /* DR_REG_PMEVTYPER0_EL0 */
+    DR_REG_VIRT142, /* DR_REG_PMEVTYPER1_EL0 */
+    DR_REG_VIRT143, /* DR_REG_PMEVTYPER2_EL0 */
+    DR_REG_VIRT144, /* DR_REG_PMEVTYPER3_EL0 */
+    DR_REG_VIRT145, /* DR_REG_PMEVTYPER4_EL0 */
+    DR_REG_VIRT146, /* DR_REG_PMEVTYPER5_EL0 */
+    DR_REG_VIRT147, /* DR_REG_PMEVTYPER6_EL0 */
+    DR_REG_VIRT148, /* DR_REG_PMEVTYPER7_EL0 */
+    DR_REG_VIRT149, /* DR_REG_PMEVTYPER8_EL0 */
+    DR_REG_VIRT150, /* DR_REG_PMEVTYPER9_EL0 */
+    DR_REG_VIRT151, /* DR_REG_PMEVTYPER10_EL0 */
+    DR_REG_VIRT152, /* DR_REG_PMEVTYPER11_EL0 */
+    DR_REG_VIRT153, /* DR_REG_PMEVTYPER12_EL0 */
+    DR_REG_VIRT154, /* DR_REG_PMEVTYPER13_EL0 */
+    DR_REG_VIRT155, /* DR_REG_PMEVTYPER14_EL0 */
+    DR_REG_VIRT156, /* DR_REG_PMEVTYPER15_EL0 */
+    DR_REG_VIRT157, /* DR_REG_PMEVTYPER16_EL0 */
+    DR_REG_VIRT158, /* DR_REG_PMEVTYPER17_EL0 */
+    DR_REG_VIRT159, /* DR_REG_PMEVTYPER18_EL0 */
+    DR_REG_VIRT160, /* DR_REG_PMEVTYPER19_EL0 */
+    DR_REG_VIRT161, /* DR_REG_PMEVTYPER20_EL0 */
+    DR_REG_VIRT162, /* DR_REG_PMEVTYPER21_EL0 */
+    DR_REG_VIRT163, /* DR_REG_PMEVTYPER22_EL0 */
+    DR_REG_VIRT164, /* DR_REG_PMEVTYPER23_EL0 */
+    DR_REG_VIRT165, /* DR_REG_PMEVTYPER24_EL0 */
+    DR_REG_VIRT166, /* DR_REG_PMEVTYPER25_EL0 */
+    DR_REG_VIRT167, /* DR_REG_PMEVTYPER26_EL0 */
+    DR_REG_VIRT168, /* DR_REG_PMEVTYPER27_EL0 */
+    DR_REG_VIRT169, /* DR_REG_PMEVTYPER28_EL0 */
+    DR_REG_VIRT170, /* DR_REG_PMEVTYPER29_EL0 */
+    DR_REG_VIRT171, /* DR_REG_PMEVTYPER30_EL0 */
+    DR_REG_VIRT172, /* DR_REG_PMCCFILTR_EL0 */
+    DR_REG_VIRT173, /* DR_REG_SPSR_IRQ */
+    DR_REG_VIRT174, /* DR_REG_SPSR_ABT */
+    DR_REG_VIRT175, /* DR_REG_SPSR_UND */
+    DR_REG_VIRT176, /* DR_REG_SPSR_FIQ */
+    DR_REG_VIRT177, /* DR_REG_TPIDR_EL0 */
+    DR_REG_VIRT178, /* DR_REG_TPIDRRO_EL0 */
+
+    DR_REG_VIRT179, /* DR_REG_P0 */
+    DR_REG_VIRT180, /* DR_REG_P1 */
+    DR_REG_VIRT181, /* DR_REG_P2 */
+    DR_REG_VIRT182, /* DR_REG_P3 */
+    DR_REG_VIRT183, /* DR_REG_P4 */
+    DR_REG_VIRT184, /* DR_REG_P5 */
+    DR_REG_VIRT185, /* DR_REG_P6 */
+    DR_REG_VIRT186, /* DR_REG_P7 */
+    DR_REG_VIRT187, /* DR_REG_P8 */
+    DR_REG_VIRT188, /* DR_REG_P9 */
+    DR_REG_VIRT189, /* DR_REG_P10 */
+    DR_REG_VIRT190, /* DR_REG_P11 */
+    DR_REG_VIRT191, /* DR_REG_P12 */
+    DR_REG_VIRT192, /* DR_REG_P13 */
+    DR_REG_VIRT193, /* DR_REG_P14 */
+    DR_REG_VIRT194, /* DR_REG_P15 */
+    DR_REG_VIRT195, /* DR_REG_FFR */
+
+    DR_REG_VIRT196, /* DR_REG_CNTVCT_EL0 */
+    DR_REG_VIRT197, /* DR_REG_ID_AA64ISAR0_EL1 */
+    DR_REG_VIRT198, /* DR_REG_ID_AA64ISAR1_EL1 */
+    DR_REG_VIRT199, /* DR_REG_ID_AA64ISAR2_EL1 */
+    DR_REG_VIRT200, /* DR_REG_ID_AA64PFR0_EL1 */
+    DR_REG_VIRT201, /* DR_REG_ID_AA64MMFR1_EL1 */
+    DR_REG_VIRT202, /* DR_REG_ID_AA64DFR0_EL1 */
+    DR_REG_VIRT203, /* DR_REG_ID_AA64ZFR0_EL1 */
+    DR_REG_VIRT204, /* DR_REG_ID_AA64PFR1_EL1 */
+    DR_REG_VIRT205, /* DR_REG_ID_AA64MMFR2_EL1 */
+    DR_REG_VIRT206, /* DR_REG_MIDR_EL1 */
+    DR_REG_VIRT207, /* DR_REG_MPIDR_EL1 */
+    DR_REG_VIRT208, /* DR_REG_REVIDR_EL1 */
+
+    DR_REG_VIRT209, /* DR_REG_FPMR */
+    DR_REG_VIRT210, /* DR_REG_CONTEXTIDR_EL1 */
+    DR_REG_VIRT211, /* DR_REG_ELR_EL1 */
+    DR_REG_VIRT212, /* DR_REG_SPSR_EL1 */
+    DR_REG_VIRT213, /* DR_REG_TPIDR_EL1 */
+    DR_REG_VIRT214, /* DR_REG_ACCDATA_EL1 */
 };
 /* clang-format on */
 
@@ -202,7 +405,10 @@ const reg_id_t dr_reg_fixer[] = { REG_NULL,
 void
 encode_debug_checks(void)
 {
-    /* FIXME i#1569: NYI */
+    CLIENT_ASSERT(sizeof(d_r_reg_id_to_virtual) == sizeof(dr_reg_fixer),
+                  "register to virtual register map size error");
+
+    /* TODO i#1569: NYI */
 }
 #endif
 
@@ -219,7 +425,7 @@ encoding_possible(decode_info_t *di, instr_t *in, const instr_info_t *ii)
 void
 decode_info_init_for_instr(decode_info_t *di, instr_t *instr)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1569 */
+    di->check_reachable = false;
 }
 
 byte *
@@ -265,7 +471,7 @@ instr_encode_arch(dcontext_t *dcontext, instr_t *instr, byte *copy_pc, byte *fin
                     instr_disassemble_to_buffer(dcontext, instr, disas_instr,
                                                 MAX_INSTR_DIS_SZ);
                     SYSLOG_INTERNAL_ERROR("Internal Error: Failed to encode instruction:"
-                                          " '%s'\n",
+                                          " '%s'",
                                           disas_instr);
                 }
             });

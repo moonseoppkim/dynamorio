@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2018-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -40,7 +40,7 @@
  */
 
 #ifndef _FCACHE_H_
-#define _FCACHE_H_ 1
+#define _FCACHE_H_
 
 /* who's in the "trace" cache?
  * when we have private traces we put temp-private bbs there (to avoid
@@ -171,7 +171,7 @@ fcache_fragment_pclookup(dcontext_t *dcontext, cache_pc lookup_pc, fragment_t *w
 /* This is safe to call from a signal handler. */
 dr_where_am_i_t
 fcache_refine_whereami(dcontext_t *dcontext, dr_where_am_i_t whereami, app_pc pc,
-                       OUT fragment_t **containing_fragment);
+                       DR_PARAM_OUT fragment_t **containing_fragment);
 
 void
 fcache_coarse_cache_delete(dcontext_t *dcontext, coarse_info_t *info);

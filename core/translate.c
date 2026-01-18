@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -62,7 +62,7 @@
  * Current status:
  * After PR 214962, PR 267260, PR 263407, PR 268372, and PR 267764/i398, we
  * properly translate indirect branch mangling and client modifications.
- * FIXME: However, we still do not properly translate for:
+ * XXX: However, we still do not properly translate for:
  * - PR 303413: properly translate native_exec and windows sysenter mangling faults
  * - PR 208037/i#399: flushed fragments (need -safe_translate_flushed)
  * - PR 213251: hot patch fragments (b/c nudge can change whether patched =>
@@ -132,6 +132,8 @@ instr_is_inline_syscall_jmp(dcontext_t *dcontext, instr_t *inst)
              /* A32 uses a regular jump */
              instr_get_opcode(inst) == OP_b) &&
             opnd_is_instr(instr_get_target(inst)));
+#    elif defined(RISCV64)
+    return (instr_get_opcode(inst) == OP_jal && opnd_is_instr(instr_get_target(inst)));
 #    else
     ASSERT_NOT_IMPLEMENTED(false);
     return false;
@@ -264,8 +266,6 @@ instr_is_load_mcontext_base(instr_t *inst)
 
 #ifdef X86
 
-/* FIXME i#3329: add support for ARM/AArch64. */
-
 static bool
 translate_walk_enters_mangling_epilogue(dcontext_t *tdcontext, instr_t *inst,
                                         translate_walk_t *walk)
@@ -304,14 +304,14 @@ translate_walk_track_pre_instr(dcontext_t *tdcontext, instr_t *inst,
         walk->unsupported_mangle = false;
         walk->xsp_adjust = 0;
         for (reg_id_t r = 0; r < REG_SPILL_NUM; r++) {
-#ifndef AARCHXX
+#ifdef X86
             /* we should have seen a restore for every spill, unless at
              * fragment-ending jump to ibl, which shouldn't come here
              */
             ASSERT(walk->reg_spill_offs[r] == UINT_MAX);
             walk->reg_spill_offs[r] = UINT_MAX; /* be paranoid */
 #else
-            /* On AArchXX we do spill registers across app instrs and mangle
+            /* On AArchXX/RISCV64 we do spill registers across app instrs and mangle
              * regions, though right now only the following routines do this:
              * - mangle_stolen_reg()
              * - mangle_gpr_list_read()
@@ -399,9 +399,6 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
          * comment above for post-mangling traces), and so for local
          * spills like rip-rel and ind branches this is fine.
          */
-#if defined(RISCV64)
-        ASSERT_NOT_IMPLEMENTED(false);
-#endif
         if (instr_is_cti(inst) &&
 #ifdef X86
             /* Do not reset for a trace-cmp jecxz or jmp (32-bit) or
@@ -420,10 +417,7 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
               (!opnd_is_pc(instr_get_target(inst)) ||
                (opnd_get_pc(instr_get_target(inst)) >= walk->start_cache &&
                 opnd_get_pc(instr_get_target(inst)) < walk->end_cache))))
-#elif defined(RISCV64)
-            /* FIXME i#3544: Not implemented */
-            false
-#else
+#elif defined(AARCHXX)
             /* Do not reset for cbnz/bne in ldstex mangling, nor for the b after strex. */
             !(instr_get_opcode(inst) == OP_cbnz ||
               (instr_get_opcode(inst) == OP_b &&
@@ -432,11 +426,22 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
               (instr_get_opcode(inst) == OP_b &&
                (instr_get_prev(inst) != NULL &&
                 instr_is_exclusive_store(instr_get_prev(inst)))))
+#elif defined(RISCV64)
+            /* Do not reset for bne in LR/SC mangling, nor for the jal after SC.
+             * This should be kept in sync with mangle_exclusive_monitor_op().
+             */
+            !(instr_get_opcode(inst) == OP_bne ||
+              (instr_get_opcode(inst) == OP_jal && instr_get_prev(inst) != NULL &&
+               instr_get_opcode(instr_get_prev(inst)) == OP_bne &&
+               instr_get_prev(instr_get_prev(inst)) != NULL &&
+               instr_is_exclusive_store(instr_get_prev(instr_get_prev(inst)))))
+#else
+#    error Unsupported architecture
 #endif
         ) {
-            /* FIXME i#1551: add ARM version of the series of trace cti checks above */
+            /* XXX i#1551: add ARM version of the series of trace cti checks above */
             IF_ARM(ASSERT_NOT_IMPLEMENTED(DYNAMO_OPTION(disable_traces)));
-            /* FIXME i#3544: Implement traces */
+            /* XXX i#3544: Implement traces */
             IF_RISCV64(ASSERT_NOT_IMPLEMENTED(DYNAMO_OPTION(disable_traces)));
             /* reset for non-exit non-trace-jecxz cti (i.e., selfmod cti) */
             LOG(THREAD_GET, LOG_INTERP, 4, "\treset spills on cti\n");
@@ -514,7 +519,7 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
          * 5) lret: "pop eip; pop cs"
          *    if fail on non-initial pop, undo earlier pops
          *
-         * FIXME: some of these push/pops are simulated (we simply adjust
+         * XXX: some of these push/pops are simulated (we simply adjust
          * esp or do nothing), so we're not truly fault-transparent.
          */
         else if (instr_check_xsp_mangling(tdcontext, inst, &walk->xsp_adjust)) {
@@ -547,9 +552,14 @@ translate_walk_track_post_instr(dcontext_t *tdcontext, instr_t *inst,
             /* nothing to do */
         }
 #endif
-#ifdef AARCHXX
+#if defined(AARCHXX) || defined(RISCV64)
         else if (instr_is_ldstex_mangling(tdcontext, inst)) {
             /* nothing to do */
+        }
+#endif
+#if defined(AARCH64)
+        else if (instr_is_pauth_branch_mangling(tdcontext, inst)) {
+            /* nothing to do. */
         }
 #endif
         /* Single step mangling adds a nop. */
@@ -594,10 +604,39 @@ translate_walk_good_state(dcontext_t *tdcontext, translate_walk_t *walk,
             (walk->in_mangle_region && translate_pc != walk->translation));
 }
 
+#ifdef AARCH64
+/* Emulate instructions in mangling epilogue.
+ * TODO i#7707, i#7708: Either add other non-x86 architectures here or use
+ * translate_walk_t mechanism instead, in which case this function can be removed.
+ */
 static void
+emulate_epilogue(dcontext_t *tdcontext, priv_mcontext_t *mc, instr_t *first_inst)
+{
+    app_pc translation = instr_get_translation(first_inst);
+    for (instr_t *inst = first_inst;
+         inst != NULL && instr_is_our_mangling_epilogue(inst) &&
+         instr_get_translation(inst) == translation;
+         inst = instr_get_next(inst)) {
+        if (!d_r_emulate_instr(tdcontext, inst, mc))
+            ASSERT(false && "emulate_epilogue emulation failed");
+    }
+}
+#endif /* AARCH64 */
+
+static app_pc
 translate_walk_restore(dcontext_t *tdcontext, translate_walk_t *walk, instr_t *inst,
                        app_pc translate_pc)
 {
+#ifdef AARCH64
+    /* TODO i#7707, i#7708: Either add other non-x86 architectures to emulate_epilogue
+     * or improve the translate_walk_t mechanism so that it can handle the stolen
+     * register and other aspects of non-x86 mangling (i#7675).
+     */
+    if (instr_is_our_mangling_epilogue(inst)) {
+        emulate_epilogue(tdcontext, walk->mc, inst);
+        return translate_pc;
+    }
+#endif
     reg_id_t r;
 
     if (IF_X86_ELSE(translate_walk_enters_mangling_epilogue(tdcontext, inst, walk),
@@ -662,7 +701,7 @@ translate_walk_restore(dcontext_t *tdcontext, translate_walk_t *walk, instr_t *i
 
     /* PR 263407: restore register values that are currently in spill slots
      * for ind branches or rip-rel mangling.
-     * FIXME: for rip-rel loads, we may have clobbered the destination
+     * XXX: for rip-rel loads, we may have clobbered the destination
      * already, and won't be able to restore it: but that's a minor issue.
      */
     for (r = 0; r < REG_SPILL_NUM; r++) {
@@ -696,7 +735,7 @@ translate_walk_restore(dcontext_t *tdcontext, translate_walk_t *walk, instr_t *i
             translate_pc, walk->translation);
     } else {
         /* PR 267260: Restore stack-adjust mangling of ctis.
-         * FIXME: we do NOT undo writes to the stack, so we're not completely
+         * XXX: we do NOT undo writes to the stack, so we're not completely
          * transparent.  If we ever do restore memory, we'll want to pass in
          * the restore_memory param.
          */
@@ -706,13 +745,14 @@ translate_walk_restore(dcontext_t *tdcontext, translate_walk_t *walk, instr_t *i
                 walk->xsp_adjust, walk->mc->xsp);
         }
     }
+    return translate_pc;
 }
 
 static void
 translate_restore_clean_call(dcontext_t *tdcontext, translate_walk_t *walk)
 {
     /* We restore to the priv_mcontext_t that was pushed on the stack.
-     * FIXME i#4219: This is not safe: see comment below.
+     * XXX i#4219: This is not safe: see comment below.
      */
     LOG(THREAD_GET, LOG_INTERP, 2, "\ttranslating clean call arg crash\n");
     dr_get_mcontext_priv(tdcontext, NULL, walk->mc);
@@ -875,7 +915,7 @@ recreate_app_state_from_info(dcontext_t *tdcontext, const translation_info_t *in
          * reasonable time).
          */
         /* PR 302951: our clean calls do show up here and have full state.
-         * FIXME i#4219: Actually we do *not* always have full state: for asynch
+         * XXX i#4219: Actually we do *not* always have full state: for asynch
          * xl8 we could be before setup or after teardown of the mcontext on the
          * dstack, and with leaner clean calls we might not have the full mcontext.
          */
@@ -911,7 +951,7 @@ recreate_app_state_from_info(dcontext_t *tdcontext, const translation_info_t *in
     }
 
     if (!just_pc)
-        translate_walk_restore(tdcontext, &walk, &instr, answer);
+        answer = translate_walk_restore(tdcontext, &walk, &instr, answer);
     answer = translate_restore_special_cases(tdcontext, answer);
     LOG(THREAD_GET, LOG_INTERP, 2, "recreate_app -- found ok pc " PFX "\n", answer);
     mc->pc = answer;
@@ -1005,7 +1045,7 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
             if (cpc > target_cache) {
                 if (cpc == start_cache) {
                     /* Prefix instructions are not added to recreate_fragment_ilist()
-                     * FIXME: we should do so, and then we can at least restore
+                     * XXX: we should do so, and then we can at least restore
                      * our spills, just in case.
                      */
                     LOG(THREAD_GET, LOG_INTERP, 2,
@@ -1038,7 +1078,7 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
                  */
                 ASSERT(instr_is_meta(inst));
                 /* PR 302951: our clean calls do show up here and have full state.
-                 * FIXME i#4219: This is not safe: see comment above.
+                 * XXX i#4219: This is not safe: see comment above.
                  */
                 if (walk.in_clean_call)
                     translate_restore_clean_call(tdcontext, &walk);
@@ -1116,7 +1156,7 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
                 }
             }
             if (!just_pc)
-                translate_walk_restore(tdcontext, &walk, inst, answer);
+                answer = translate_walk_restore(tdcontext, &walk, inst, answer);
             answer = translate_restore_special_cases(tdcontext, answer);
             LOG(THREAD_GET, LOG_INTERP, 2, "recreate_app -- found ok pc " PFX "\n",
                 answer);
@@ -1133,10 +1173,10 @@ recreate_app_state_from_ilist(dcontext_t *tdcontext, instrlist_t *ilist, byte *s
                 /* we really want the pc after the translation target since we'll
                  * use this if we pass up the target without hitting it:
                  * unless this is a meta instr in which case we assume the
-                 * real instr is ahead (FIXME: there could be cases where
+                 * real instr is ahead (XXX: there could be cases where
                  * we want the opposite: how know?)
                  */
-                /* FIXME: do we need to check for readability first?
+                /* XXX: do we need to check for readability first?
                  * in normal usage all translation targets should have been decoded
                  * already while building the bb ilist
                  */
@@ -1205,13 +1245,18 @@ recreate_selfmod_ilist(dcontext_t *dcontext, fragment_t *f)
 static void
 restore_stolen_register(dcontext_t *dcontext, priv_mcontext_t *mcontext)
 {
-#ifdef AARCHXX
+#if defined(AARCHXX) || defined(RISCV64)
     /* dr_reg_stolen is holding DR's TLS on receiving a signal,
      * so we need put app's reg value into mcontext instead
      */
     LOG(THREAD_GET, LOG_INTERP, 2, "\trestoring stolen register to " PFX "\n",
         dcontext->local_state->spill_space.reg_stolen);
     set_stolen_reg_val(mcontext, dcontext->local_state->spill_space.reg_stolen);
+#    ifdef RISCV64
+    LOG(THREAD_GET, LOG_INTERP, 2, "\trestoring tp register to " PFX "\n",
+        os_get_app_tls_base(dcontext, TLS_REG_LIB));
+    set_tp_reg_val(mcontext, (reg_t)os_get_app_tls_base(dcontext, TLS_REG_LIB));
+#    endif
 #endif
 }
 
@@ -1239,7 +1284,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
         ASSERT(get_os_version() >= WINDOWS_VERSION_XP);
         /* case 5441 sygate hack means ret addr to after_syscall will be at
          * esp+4 (esp will point to ret in ntdll.dll) for sysenter */
-        /* FIXME - should we check that esp is readable? */
+        /* XXX - should we check that esp is readable? */
         if (is_after_syscall_address(
                 tdcontext,
                 *(cache_pc *)(mcontext->xsp +
@@ -1381,7 +1426,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
             tdcontext->owning_thread);
         return RECREATE_FAILURE;
     } else if (in_fcache(mcontext->pc)) {
-        /* FIXME: what if pc is in separate direct stub???
+        /* XXX: what if pc is in separate direct stub???
          * do we have to read the &l from the stub to find linkstub_t and thus
          * fragment_t owner?
          */
@@ -1470,7 +1515,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
         cti_pc = NULL;
         for (l = FRAGMENT_EXIT_STUBS(f); l; l = LINKSTUB_NEXT_EXIT(l)) {
             if (EXIT_HAS_LOCAL_STUB(l->flags, f->flags)) {
-                /* FIXME: as computing the stub pc becomes more expensive,
+                /* XXX: as computing the stub pc becomes more expensive,
                  * should perhaps check fragment_body_end_pc() or something
                  * that only does one stub check up front, and then find the
                  * exact stub if pc is beyond the end of the body.
@@ -1485,7 +1530,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
              * new target: the exit cti, not its stub
              */
             if (!just_pc) {
-                /* FIXME : translate from exit stub */
+                /* XXX : translate from exit stub */
                 LOG(THREAD_GET, LOG_INTERP | LOG_SYNCH, 2,
                     "recreate_app_helper -- can't full recreate state, pc " PFX " "
                     "is in exit stub\n",
@@ -1567,7 +1612,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
 }
 
 /* Assumes that pc is a pc_recreatable place (i.e. in_fcache(), though could do
- * syscalls with esp, also see FIXME about separate stubs in
+ * syscalls with esp, also see XXX about separate stubs in
  * recreate_app_state_internal()), ASSERTs otherwise.
  * If caller knows which fragment pc belongs to, caller should pass in f
  * to avoid work and avoid lock rank issues as pclookup acquires shared_cache_lock;
@@ -1582,7 +1627,7 @@ recreate_app_state_internal(dcontext_t *tdcontext, priv_mcontext_t *mcontext,
  * in_fcache() then there is an assert curiosity and the function returns NULL.
  * This can happen only from the pc being in a fragment that is pending
  * deletion (ref case 3559 others).  Most callers don't check the returned
- * value and wouldn't have a way to recover even if they did. FIXME
+ * value and wouldn't have a way to recover even if they did. XXX
  */
 /* Use THREAD_GET instead of THREAD so log messages go to calling thread */
 app_pc
@@ -1602,7 +1647,7 @@ recreate_app_pc(dcontext_t *tdcontext, cache_pc pc, fragment_t *f)
         ASSERT(res != RECREATE_SUCCESS_STATE); /* shouldn't return that for just_pc */
         ASSERT(in_fcache(pc));                 /* Make sure caller didn't screw up */
         /* We were unable to translate the pc, most likely because the
-         * pc is in a fragment that is pending deletion FIXME, most callers
+         * pc is in a fragment that is pending deletion XXX, most callers
          * aren't able to recover! */
         ASSERT_CURIOSITY(res && "Unable to translate pc");
         mc.pc = NULL;
@@ -1632,7 +1677,7 @@ recreate_app_pc(dcontext_t *tdcontext, cache_pc pc, fragment_t *f)
  * to avoid work and avoid lock rank issues as pclookup acquires shared_cache_lock;
  * else, pass in NULL for f.
  *
- * FIXME: does not undo stack mangling for sysenter
+ * XXX: does not undo stack mangling for sysenter
  */
 /* NOTE - Can be called with a thread suspended at an arbitrary place by synch
  * routines so must not call mutex_lock (or call a function that does) unless
@@ -1795,7 +1840,7 @@ record_translation_info(dcontext_t *dcontext, fragment_t *f, instrlist_t *existi
      * We then copy the results into a just-right-sized array.  A typical bb
      * requires 2 entries, one for its body of straight-line code and one for
      * the inserted jmp at the end, so we start w/ that to avoid copying in
-     * the common case.  FIXME: optimization: instead of every bb requiring a
+     * the common case.  XXX: optimization: instead of every bb requiring a
      * final entry for the inserted jmp, have recreate_ know about it and cut
      * in half the typical storage reqts.
      */
@@ -1945,6 +1990,7 @@ record_translation_info(dcontext_t *dcontext, fragment_t *f, instrlist_t *existi
 void
 stress_test_recreate_state(dcontext_t *dcontext, fragment_t *f, instrlist_t *ilist)
 {
+#    ifndef AARCH64 /* XXX: Update this test for AArch64. */
     priv_mcontext_t mc;
     bool res;
     cache_pc cpc;
@@ -2065,6 +2111,7 @@ stress_test_recreate_state(dcontext_t *dcontext, fragment_t *f, instrlist_t *ili
     if (TEST(FRAG_IS_TRACE, f->flags)) {
         instrlist_clear_and_destroy(dcontext, ilist);
     }
+#    endif /* AARCH64 */
 }
 #endif /* INTERNAL */
 

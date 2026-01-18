@@ -17,6 +17,7 @@
  * undef them here.
  */
 #include <signal.h>
+#include <limits.h>
 
 #ifdef MACOS
 /* For now we just use the system header. */
@@ -29,7 +30,14 @@ typedef siginfo_t kernel_siginfo_t;
  * first #undef-ed.
  */
 #    ifdef ANDROID
-#        define __WORDSIZE 32
+typedef clock_t __clock_t;
+#        ifndef __WORDSIZE
+#            define __WORDSIZE 32
+#        endif
+#    elif !defined(__GLIBC__)
+#        define __WORDSIZE LONG_BIT
+typedef uid_t __uid_t;
+typedef pid_t __pid_t;
 typedef clock_t __clock_t;
 #    else
 #        include <bits/wordsize.h>

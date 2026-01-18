@@ -99,7 +99,7 @@ test_ten_args(uint a, uint b, uint c, uint d, uint e, uint f, uint g, uint h, ui
 
 static dr_emit_flags_t
 bb_event_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                  bool translating, OUT void **user_data)
+                  bool translating, DR_PARAM_OUT void **user_data)
 {
     *(ptr_uint_t *)user_data = 0;
     for (instr_t *inst = instrlist_first(bb); inst != NULL; inst = instr_get_next(inst)) {
@@ -217,7 +217,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
             !drmgr_register_bb_instrumentation_event(bb_event_analysis, bb_event_insert,
                                                      NULL))
             PRINT("init failed");
-        dr_register_exit_event(event_exit);
+        drmgr_register_exit_event(event_exit);
     } else if (argc > 1 && strlen(argv[1]) >= 8 && strncmp(argv[1], "truncate", 8) == 0) {
         bb_truncation_length = (argv[1][9] - '0'); /* format is "truncate@n" (0<n<10) */
         ASSERT(bb_truncation_length < 10 && bb_truncation_length > 0);

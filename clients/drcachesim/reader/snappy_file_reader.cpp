@@ -180,7 +180,7 @@ snappy_reader_t::read_new_chunk()
 }
 
 int
-snappy_reader_t::read(size_t size, OUT void *to)
+snappy_reader_t::read(size_t size, DR_PARAM_OUT void *to)
 {
     char *to_buf = (char *)to;
     size_t to_read = size;
@@ -208,7 +208,7 @@ snappy_reader_t::read(size_t size, OUT void *to)
 /* clang-format off */ /* (make vera++ newline-after-type check happy) */
 template <>
 /* clang-format on */
-file_reader_t<snappy_reader_t>::~file_reader_t<snappy_reader_t>()
+file_reader_t<snappy_reader_t>::~file_reader_t()
 {
     // Empty.
 }
@@ -229,9 +229,6 @@ template <>
 trace_entry_t *
 file_reader_t<snappy_reader_t>::read_next_entry()
 {
-    trace_entry_t *from_queue = read_queued_entry();
-    if (from_queue != nullptr)
-        return from_queue;
     int len = input_file_.read(sizeof(entry_copy_), &entry_copy_);
     // Returns less than asked-for if at end of file, or –1 for error.
     if (len < (int)sizeof(entry_copy_)) {

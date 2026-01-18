@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2020-2023 Google, Inc.  All rights reserved.
+# Copyright (c) 2020-2025 Google, Inc.  All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -29,6 +29,10 @@
 # DAMAGE.
 
 # Github Actions workflow for RISCV64 Continuous Integration testing.
+#
+# Each test suite is a separate job. When adding a new test suite job,
+# remember to add it to the send-failure-notification job to ensure failure
+# notifications are set up properly.
 
 name: ci-riscv64
 on:
@@ -50,12 +54,13 @@ defaults:
 
 jobs:
   # RISCV64 cross-compile with gcc
-  # We use ubuntu 22.04 because the compilition here need python (3.10.x)
+  # We use ubuntu 24.04 because the compilition here need libunwind-riscv64 and
+  # it's a stable source.
   riscv64-cross-compile:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v4
       with:
         submodules: true
 
@@ -70,14 +75,16 @@ jobs:
     # Install cross-compiler for cross-compiling Linux build.
     # Unfortunately there are no libunwind or compression cross-compile
     # packages so we unpack the native versions and copy their files.
-    # Unfortunately, only kinetic (ubuntu 22.10) has linunwind-riscv64 packages.
-    # I prefer debian-ports here, it is more close to upstream.
     - name: Create Build Environment
       run: |
         sudo apt-get update
         sudo apt-get -y install doxygen vera++ cmake crossbuild-essential-riscv64 git  \
           qemu-user qemu-user-binfmt
-        sudo add-apt-repository 'deb [trusted=yes arch=riscv64] http://deb.debian.org/debian-ports sid main'
+        # We cannot use the following command here, because it will download the
+        # x86_64 binaries due to some known issue of DEB822.
+        # sudo add-apt-repository 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble main'
+        echo 'deb [arch=riscv64] http://ports.ubuntu.com/ubuntu-ports noble main' | sudo tee -a /etc/apt/sources.list
+        sudo apt-get update
         apt download libunwind8:riscv64 libunwind-dev:riscv64 liblzma5:riscv64 \
           zlib1g:riscv64 zlib1g-dev:riscv64 libsnappy1v5:riscv64 libsnappy-dev:riscv64 \
           liblz4-1:riscv64 liblz4-dev:riscv64
@@ -85,7 +92,13 @@ jobs:
         for i in *.deb; do dpkg-deb -x $i ../extract; done
         for i in include lib; do sudo rsync -av ../extract/usr/${i}/riscv64-linux-gnu/ /usr/riscv64-linux-gnu/${i}/; done
         sudo rsync -av ../extract/usr/include/ /usr/riscv64-linux-gnu/include/
-        sudo rsync -av ../extract/lib/riscv64-linux-gnu/ /usr/riscv64-linux-gnu/lib/
+        if test -e "../extract/lib/riscv64-linux-gnu/"; then \
+          sudo rsync -av ../extract/lib/riscv64-linux-gnu/ /usr/riscv64-linux-gnu/lib/; \
+        fi
+
+    - name: Check if format checks are disabled
+      id: are_format_checks_disabled
+      uses: ./.github/actions/are-format-checks-disabled
 
     - name: Run Suite
       working-directory: ${{ github.workspace }}
@@ -95,27 +108,17 @@ jobs:
         CI_TRIGGER: ${{ github.event_name }}
         CI_BRANCH: ${{ github.ref }}
         QEMU_LD_PREFIX: /usr/riscv64-linux-gnu/
+        DISABLE_FORMAT_CHECKS: ${{ steps.are_format_checks_disabled.outputs.disable_format_checks }}
 
-    - name: Send failure mail to dynamorio-devs
-      if: failure() && github.ref == 'refs/heads/master'
-      uses: dawidd6/action-send-mail@v2
+  send-failure-notification:
+      uses: ./.github/workflows/failure-notification.yml
+      needs: [riscv64-cross-compile]
+      # By default, a failure in a job skips the jobs that need it. The
+      # following expression ensures that failure-notification.yml is
+      # always invoked.
+      if: ${{ always() }}
       with:
-        server_address: smtp.gmail.com
-        server_port: 465
-        username: ${{secrets.DYNAMORIO_NOTIFICATION_EMAIL_USERNAME}}
-        password: ${{secrets.DYNAMORIO_NOTIFICATION_EMAIL_PASSWORD}}
-        subject: |
-          [${{github.repository}}] ${{github.workflow}} FAILED
-          on ${{github.event_name}} at ${{github.ref}}
-        body: |
-          Github Actions CI workflow run FAILED!
-          Workflow: ${{github.workflow}}/aarchxx-cross-compile
-          Repository: ${{github.repository}}
-          Branch ref: ${{github.ref}}
-          SHA: ${{github.sha}}
-          Triggering actor: ${{github.actor}}
-          Triggering event: ${{github.event_name}}
-          Run Id: ${{github.run_id}}
-          See more details on github.com/DynamoRIO/dynamorio/actions/runs/${{github.run_id}}
-        to: dynamorio-devs@googlegroups.com
-        from: Github Action CI
+        test_suite_status: ${{ format('{0} {1}',
+                                      'riscv64-cross-compile', needs.riscv64-cross-compile.result) }}
+        test_suite_results_only: ${{ join(needs.*.result, ',') }}
+      secrets: inherit

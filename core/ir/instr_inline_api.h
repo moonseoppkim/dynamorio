@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _DR_IR_INSTR_INLINE_H_
-#define _DR_IR_INSTR_INLINE_H_ 1
+#define _DR_IR_INSTR_INLINE_H_
 
 /**************************************************
  * INSTRUCTION ROUTINE INLINING SUPPORT
@@ -175,6 +175,13 @@ opnd_is_predicate_zero(opnd_t op)
     return opnd_is_predicate_reg(op) && ((op.aux.flags & DR_OPND_IS_ZERO_PREDICATE) != 0);
 }
 
+INSTR_INLINE
+bool
+opnd_is_governing(opnd_t op)
+{
+    return opnd_is_predicate_reg(op) && ((op.aux.flags & DR_OPND_IS_GOVERNING) != 0);
+}
+
 #    if defined(X64) || defined(ARM)
 #        ifdef X86
 #            define OPND_IS_REL_ADDR(op) ((op).kind == REL_ADDR_kind)
@@ -232,7 +239,7 @@ INSTR_INLINE
 bool
 opnd_is_far_rel_addr(opnd_t opnd)
 {
-    /* FIXME i#3544: Decide if this should differentiate between JAL and AUIPC+JALR. */
+    /* XXX i#3544: Decide if this should differentiate between JAL and AUIPC+JALR. */
     return false;
 }
 #        endif /* RISCV64 */
@@ -257,8 +264,8 @@ INSTR_INLINE
 opnd_t
 opnd_create_reg(reg_id_t r)
 {
-    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* FIXME: Needed until i#417 is fixed. */
-    CLIENT_ASSERT(r <= DR_REG_LAST_ENUM && r != DR_REG_INVALID,
+    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* XXX: Needed until i#417 is fixed. */
+    CLIENT_ASSERT(r < DR_REG_AFTER_LAST_VALID_ENUM && r != DR_REG_INVALID,
                   "opnd_create_reg: invalid register");
     opnd.kind = REG_kind;
     opnd.value.reg_and_element_size.reg = r;
@@ -270,9 +277,21 @@ opnd_create_reg(reg_id_t r)
 
 INSTR_INLINE
 opnd_t
+opnd_inc_reg(opnd_t opnd, int amount)
+{
+    opnd_t new_opnd = opnd;
+    reg_id_t r = (reg_id_t)(opnd.value.reg_and_element_size.reg + amount);
+    CLIENT_ASSERT(r < DR_REG_AFTER_LAST_VALID_ENUM && r != DR_REG_INVALID,
+                  "opnd_inc_reg: invalid register");
+    new_opnd.value.reg_and_element_size.reg = r;
+    return new_opnd;
+}
+
+INSTR_INLINE
+opnd_t
 opnd_create_reg_partial(reg_id_t r, opnd_size_t subsize)
 {
-    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* FIXME: Needed until i#417 is fixed. */
+    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* XXX: Needed until i#417 is fixed. */
 #    ifdef X86
     CLIENT_ASSERT(subsize == 0 || (r >= DR_REG_MM0 && r <= DR_REG_XMM31) ||
                       (r >= DR_REG_YMM0 && r <= DR_REG_ZMM31),
@@ -290,10 +309,12 @@ INSTR_INLINE
 opnd_t
 opnd_create_reg_element_vector(reg_id_t r, opnd_size_t element_size)
 {
-    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* FIXME: Needed until i#417 is fixed. */
-    CLIENT_ASSERT(element_size == 0 || (r <= DR_REG_LAST_ENUM && r != DR_REG_INVALID),
+    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* XXX: Needed until i#417 is fixed. */
+    CLIENT_ASSERT(element_size != OPSZ_NA &&
+                      (r < DR_REG_AFTER_LAST_VALID_ENUM && r != DR_REG_INVALID),
                   "opnd_create_reg_element_vector: invalid register or no size");
     opnd.kind = REG_kind;
+    opnd.size = 0; /* indicates full size of reg */
     opnd.value.reg_and_element_size.reg = r;
     opnd.value.reg_and_element_size.element_size = element_size;
     opnd.aux.flags = DR_OPND_IS_VECTOR;
@@ -305,12 +326,14 @@ INSTR_INLINE
 opnd_t
 opnd_create_predicate_reg(reg_id_t r, bool is_merge)
 {
-    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* FIXME: Needed until i#417 is fixed. */
+    opnd_t opnd DR_IF_DEBUG(= { 0 }); /* XXX: Needed until i#417 is fixed. */
     CLIENT_ASSERT(r >= DR_REG_P0 && r <= DR_REG_P15,
                   "opnd_create_predicate_reg: invalid predicate register");
 
     opnd.kind = REG_kind;
+    opnd.size = 0; /* indicates full size of reg */
     opnd.value.reg_and_element_size.reg = r;
+    opnd.value.reg_and_element_size.element_size = OPSZ_NA;
     opnd.aux.flags =
         (ushort)(is_merge ? DR_OPND_IS_MERGE_PREDICATE : DR_OPND_IS_ZERO_PREDICATE);
     return opnd;
@@ -473,7 +496,7 @@ instr_num_dsts(instr_t *instr)
 }
 
 /* src0 is static, rest are dynamic. */
-/* FIXME: Double evaluation. */
+/* XXX: Double evaluation. */
 #    define INSTR_GET_SRC(instr, pos)                        \
         (MAKE_OPNDS_VALID(instr),                            \
          CLIENT_ASSERT_(pos >= 0 && pos < (instr)->num_srcs, \

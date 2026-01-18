@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2001-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -50,6 +50,7 @@
 #include "configure.h"
 #include "globals_shared.h"
 #include "../config.h"
+#include "os_public.h"
 #include <stdio.h>
 /* for getpid */
 #include <unistd.h>
@@ -68,7 +69,7 @@
 #    ifdef VMX86_SERVER
 /* This function is not statically linked so as avoid duplicating or compiling
  * DR code into libdrpreload.so, which is messy.  As libdynamorio.so is
- * already loaded into the process and avaiable, it is cleaner to just use
+ * already loaded into the process and available, it is cleaner to just use
  * functions from it, i.e., dynamic linking.  See PR 212034.
  */
 void
@@ -124,12 +125,12 @@ take_over(const char *pname)
         !rununder_on)
         return false;
 
-    /* FIXME PR 546894: eliminate once all users are updated to use config files */
+    /* XXX PR 546894: eliminate once all users are updated to use config files */
     plist = getenv("DYNAMORIO_INCLUDE");
     if (plist != NULL)
         return strstr(plist, pname) ? true : false;
 
-    /* FIXME PR 546894: eliminate once all users are updated to use config files */
+    /* XXX PR 546894: eliminate once all users are updated to use config files */
     plist = getenv("DYNAMORIO_EXCLUDE");
     if (plist != NULL)
         return strstr(plist, pname) ? false : true;
@@ -137,14 +138,27 @@ take_over(const char *pname)
     return true;
 }
 
-int
-#if INIT_BEFORE_LIBC
+INITIALIZER_ATTRIBUTES int
+/* i#1973: Unlike glibc, musl calls constructors without any arguments, thus
+ * it's hard to retrieve envp without depending on any libc symbols.
+ * Retrieve it from stable ABI envrion, which is a simple bare pointer on musl.
+ * XXX: find a more portable way to retrieve environment variables, or detect
+ * libc type and choose the proper method at runtime.
+ */
+#ifdef MUSL
+_init(void)
+{
+    extern char **environ;
+    char **envp = environ;
+#else
+#    if INIT_BEFORE_LIBC
 _init(int argc, char *arg0, ...)
 {
     char **argv = &arg0, **envp = &argv[argc + 1];
-#else
+#    else
 _init(int argc, char **argv, char **envp)
 {
+#    endif
 #endif
     const char *name;
 #if VERBOSE_INIT_FINI
@@ -156,9 +170,11 @@ _init(int argc, char **argv, char **envp)
 
 #if VERBOSE
     {
+#    ifndef MUSL
         int i;
         for (i = 0; i < argc; i++)
             fprintf(stderr, "\targ %d = %s\n", i, argv[i]);
+#    endif
         fprintf(stderr, "env 0 is %s\n", envp[0]);
         fprintf(stderr, "env 1 is %s\n", envp[1]);
         fprintf(stderr, "env 2 is %s\n", envp[2]);
@@ -173,7 +189,7 @@ _init(int argc, char **argv, char **envp)
         return 0;
     /* i#46: Get env from loader directly. */
     dynamorio_set_envp(envp);
-    /* FIXME i#287/PR 546544: now load DYNAMORIO_AUTOINJECT DR .so
+    /* XXX i#287/PR 546544: now load DYNAMORIO_AUTOINJECT DR .so
      * and only LD_PRELOAD the preload lib itself
      */
 #    if VERBOSE

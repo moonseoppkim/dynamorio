@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2005-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -56,7 +56,7 @@ pthread_jit_write_protect_np(int enabled);
 
 #    ifdef WINDOWS
 /* returns 0 on failure */
-/* FIXME - share with core get_os_version() */
+/* XXX - share with core get_os_version() */
 int
 get_windows_version(void)
 {
@@ -74,7 +74,7 @@ get_windows_version(void)
     res = RtlGetVersion(&version);
     assert(NT_SUCCESS(res));
     if (version.dwPlatformId == VER_PLATFORM_WIN32_NT) {
-        /* WinNT or descendents */
+        /* WinNT or descendants */
         if (version.dwMajorVersion == 10 && version.dwMinorVersion == 0) {
             if (GetProcAddress((HMODULE)ntdll_handle, "NtAllocateVirtualMemoryEx") !=
                 NULL)
@@ -111,7 +111,7 @@ get_windows_version(void)
     return 0;
 }
 
-/* FIXME: share w/ libutil is_wow64() */
+/* XXX: share w/ libutil is_wow64() */
 bool
 is_wow64(HANDLE hProcess)
 {
@@ -233,7 +233,7 @@ void
 protect_mem_check(void *start, size_t len, int prot, int expected)
 {
 #    ifdef UNIX
-    /* FIXME : add check */
+    /* XXX : add check */
     protect_mem(start, len, prot);
 #    else
     DWORD old;
@@ -274,7 +274,7 @@ reserve_memory(int size)
 #    define VENDOR_AMD 1
 #    define VENDOR_UNKNOWN 2
 
-/* Pentium IV -- FIXME: need to distinguish extended family bits? */
+/* Pentium IV -- XXX: need to distinguish extended family bits? */
 #    define FAMILY_PENTIUM_IV 15
 /* Pentium Pro, Pentium II, Pentium III, Athlon */
 #    define FAMILY_PENTIUM_III 6
@@ -297,7 +297,7 @@ print(const char *fmt, ...)
 #    ifdef UNIX
 
 /***************************************************************************/
-/* a hopefuly portable /proc/@self/maps reader */
+/* A hopefully portable /proc/@self/maps reader. */
 
 /* these are defined in /usr/src/linux/fs/proc/array.c */
 #        define MAPS_LINE_LENGTH 4096
@@ -378,13 +378,7 @@ nolibc_print(const char *str)
 #        else
         SYS_write,
 #        endif
-        3,
-#        if defined(MACOS) || defined(ANDROID)
-        stderr->_file,
-#        else
-        stderr->_fileno,
-#        endif
-        str, nolibc_strlen(str));
+        3, STDERR_FILENO, str, nolibc_strlen(str));
 }
 
 /* Safe print int syscall.
@@ -497,7 +491,204 @@ intercept_signal(int sig, handler_3_t handler, bool sigstack)
     ASSERT_NOERR(rc);
 }
 
+/* Set a signal mask and then immediately check that the current signal mask
+ * matches what we set, with considerations for special cases e.g. Android.
+ */
+void
+set_check_signal_mask(sigset_t *mask, sigset_t *returned_mask)
+{
+    int rc;
+    rc = sigprocmask(SIG_SETMASK, mask, NULL);
+    ASSERT_NOERR(rc);
+    rc = sigprocmask(SIG_BLOCK, NULL, returned_mask);
+    ASSERT_NOERR(rc);
+#        ifdef ANDROID64
+    /* 64-bit Android always sets the 32nd bit of the signal mask, defined as
+     * __SIGRTMIN in the NDK. This occurs whether running under DR or not.
+     * If this bit is not also set for our mask then the assert will fail.
+     * i#7215: This may also be needed for newer versions of 32-bit Android,
+     * however we are not able to test newer versions of 32-bit Android, so
+     * cannot be sure.
+     */
+    sigaddset(mask, __SIGRTMIN);
+#        endif
+    /* Check that the mask we just set is the same as the one currently in use.
+     */
+    assert(memcmp(mask, returned_mask, sizeof(*mask)) == 0);
+}
+
+#        ifdef AARCH64
+#            ifdef DR_HOST_NOT_TARGET
+#                define RESERVED __reserved1
+#            else
+#                define RESERVED __reserved
+#            endif
+void
+dump_ucontext(ucontext_t *ucxt, bool is_sve, int vl_bytes)
+{
+#            ifdef MACOS
+    assert(false); /* NYI */
+#            else
+    struct _aarch64_ctx *head = (struct _aarch64_ctx *)(ucxt->uc_mcontext.RESERVED);
+    assert(head->magic == FPSIMD_MAGIC);
+    assert(head->size == sizeof(struct fpsimd_context));
+
+    struct fpsimd_context *fpsimd = (struct fpsimd_context *)(ucxt->uc_mcontext.RESERVED);
+    print("\nfpsr 0x%x\n", fpsimd->fpsr);
+    print("fpcr 0x%x\n", fpsimd->fpcr);
+    reinterpret128_2x64_t vreg;
+    int i;
+    for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+        vreg.as_128 = fpsimd->vregs[i];
+        print("q%-2d  0x%016lx %016lx\n", i, vreg.as_2x64.hi, vreg.as_2x64.lo);
+    }
+    print("\n");
+
+#                ifndef DR_HOST_NOT_TARGET
+    if (is_sve) {
+        size_t offset = sizeof(struct fpsimd_context);
+        struct _aarch64_ctx *next_head =
+            (struct _aarch64_ctx *)(ucxt->uc_mcontext.RESERVED + offset);
+        while (next_head->magic != 0) {
+            switch (next_head->magic) {
+            case ESR_MAGIC: offset += sizeof(struct esr_context); break;
+            case EXTRA_MAGIC: offset += sizeof(struct extra_context); break;
+            case SVE_MAGIC: {
+                const struct sve_context *sve = (struct sve_context *)(next_head);
+                assert(sve->vl == vl_bytes);
+                const unsigned int vq = sve_vq_from_vl(sve->vl);
+                if (sve->head.size != sizeof(struct sve_context))
+                    assert(sve->head.size == ALIGN_FORWARD(SVE_SIG_CONTEXT_SIZE(vq), 16));
+
+                dr_simd_t z;
+                int boff; /* Byte offset for each doubleword in a vector. */
+                for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+                    print("z%-2d  0x", i);
+                    for (boff = ((vq * 2) - 1); boff >= 0; boff--) {
+                        /* We access data in the scalable vector using the
+                         * kernel's SVE_SIG_ZREG_OFFSET macro which gives the
+                         * byte offset into a vector based on units of 128 bits
+                         * (quadwords). In this loop we offset from the start
+                         * of struct sve_context. We print the data as 64 bit
+                         * ints, so 2 per quadword.
+                         *
+                         * For example, for a 256 bit vector (2 quadwords, 4
+                         * doublewords), the byte offset (boff) for each
+                         * scalable vector register is:
+                         * boff=3  vdw=sve+SVE_SIG_ZREG_OFFSET+24
+                         * boff=2  vdw=sve+SVE_SIG_ZREG_OFFSET+16
+                         * boff=1  vdw=sve+SVE_SIG_ZREG_OFFSET+8
+                         * boff=0  vdw=sve+SVE_SIG_ZREG_OFFSET
+                         *
+                         * Note that at present we support little endian only.
+                         * All major Linux arm64 kernel distributions are
+                         * little-endian.
+                         */
+                        z.u64[boff] = *((uint64 *)((
+                            ((byte *)sve) + (SVE_SIG_ZREG_OFFSET(vq, i)) + (boff * 8))));
+                        print("%016lx ", z.u64[boff]);
+                    }
+                    print("\n");
+                }
+
+                print("\n");
+                /* We access data in predicate and first-fault registers using
+                 * the kernel's SVE_SIG_PREG_OFFSET and SVE_SIG_FFR_OFFSET
+                 * macros. SVE predicate and FFR registers are an 1/8th the
+                 * size of SVE vector registers (1 bit per byte) and are printed
+                 * as 32 bit ints.
+                 */
+                dr_simd_t p;
+                for (i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
+                    p.u32[i] = *((uint32 *)((byte *)sve + SVE_SIG_PREG_OFFSET(vq, i)));
+                    print("p%-2d  0x%08lx\n", i, p.u32[i]);
+                }
+                print("\n");
+                print("FFR  0x%08lx\n\n",
+                      *((uint32 *)((byte *)sve + SVE_SIG_FFR_OFFSET(vq))));
+
+                if (sve->head.size == sizeof(struct sve_context))
+                    offset += sizeof(struct sve_context);
+                else
+                    // VL / 8  x Zn  + ((( VL / 8  / 8) x Pn) + FFR)
+                    offset += sizeof(struct sve_context) +
+                        (vl_bytes * MCXT_NUM_SIMD_SVE_SLOTS) +
+                        ((vl_bytes / 8) * MCXT_NUM_SVEP_SLOTS) + 16;
+                break;
+            }
+            default:
+                print("%s %d Unhandled section with magic number 0x%x", __func__,
+                      __LINE__, next_head->magic);
+                assert(0);
+            }
+            next_head = (struct _aarch64_ctx *)(ucxt->uc_mcontext.RESERVED + offset);
+        }
+    }
+#                endif
+#            endif
+}
+#        endif
+
 #    endif /* UNIX */
+
+int
+adaptive_retry(bool (*run)(int *adjust, unsigned long long param, void *arg), int tries,
+               unsigned long long param, void *arg, bool stop_on_hit)
+{
+    int hits = 0;
+    /* Typically we halve the step each time, which results in a
+     * binary search, but if we have had the same non-zero result
+     * several times in succession then we suspect that something has
+     * changed so we start doubling the step instead.
+     */
+    unsigned long long step = 1; /* This will always be a power of two. */
+    int max_unchanged_results = 4;
+    /* Initialise unchanged_results so that we immediately start doubling. */
+    int unchanged_results = max_unchanged_results - 1;
+    int previous_result = 0;
+    for (int i = 0; i < tries; i++) {
+        /* Call run. */
+        int adjust = 0;
+        bool hit = run(&adjust, param, arg);
+
+        /* Handle hit. */
+        if (hit) {
+            ++hits;
+            if (stop_on_hit)
+                break;
+        }
+
+        /* Convert result. */
+        int result = adjust < 0 ? -1 : adjust > 0 ? 1 : 0;
+
+        /* Update unchanged_results. */
+        if (result && (i == 0 || result == previous_result))
+            ++unchanged_results;
+        else
+            unchanged_results = 0;
+        previous_result = result;
+
+        /* Update step. */
+        if (unchanged_results <= max_unchanged_results)
+            step = step / 2 > 0 ? step / 2 : step;
+        else
+            step = step * 2 > 0 ? step * 2 : step;
+
+        /* Adjust param for next try. */
+        if (result < 0) {
+            param = param + step > param ? param + step : -1;
+        } else if (result > 0) {
+            if (param > step)
+                param = param - step;
+            else {
+                param = 1;
+                step = 1;
+            }
+        }
+    }
+
+    return hits;
+}
 
 #else /* asm code *************************************************************/
 /*
@@ -697,8 +888,9 @@ GLOBAL_LABEL(FUNCNAME:)
         mov      x0, x30             /* Replace first argument with return address. */
         br       x9                  /* Tailcall to function pointer. */
 #elif defined(RISCV64)
-        /* TODO i#3544: Port tests to RISC-V64 */
-        ret
+        mv       t0, a0              /* Move function pointer to scratch register. */
+        mv       a0, ra              /* Replace first argument with return address. */
+        jr       t0                  /* Tailcall to function pointer. */
 #else
 # error NYI
 #endif

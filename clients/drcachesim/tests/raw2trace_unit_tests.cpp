@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2021-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2021-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,8 +34,10 @@
 
 #include "dr_api.h"
 #include "memref_gen.h"
+#include "mock_reader.h"
 #include "tracer/raw2trace.h"
 #include "tracer/raw2trace_directory.h"
+#include "test_helpers.h"
 #include <iostream>
 #include <sstream>
 
@@ -106,7 +108,27 @@ public:
                       drcontext,
                       // The sequences are small so we print everything for easier
                       // debugging and viewing of what's going on.
-                      4)
+                      /*verbosity=*/4)
+    {
+        module_mapper_ = std::unique_ptr<module_mapper_t>(
+            new test_module_mapper_t(&instrs, drcontext));
+        set_modmap_(module_mapper_.get());
+    }
+    raw2trace_test_t(const std::vector<std::istream *> &input,
+                     const std::vector<std::ostream *> &output, instrlist_t &instrs,
+                     void *drcontext,
+                     std::unique_ptr<record_reader_t> syscall_template_file)
+        : raw2trace_t(nullptr, input, output, {}, INVALID_FILE, nullptr, nullptr,
+                      drcontext,
+                      // The sequences are small so we print everything for easier
+                      // debugging and viewing of what's going on.
+                      /*verbosity=*/4,
+                      // Reusing the default values, as we need to set the
+                      // syscall_template_file arg later.
+                      /*worker_count=*/-1, /*alt_module_dir=*/"",
+                      /*chunk_instr_count=*/10 * 1000 * 1000,
+                      /*kthread_files_map=*/ {}, /*kcore_path=*/ {},
+                      /*kallsyms_path=*/ {}, std::move(syscall_template_file))
     {
         module_mapper_ = std::unique_ptr<module_mapper_t>(
             new test_module_mapper_t(&instrs, drcontext));
@@ -119,7 +141,8 @@ public:
                       drcontext,
                       // The sequences are small so we print everything for easier
                       // debugging and viewing of what's going on.
-                      4, /*worker_count=*/-1, /*alt_module_dir=*/"", chunk_instr_count)
+                      /*verbosity=*/4, /*worker_count=*/-1, /*alt_module_dir=*/"",
+                      chunk_instr_count)
     {
         module_mapper_ = std::unique_ptr<module_mapper_t>(
             new test_module_mapper_t(&instrs, drcontext));
@@ -138,6 +161,13 @@ public:
         module_mapper_ =
             std::unique_ptr<module_mapper_t>(new test_multi_module_mapper_t(modules));
         set_modmap_(module_mapper_.get());
+    }
+    // The public function to access the raw2trace_t protected function
+    // is_maybe_blocking_syscall.
+    bool
+    is_maybe_blocking_syscall(uintptr_t number) override
+    {
+        return raw2trace_t::is_maybe_blocking_syscall(number);
     }
 };
 
@@ -162,13 +192,13 @@ public:
 };
 
 offline_entry_t
-make_header(int version = OFFLINE_FILE_VERSION)
+make_header(int version = OFFLINE_FILE_VERSION, uint64_t additional_file_types = 0)
 {
     offline_entry_t entry;
     entry.extended.type = OFFLINE_TYPE_EXTENDED;
     entry.extended.ext = OFFLINE_EXT_TYPE_HEADER;
     entry.extended.valueA = OFFLINE_FILE_TYPE_DEFAULT | OFFLINE_FILE_TYPE_ENCODINGS |
-        OFFLINE_FILE_TYPE_SYSCALL_NUMBERS;
+        OFFLINE_FILE_TYPE_SYSCALL_NUMBERS | additional_file_types;
     entry.extended.valueB = version;
     return entry;
 }
@@ -183,11 +213,11 @@ make_pid()
 }
 
 offline_entry_t
-make_tid()
+make_tid(memref_tid_t tid = 1)
 {
     offline_entry_t entry;
     entry.tid.type = OFFLINE_TYPE_THREAD;
-    entry.tid.tid = 1;
+    entry.tid.tid = tid;
     return entry;
 }
 
@@ -281,7 +311,7 @@ check_entry(std::vector<trace_entry_t> &entries, int &idx, unsigned short expect
             int expected_size, addr_t expected_addr = 0)
 {
     if (expected_type != entries[idx].type ||
-        (expected_size > 0 &&
+        (expected_size >= 0 &&
          static_cast<unsigned short>(expected_size) != entries[idx].size) ||
         (expected_addr > 0 && expected_addr != entries[idx].addr)) {
         std::cerr << "Entry " << idx << " has type " << entries[idx].type << " and size "
@@ -294,11 +324,24 @@ check_entry(std::vector<trace_entry_t> &entries, int &idx, unsigned short expect
     return true;
 }
 
+void
+populate_all_stats(raw2trace_test_t &raw2trace, std::vector<uint64_t> *stats)
+{
+    if (stats == nullptr)
+        return;
+    for (int i = 0; i < RAW2TRACE_STAT_MAX; ++i) {
+        stats->push_back(raw2trace.get_statistic(
+            static_cast<dynamorio::drmemtrace::raw2trace_statistic_t>(i)));
+    }
+}
+
 // Takes ownership of ilist and destroys it.
 bool
 run_raw2trace(void *drcontext, const std::vector<offline_entry_t> raw, instrlist_t *ilist,
-              std::vector<trace_entry_t> &entries, int chunk_instr_count = 0,
-              const std::vector<test_multi_module_mapper_t::bounds_t> &modules = {})
+              std::vector<trace_entry_t> &entries, std::vector<uint64_t> *stats = nullptr,
+              int chunk_instr_count = 0,
+              const std::vector<test_multi_module_mapper_t::bounds_t> &modules = {},
+              std::unique_ptr<record_reader_t> syscall_tmpl = nullptr)
 {
     // We need an istream so we use istringstream.
     std::ostringstream raw_out;
@@ -325,6 +368,21 @@ run_raw2trace(void *drcontext, const std::vector<offline_entry_t> raw, instrlist
         std::string error = raw2trace.do_conversion();
         CHECK(error.empty(), error);
         result = result_stream.str();
+        populate_all_stats(raw2trace, stats);
+    } else if (syscall_tmpl != nullptr) {
+        // We need an ostream to capture out.
+        std::ostringstream result_stream;
+        std::vector<std::ostream *> output;
+        output.push_back(&result_stream);
+
+        CHECK(syscall_tmpl->init(), "Failed to init syscall tmpl reader");
+        // Run raw2trace with our subclass supplying module bounds.
+        raw2trace_test_t raw2trace(input, output, *ilist, drcontext,
+                                   std::move(syscall_tmpl));
+        std::string error = raw2trace.do_conversion();
+        CHECK(error.empty(), error);
+        result = result_stream.str();
+        populate_all_stats(raw2trace, stats);
     } else if (modules.empty()) {
         // We need an ostream to capture out.
         std::ostringstream result_stream;
@@ -336,6 +394,7 @@ run_raw2trace(void *drcontext, const std::vector<offline_entry_t> raw, instrlist
         std::string error = raw2trace.do_conversion();
         CHECK(error.empty(), error);
         result = result_stream.str();
+        populate_all_stats(raw2trace, stats);
     } else {
         // We need an ostream to capture out.
         std::ostringstream result_stream;
@@ -347,6 +406,7 @@ run_raw2trace(void *drcontext, const std::vector<offline_entry_t> raw, instrlist
         std::string error = raw2trace.do_conversion();
         CHECK(error.empty(), error);
         result = result_stream.str();
+        populate_all_stats(raw2trace, stats);
     }
     if (ilist != nullptr)
         instrlist_clear_and_destroy(drcontext, ilist);
@@ -382,15 +442,27 @@ test_branch_delays(void *drcontext)
         XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
     instr_t *jmp = XINST_CREATE_jump(drcontext, opnd_create_instr(move));
     instr_t *jcc = XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(jmp));
+    instr_t *jump_reg = XINST_CREATE_jump_reg(drcontext, opnd_create_reg(REG1));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
     instrlist_append(ilist, nop);
     instrlist_append(ilist, jcc);
     instrlist_append(ilist, jmp);
     instrlist_append(ilist, move);
+    instrlist_append(ilist, jump_reg);
+    instrlist_append(ilist, move2);
     size_t offs_nop = 0;
     size_t offs_jz = offs_nop + instr_length(drcontext, nop);
     size_t offs_jmp = offs_jz + instr_length(drcontext, jcc);
     size_t offs_mov = offs_jmp + instr_length(drcontext, jmp);
+    size_t offs_jump_reg = offs_mov + instr_length(drcontext, move);
+    size_t offs_mov2 = offs_jump_reg + instr_length(drcontext, jump_reg);
 
+#ifdef X64
+    constexpr uint64_t kernel_event_value = 0x9abc12345678;
+#else
+    constexpr uint32_t kernel_event_value = 0x12345678;
+#endif
     // Now we synthesize our raw trace itself, including a valid header sequence.
     std::vector<offline_entry_t> raw;
     raw.push_back(make_header());
@@ -402,6 +474,13 @@ test_branch_delays(void *drcontext)
     raw.push_back(make_core());
     raw.push_back(make_block(offs_jmp, 1));
     raw.push_back(make_block(offs_mov, 1));
+    raw.push_back(make_block(offs_jump_reg, 1));
+#ifdef X64
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SPLIT_VALUE, (kernel_event_value >> 32)));
+#endif
+    raw.push_back(
+        make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, (kernel_event_value & 0xffffffff)));
+    raw.push_back(make_block(offs_mov2, 1));
     raw.push_back(make_exit());
 
     std::vector<trace_entry_t> entries;
@@ -432,6 +511,23 @@ test_branch_delays(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
 #endif
         check_entry(entries, idx, TRACE_TYPE_INSTR_DIRECT_JUMP, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X64
+        // TODO i#7470: This is a bug. When looking for the kernel_event marker,
+        // raw2trace doesn't look for the ones preceded by the split_value marker
+        // because the address was too large for a single marker. Some other marker
+        // related logic also needs to expect the split_value marker.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_mov2) &&
+#else
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    kernel_event_value) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT,
+                    kernel_event_value) &&
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
         check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
@@ -678,8 +774,9 @@ test_chunk_boundaries(void *drcontext)
         XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
     instr_t *jmp2 = XINST_CREATE_jump(drcontext, opnd_create_instr(move2));
     instr_t *jmp1 = XINST_CREATE_jump(drcontext, opnd_create_instr(jmp2));
-    instr_t *move3 =
-        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *ret1 = XINST_CREATE_return(drcontext);
+    instr_t *jcc1 =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(ret1));
     instrlist_append(ilist, nop);
     // Block 1.
     instrlist_append(ilist, move1);
@@ -688,13 +785,16 @@ test_chunk_boundaries(void *drcontext)
     instrlist_append(ilist, jmp2);
     // Block 3.
     instrlist_append(ilist, move2);
-    instrlist_append(ilist, move3);
+    instrlist_append(ilist, ret1);
+    instrlist_append(ilist, jcc1);
 
     size_t offs_nop = 0;
     size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
     size_t offs_jmp1 = offs_move1 + instr_length(drcontext, move1);
     size_t offs_jmp2 = offs_jmp1 + instr_length(drcontext, jmp1);
     size_t offs_move2 = offs_jmp2 + instr_length(drcontext, jmp2);
+    size_t offs_ret1 = offs_move2 + instr_length(drcontext, move2);
+    size_t offs_jcc1 = offs_ret1 + instr_length(drcontext, ret1);
 
     // Now we synthesize our raw trace itself, including a valid header sequence.
     std::vector<offline_entry_t> raw;
@@ -707,13 +807,16 @@ test_chunk_boundaries(void *drcontext)
     raw.push_back(make_block(offs_move1, 2));
     raw.push_back(make_block(offs_jmp2, 1));
     raw.push_back(make_block(offs_move2, 2));
+    raw.push_back(make_block(offs_jcc1, 1));
+    raw.push_back(make_block(offs_ret1, 1));
+    raw.push_back(make_block(offs_move1, 1));
     // TODO i#5724: Add repeats of the same instrs to test re-emitting encodings
     // in new chunks.
     raw.push_back(make_exit());
 
     std::vector<trace_entry_t> entries;
     // Use a chunk instr count of 2 to split the 2 jumps.
-    if (!run_raw2trace(drcontext, raw, ilist, entries, 2))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, /*stats=*/nullptr, 2))
         return false;
     int idx = 0;
     return (
@@ -757,7 +860,36 @@ test_chunk_boundaries(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_RETURN, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        // Block 4
+        check_entry(entries, idx, TRACE_TYPE_INSTR_TAKEN_JUMP, -1) &&
+        // Third chunk split: Ensure the branch_target marker for the return
+        // instr does not get abandoned in the prior chunk. This was seen to happen in
+        // i#7574 when a return instr at the beginning of a new chunk is written as part
+        // of a sequence of delayed branches that happened to cross chunk boundary, and
+        // also had an occurence in the prior chunk so there was no encoding entry before
+        // it initially (but was added later by raw2trace).
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CHUNK_FOOTER) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RECORD_ORDINAL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        // Block 5.
+        check_entry(entries, idx, TRACE_TYPE_INSTR_RETURN, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        // Block 6.
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CHUNK_FOOTER) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RECORD_ORDINAL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
         check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
         check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
 }
@@ -771,26 +903,43 @@ test_chunk_encodings(void *drcontext)
     instr_t *nop = XINST_CREATE_nop(drcontext);
     // Test i#5724 where a chunk boundary between consecutive branches results
     // in a missing encoding entry.
+    // Also test i#6303 where a delayed indirect branch with tagalong encoding has its
+    // encoding repeated, causing a reader assert as it accumulates the duplicate.
     instr_t *move1 =
         XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
     instr_t *move2 =
         XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
-    instr_t *jmp2 = XINST_CREATE_jump(drcontext, opnd_create_instr(move2));
-    instr_t *jmp1 = XINST_CREATE_jump(drcontext, opnd_create_instr(jmp2));
+    instr_t *jmp_move2 = XINST_CREATE_jump(drcontext, opnd_create_instr(move2));
+    instr_t *jmp_jmp = XINST_CREATE_jump(drcontext, opnd_create_instr(jmp_move2));
+    instr_t *nop_start = XINST_CREATE_nop(drcontext);
+    instr_t *jcc_move1 =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(move1));
+    instr_t *ret = XINST_CREATE_return(drcontext);
     instrlist_append(ilist, nop);
     // Block 1.
     instrlist_append(ilist, move1);
-    instrlist_append(ilist, jmp1);
+    instrlist_append(ilist, jmp_jmp);
     // Block 2.
-    instrlist_append(ilist, jmp2);
+    instrlist_append(ilist, jmp_move2);
     // Block 3.
     instrlist_append(ilist, move2);
+    // Block 4.
+    instrlist_append(ilist, nop_start);
+    instrlist_append(ilist, XINST_CREATE_nop(drcontext));
+    instrlist_append(ilist, XINST_CREATE_nop(drcontext));
+    // i#6303 needs a direct branch before an indirect branch.
+    instrlist_append(ilist, jcc_move1);
+    // We should have a chunk boundary here.
+    instrlist_append(ilist, ret);
 
     size_t offs_nop = 0;
     size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
-    size_t offs_jmp1 = offs_move1 + instr_length(drcontext, move1);
-    size_t offs_jmp2 = offs_jmp1 + instr_length(drcontext, jmp1);
-    size_t offs_move2 = offs_jmp2 + instr_length(drcontext, jmp2);
+    size_t offs_jmp_jmp = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_jmp_move2 = offs_jmp_jmp + instr_length(drcontext, jmp_jmp);
+    size_t offs_move2 = offs_jmp_move2 + instr_length(drcontext, jmp_move2);
+    size_t offs_nop_start = offs_move2 + instr_length(drcontext, move2);
+    size_t offs_jcc_move1 = offs_nop_start + 3 * instr_length(drcontext, nop_start);
+    size_t offs_ret = offs_jcc_move1 + instr_length(drcontext, jcc_move1);
 
     // Now we synthesize our raw trace itself, including a valid header sequence.
     std::vector<offline_entry_t> raw;
@@ -801,17 +950,25 @@ test_chunk_encodings(void *drcontext)
     raw.push_back(make_timestamp());
     raw.push_back(make_core());
     raw.push_back(make_block(offs_move1, 2));
-    raw.push_back(make_block(offs_jmp2, 1));
+    raw.push_back(make_block(offs_jmp_move2, 1));
     raw.push_back(make_block(offs_move2, 1));
     // Repeat the jmp,jmp to test re-emitting encodings in new chunks.
     raw.push_back(make_block(offs_move1, 2));
-    raw.push_back(make_block(offs_jmp2, 1));
+    raw.push_back(make_block(offs_jmp_move2, 1));
+    raw.push_back(make_block(offs_move2, 1));
+    // Add a final chunk boundary right between a branch;ret pair.
+    raw.push_back(make_block(offs_nop_start, 4));
+    raw.push_back(make_block(offs_ret, 1));
+    // Test that we don't get another encoding for a 2nd instance of the ret
+    // (yes, nonsensical having the ret target itself: that's ok).
+    raw.push_back(make_block(offs_ret, 1));
+    // Re-use move2 for the target of the 2nd ret to it isn't truncated.
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
     std::vector<trace_entry_t> entries;
     // Use a chunk instr count of 6 to split the 2nd set of 2 jumps.
-    if (!run_raw2trace(drcontext, raw, ilist, entries, 6))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, /*stats=*/nullptr, 6))
         return false;
     int idx = 0;
     return (
@@ -863,6 +1020,34 @@ test_chunk_encodings(void *drcontext)
         // Block 3.
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        // Block 4.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_nop_start) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        // The jcc_move1 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1, offs_jcc_move1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CHUNK_FOOTER) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RECORD_ORDINAL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // There should be just one encoding, before the branch target (i#6303).
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_RETURN, -1, offs_ret) &&
+        // There should be no encoding before the 2nd instance.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_RETURN, -1, offs_ret) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        // Footer.
         check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
         check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
 }
@@ -888,6 +1073,11 @@ test_duplicate_syscalls(void *drcontext)
     instr_t *sys = INSTR_CREATE_ecall(drcontext);
 #else
 #    error Unsupported architecture.
+#endif
+#ifdef X86_32
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR_SYSENTER;
+#else
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR;
 #endif
     instr_t *move2 =
         XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
@@ -926,11 +1116,13 @@ test_duplicate_syscalls(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_DUPLICATE_SYSCALL] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -946,7 +1138,7 @@ test_duplicate_syscalls(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
         // The sys instr.
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
-        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, expected_syscall_instr_type, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
                     SYSCALL_NUM) &&
         // Prev block ends.
@@ -966,6 +1158,10 @@ test_duplicate_syscalls(void *drcontext)
 bool
 test_false_syscalls(void *drcontext)
 {
+#if defined(WINDOWS) && !defined(X64)
+    // We do not omit false syscalls for WOW64 today.
+    return true;
+#else
     std::cerr << "\n===============\nTesting false syscalls\n";
     // Our synthetic test first constructs a list of instructions to be encoded into
     // a buffer for decoding by raw2trace.
@@ -976,15 +1172,20 @@ test_false_syscalls(void *drcontext)
         XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
     // XXX: Adding an XINST_CREATE_syscall macro will simplify this but there are
     // complexities (xref create_syscall_instr()).
-#ifdef X86
+#    ifdef X86
     instr_t *sys = INSTR_CREATE_syscall(drcontext);
-#elif defined(AARCHXX)
+#    elif defined(AARCHXX)
     instr_t *sys = INSTR_CREATE_svc(drcontext, opnd_create_immed_int((sbyte)0x0, OPSZ_1));
-#elif defined(RISCV64)
+#    elif defined(RISCV64)
     instr_t *sys = INSTR_CREATE_ecall(drcontext);
-#else
-#    error Unsupported architecture.
-#endif
+#    else
+#        error Unsupported architecture.
+#    endif
+#    ifdef X86_32
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR_SYSENTER;
+#    else
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR;
+#    endif
     instr_t *move2 =
         XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
     instrlist_append(ilist, nop);
@@ -1023,11 +1224,13 @@ test_false_syscalls(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_FALSE_SYSCALL] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1046,13 +1249,13 @@ test_false_syscalls(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
         // A sys instr that was not removed.
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
-        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, expected_syscall_instr_type, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
                     SYSCALL_NUM) &&
         // The move1 instr, with no encoding (2nd occurrence).
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
         // A sys instr that was not removed, with no encoding (2nd occurrence).
-        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, expected_syscall_instr_type, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 3) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
@@ -1064,6 +1267,7 @@ test_false_syscalls(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
         check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
         check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+#endif
 }
 
 bool
@@ -1103,11 +1307,13 @@ test_rseq_fallthrough(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 0 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1171,11 +1377,13 @@ test_rseq_rollback_legacy(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1237,11 +1445,13 @@ test_rseq_rollback(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1307,11 +1517,13 @@ test_rseq_rollback_with_timestamps(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1382,11 +1594,13 @@ test_rseq_rollback_with_signal(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1407,6 +1621,84 @@ test_rseq_rollback_with_signal(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT) &&
+        // The move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+}
+
+/* Tests rseq rollback with taken branch right before signal. */
+bool
+test_rseq_rollback_with_signal_after_branch(void *drcontext)
+{
+    std::cerr << "\n===============\nTesting rseq rollback with taken branch before "
+                 "signal.\n";
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *store =
+        XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0), opnd_create_reg(REG1));
+    instr_t *jcc =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(store));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, store);
+    instrlist_append(ilist, move2);
+    size_t offs_nop = 0;
+    size_t offs_jcc = offs_nop + instr_length(drcontext, nop);
+    size_t offs_move1 = offs_jcc + instr_length(drcontext, jcc);
+    size_t offs_store = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_move2 = offs_store + instr_length(drcontext, store);
+
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header());
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    raw.push_back(make_timestamp());
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_RSEQ_ENTRY, offs_move2));
+    raw.push_back(make_block(offs_jcc, 1));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_RSEQ_ABORT, offs_store));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, offs_store));
+    raw.push_back(make_block(offs_move2, 1));
+    raw.push_back(make_exit());
+
+    std::vector<uint64_t> stats;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+        return false;
+    int idx = 0;
+    return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RSEQ_ENTRY) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_TAKEN_JUMP, -1, offs_jcc) &&
+        // The move1 and committing store should not be here.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RSEQ_ABORT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT) &&
+        // Normally the handler is called with another kernel event. The
+        // trace here is simplified to test rseq abort followed by kernel event.
         // The move2 instr.
         check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
         check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
@@ -1463,12 +1755,14 @@ test_rseq_rollback_with_chunks(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
     // 6 instrs puts a new chunk at the start of the 3rd region.
-    if (!run_raw2trace(drcontext, raw, ilist, entries, 6))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats, 6))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_ABORT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1562,11 +1856,13 @@ test_rseq_side_exit(void *drcontext)
     raw.push_back(make_block(offs_move3, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1645,11 +1941,13 @@ test_rseq_side_exit_signal(void *drcontext)
     raw.push_back(make_block(offs_move3, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1732,11 +2030,13 @@ test_rseq_side_exit_inverted(void *drcontext)
     raw.push_back(make_block(offs_move3, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1831,11 +2131,13 @@ test_rseq_side_exit_inverted_with_timestamp(void *drcontext)
     raw.push_back(make_block(offs_move2, 1));
     raw.push_back(make_exit());
 
+    std::vector<uint64_t> stats;
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, ilist, entries))
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
         return false;
     int idx = 0;
     return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
         check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
         check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
@@ -1880,6 +2182,290 @@ test_rseq_side_exit_inverted_with_timestamp(void *drcontext)
         check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
 }
 
+/* Tests an inverted rseq side exit with delayed branch and synthetic jump (i#6346). */
+bool
+test_rseq_side_exit_inverted_with_delayed_branches(void *drcontext)
+{
+    std::cerr
+        << "\n===============\nTesting inverted rseq side exit with delayed branches\n";
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *move3 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+    // Our conditional jumps over the jump which is the exit.
+    instr_t *jcc =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(move1));
+    instr_t *jmp = XINST_CREATE_jump(drcontext, opnd_create_instr(move3));
+    instr_t *store =
+        XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0), opnd_create_reg(REG1));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, jmp);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, store);
+    instrlist_append(ilist, move2);
+    instrlist_append(ilist, move3);
+    size_t offs_nop = 0;
+    size_t offs_jcc = offs_nop + instr_length(drcontext, nop);
+    size_t offs_jmp = offs_jcc + instr_length(drcontext, jcc);
+    size_t offs_move1 = offs_jmp + instr_length(drcontext, jmp);
+    size_t offs_store = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_move2 = offs_store + instr_length(drcontext, store);
+    size_t offs_move3 = offs_move2 + instr_length(drcontext, move2);
+
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header());
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    raw.push_back(make_timestamp());
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_RSEQ_ENTRY, offs_move2));
+    // The jcc is taken and we don't see the side exit in instrumented execution.
+    raw.push_back(make_block(offs_jcc, 1));
+    raw.push_back(make_timestamp());
+    raw.push_back(make_core());
+    // The end of our rseq sequence, ending in a committing store.
+    raw.push_back(make_block(offs_move1, 2));
+    raw.push_back(make_memref(42));
+    // A discontinuity as we continue with the side exit target.
+    raw.push_back(make_block(offs_move3, 1));
+    raw.push_back(make_exit());
+
+    std::vector<uint64_t> stats;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+        return false;
+    int idx = 0;
+    return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RSEQ_ENTRY) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The jcc instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1, offs_jcc) &&
+        // The jmp which raw2trace has to synthesize.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_DIRECT_JUMP, -1, offs_jmp) &&
+        // The move1, move2, and committing store should be gone.
+        // We should go straight to the move3 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move3) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+}
+
+/* Tests rseq side exit with timestamps. */
+bool
+test_rseq_side_exit_with_timestamps(void *drcontext)
+{
+    std::cerr << "\n===============\nTesting rseq side exit with timestamps\n";
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+    instr_t *move3 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *move4 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *jmp1 = XINST_CREATE_jump(drcontext, opnd_create_instr(move4));
+    instr_t *jcc = XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(jmp1));
+    instr_t *store =
+        XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0), opnd_create_reg(REG1));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, store);
+    instrlist_append(ilist, move2);
+    instrlist_append(ilist, jmp1);
+    instrlist_append(ilist, move3);
+    instrlist_append(ilist, move4);
+    size_t offs_nop = 0;
+    size_t offs_jcc = offs_nop + instr_length(drcontext, nop);
+    size_t offs_move1 = offs_jcc + instr_length(drcontext, jcc);
+    size_t offs_store = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_move2 = offs_store + instr_length(drcontext, store);
+    size_t offs_jmp1 = offs_move2 + instr_length(drcontext, move2);
+    size_t offs_move3 = offs_jmp1 + instr_length(drcontext, jmp1);
+    size_t offs_move4 = offs_move3 + instr_length(drcontext, move3);
+
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header());
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    raw.push_back(make_timestamp(/*value=*/1));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_RSEQ_ENTRY, offs_move2));
+    raw.push_back(make_block(offs_jcc, /*instr_count=*/1));
+    // The jcc jumps to jmp1, and skips move1, store, and move2.
+    raw.push_back(make_block(offs_move1, /*instr_count=*/2));
+    raw.push_back(make_memref(/*addr=*/42));
+    raw.push_back(make_block(offs_jmp1, /*instr_count=*/1));
+    raw.push_back(make_timestamp(/*value=*/2));
+    raw.push_back(make_core());
+    raw.push_back(make_timestamp(/*value=*/3));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_move4, /*instr_count=*/1));
+    raw.push_back(make_exit());
+
+    std::vector<uint64_t> stats;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+        return false;
+    int idx = 0;
+    return (
+        stats[RAW2TRACE_STAT_RSEQ_SIDE_EXIT] == 1 &&
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RSEQ_ENTRY) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The jcc instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_TAKEN_JUMP, -1, offs_jcc) &&
+        // The move1, move2, and committing store should be gone.
+        // We should go straight to the jmp1 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_DIRECT_JUMP, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move4) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+}
+
+/* Tests a trace ending mid-rseq (i#6444).
+ * If at_end is true, tests the endpoint just being reached but not pased;
+ * else tests the endpoint not being reached.
+ */
+bool
+test_midrseq_end_helper(void *drcontext, bool at_end)
+{
+    std::cerr << "\n===============\nTesting mid-rseq trace end\n";
+    instrlist_t *ilist = instrlist_create(drcontext);
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *jcc =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(move2));
+    instr_t *store =
+        XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0), opnd_create_reg(REG1));
+    instr_t *move3 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, store);
+    instrlist_append(ilist, move2);
+    instrlist_append(ilist, move3);
+    size_t offs_nop = 0;
+    size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
+    size_t offs_jcc = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_store = offs_jcc + instr_length(drcontext, jcc);
+    size_t offs_move2 = offs_store + instr_length(drcontext, store);
+    size_t offs_move3 = offs_move2 + instr_length(drcontext, move2);
+
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header());
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    raw.push_back(make_timestamp());
+    raw.push_back(make_core());
+    raw.push_back(
+        make_marker(TRACE_MARKER_TYPE_RSEQ_ENTRY, at_end ? offs_move2 : offs_move3));
+    raw.push_back(make_block(offs_move1, 2));
+    raw.push_back(make_block(offs_store, 1));
+    raw.push_back(make_memref(42));
+    raw.push_back(make_exit());
+
+    std::vector<uint64_t> stats;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+        return false;
+    int idx = 0;
+    return (
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RSEQ_ENTRY) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move1) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+        check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1, offs_jcc) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_store) &&
+        check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+        // The trace exits before it reaches the rseq endpoint.
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+}
+
+bool
+test_midrseq_end(void *drcontext)
+{
+    return test_midrseq_end_helper(drcontext, /*at_end=*/false) &&
+        test_midrseq_end_helper(drcontext, /*at_end=*/true);
+}
+
 /* Tests pre-OFFLINE_FILE_VERSION_XFER_ABS_PC (module offset) handling. */
 bool
 test_xfer_modoffs(void *drcontext)
@@ -1910,7 +2496,7 @@ test_xfer_modoffs(void *drcontext)
     raw.push_back(make_exit());
 
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, nullptr, entries, 0, modules))
+    if (!run_raw2trace(drcontext, raw, nullptr, entries, /*stats=*/nullptr, 0, modules))
         return false;
     int idx = 0;
     return (
@@ -1954,7 +2540,7 @@ test_xfer_absolute(void *drcontext)
     raw.push_back(make_exit());
 
     std::vector<trace_entry_t> entries;
-    if (!run_raw2trace(drcontext, raw, nullptr, entries, 0, modules))
+    if (!run_raw2trace(drcontext, raw, nullptr, entries, /*stats=*/nullptr, 0, modules))
         return false;
     int idx = 0;
     return (
@@ -2327,7 +2913,1094 @@ test_branch_decoration(void *drcontext)
             check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
             check_entry(entries, idx, TRACE_TYPE_FOOTER, -1);
     }
+    {
+        // Window-final two consecutive branches.
+        instrlist_t *ilist = instrlist_create(drcontext);
+        instr_t *nop1 = XINST_CREATE_nop(drcontext); // Avoid offset of 0.
+        instr_t *nop2 = XINST_CREATE_nop(drcontext);
+        instr_t *store = XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0),
+                                            opnd_create_reg(REG1));
+        instr_t *jcc_store =
+            XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(store));
+        instr_t *move =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+        instr_t *jcc_move =
+            XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(move));
+        instrlist_append(ilist, nop1);
+        instrlist_append(ilist, move);
+        instrlist_append(ilist, jcc_store);
+        instrlist_append(ilist, jcc_move);
+        instrlist_append(ilist, nop2);
+        instrlist_append(ilist, store);
+        size_t offs_nop1 = 0;
+        size_t offs_mov = offs_nop1 + instr_length(drcontext, nop1);
+        size_t offs_jcc_store = offs_mov + instr_length(drcontext, move);
+        size_t offs_jcc_move = offs_jcc_store + instr_length(drcontext, jcc_store);
+        size_t offs_nop2 = offs_jcc_move + instr_length(drcontext, jcc_move);
+        size_t offs_store = offs_nop2 + instr_length(drcontext, nop2);
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_block(offs_mov, 2));
+        raw.push_back(make_block(offs_jcc_move, 1));
+        // Test two consecutive branches at the end of a window.
+        raw.push_back(make_window_id(1));
+        // Now repeat both branches to test encodings.
+        raw.push_back(make_block(offs_mov, 2));
+        raw.push_back(make_block(offs_jcc_move, 1));
+        raw.push_back(make_block(offs_store, 1));
+        raw.push_back(make_exit());
+
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries))
+            return false;
+        int idx = 0;
+        res = res && check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_mov) &&
+            // The first branch should remain and be marked untaken.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+            // An extra encoding entry is needed.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+            check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1,
+                        offs_jcc_store) &&
+            // The second branch and its encoding should be removed.
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_WINDOW_ID) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_mov) &&
+            // The first branch needs no encoding here.
+            check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1,
+                        offs_jcc_store) &&
+            // The second branch does need an encoding.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#ifdef X86_32
+            // An extra encoding entry is needed.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#endif
+            check_entry(entries, idx, TRACE_TYPE_INSTR_UNTAKEN_JUMP, -1, offs_jcc_move) &&
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_store) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_FOOTER, -1);
+    }
     return res;
+}
+
+bool
+test_stats_timestamp_instr_count(void *drcontext)
+{
+    std::cerr
+        << "\n===============\nTesting raw2trace stats for timestamps and instr count\n";
+    // Our synthetic test first constructs a list of instructions to be encoded into
+    // a buffer for decoding by raw2trace.
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *jmp = XINST_CREATE_jump(drcontext, opnd_create_instr(move));
+    instr_t *jcc = XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(jmp));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, jmp);
+    instrlist_append(ilist, move);
+    size_t offs_nop = 0;
+    size_t offs_jz = offs_nop + instr_length(drcontext, nop);
+    size_t offs_jmp = offs_jz + instr_length(drcontext, jcc);
+    size_t offs_mov = offs_jmp + instr_length(drcontext, jmp);
+
+    // Now we synthesize our raw trace itself, including a valid header sequence.
+    // For this test, we create a two-threaded trace because we want to verify if
+    // the stats are accumulated across threads properly.
+    std::vector<offline_entry_t> raw1;
+    raw1.push_back(make_header());
+    raw1.push_back(make_tid(1));
+    raw1.push_back(make_pid());
+    raw1.push_back(make_line_size());
+    raw1.push_back(make_block(offs_jz, 1));
+    raw1.push_back(make_timestamp(123));
+    raw1.push_back(make_core());
+    raw1.push_back(make_block(offs_jmp, 1));
+    raw1.push_back(make_block(offs_mov, 1));
+    raw1.push_back(make_timestamp(788));
+    raw1.push_back(make_exit());
+
+    std::vector<offline_entry_t> raw2;
+    raw2.push_back(make_header());
+    raw2.push_back(make_tid(2));
+    raw2.push_back(make_pid());
+    raw2.push_back(make_line_size());
+    raw2.push_back(make_block(offs_jmp, 1));
+    raw2.push_back(make_timestamp(124));
+    raw2.push_back(make_core());
+    raw2.push_back(make_timestamp(789));
+    raw2.push_back(make_exit());
+
+    // XXX: Below, we duplicate some work done by run_raw2trace. We could
+    // extend run_raw2trace to work with multiple threads by accepting nested
+    // vectors but maybe it's better to keep it specialized to the single
+    // thread case so that the most common use remains simple.
+
+    // We need an istream so we use istringstream.
+    std::ostringstream raw_out1;
+    for (const auto &entry : raw1) {
+        std::string as_string(reinterpret_cast<const char *>(&entry),
+                              reinterpret_cast<const char *>(&entry + 1));
+        raw_out1 << as_string;
+    }
+    std::ostringstream raw_out2;
+    for (const auto &entry : raw2) {
+        std::string as_string(reinterpret_cast<const char *>(&entry),
+                              reinterpret_cast<const char *>(&entry + 1));
+        raw_out2 << as_string;
+    }
+    std::istringstream raw_in1(raw_out1.str()), raw_in2(raw_out2.str());
+    std::vector<std::istream *> input;
+    input.push_back(&raw_in1);
+    input.push_back(&raw_in2);
+
+    // We need an ostream to capture out.
+    std::ostringstream result_stream1, result_stream2;
+    std::vector<std::ostream *> output;
+    output.push_back(&result_stream1);
+    output.push_back(&result_stream2);
+
+    // Run raw2trace with our subclass supplying our decodings.
+    std::vector<uint64_t> stats;
+    raw2trace_test_t raw2trace(input, output, *ilist, drcontext);
+    std::string error = raw2trace.do_conversion();
+    CHECK(error.empty(), error);
+    populate_all_stats(raw2trace, &stats);
+    return stats[RAW2TRACE_STAT_FINAL_TRACE_INSTRUCTION_COUNT] == 4 &&
+        stats[RAW2TRACE_STAT_EARLIEST_TRACE_TIMESTAMP] == 123 &&
+        stats[RAW2TRACE_STAT_LATEST_TRACE_TIMESTAMP] == 789;
+}
+
+bool
+test_is_maybe_blocking_syscall(void *drcontext)
+{
+    std::cerr
+        << "\n===============\nTesting raw2trace maybe blocking syscall function.\n";
+#ifdef LINUX
+#    ifdef X86
+#        ifdef X64
+    const uintptr_t syscall_futex = 202;
+    const uintptr_t syscall_sendmsg = 46;
+    const uintptr_t syscall_write = 1;
+#        else
+    const uintptr_t syscall_futex = 240;
+    const uintptr_t syscall_sendmsg = 370;
+    const uintptr_t syscall_write = 4;
+#        endif
+#    elif defined(ARM)
+    const uintptr_t syscall_futex = 240;
+    const uintptr_t syscall_sendmsg = 296;
+    const uintptr_t syscall_write = 4;
+#    elif defined(AARCH64) || defined(RISCV64)
+    const uintptr_t syscall_futex = 98;
+    const uintptr_t syscall_sendmsg = 211;
+    const uintptr_t syscall_write = 64;
+#    else
+#        error Unsupported architecture.
+#    endif
+    std::vector<std::istream *> input;
+    std::vector<std::ostream *> output;
+    const std::vector<test_multi_module_mapper_t::bounds_t> modules;
+
+    raw2trace_test_t raw2trace(input, output, modules, drcontext);
+
+    for (const uintptr_t &syscall : { syscall_futex, syscall_sendmsg, syscall_write }) {
+        if (!raw2trace.is_maybe_blocking_syscall(syscall)) {
+            std::cerr << "Syscall " << syscall
+                      << " should be marked as maybe blocking.\n";
+            return false;
+        }
+    }
+    return true;
+#endif
+    return true;
+}
+
+bool
+test_ifiltered(void *drcontext)
+{
+#if defined(X86) || defined(ARM)
+    std::cerr << "\n===============\nTesting ifiltered trace\n";
+    // Our synthetic test first constructs a list of instructions to be encoded into
+    // a buffer for decoding by raw2trace.
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instr_t *jcc =
+        XINST_CREATE_jump_cond(drcontext, DR_PRED_EQ, opnd_create_instr(move1));
+    // Control flow in the test assumes that memaddr stores address to jcc.
+    instr_t *jmp =
+        XINST_CREATE_jump_mem(drcontext, opnd_create_mem_instr(jcc, 0, OPSZ_PTR));
+    instr_t *move3 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, jmp);
+    instrlist_append(ilist, jcc);
+    instrlist_append(ilist, move2);
+    instrlist_append(ilist, move3);
+    size_t offs_nop = 0;
+    size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
+    size_t offs_jmp = offs_move1 + instr_length(drcontext, move1);
+    int jmp_length = instr_length(drcontext, jmp);
+    size_t offs_jcc = offs_jmp + jmp_length;
+    size_t offs_move2 = offs_jcc + instr_length(drcontext, jcc);
+    size_t offs_move3 = offs_move2 + instr_length(drcontext, move2);
+
+    // Now we synthesize our raw trace itself, including a valid header sequence.
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header(OFFLINE_FILE_VERSION, OFFLINE_FILE_TYPE_IFILTERED));
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    // First instance of the jmp instr is filtered out but its memref is not filtered
+    // out (indicated by the zero sized block), so no encoding will be emitted and
+    // it will not count towards the chunk instr count. But this will still be
+    // accumulated as a delayed branch.
+    raw.push_back(make_block(offs_jmp, 0));
+    raw.push_back(make_memref(42));
+    // Second accumulated delayed branch.
+    raw.push_back(make_block(offs_jcc, 1));
+    // At this point, the jmp and jcc are accumulated as delayed branches.
+    // When writing the delayed branches, we want to make sure we correctly track
+    // the index into decode_pcs. If we don't increment the index at ifiltered
+    // instrs, the decode pc of jmp will be accidentally used when recording the
+    // encoding emitted for jcc. This will cause the jmp encoding to not be emitted
+    // in the next entry because raw2trace incorrectly tracked that it had
+    // already emitted it.
+    raw.push_back(make_block(offs_move1, 1));
+    // Second instance of the jmp instr is not filtered out. Its encoding must be
+    // emitted by raw2trace, or else the reader (in memref_counter_t) will
+    // complain about a missing encoding.
+    raw.push_back(make_block(offs_jmp, 1));
+    // The memref is also not filtered out. We have a separate pc entry with
+    // zero instr count just before the memref.
+    raw.push_back(make_block(offs_jmp, 0));
+    raw.push_back(make_memref(42));
+    raw.push_back(make_block(offs_jcc, 1));
+    raw.push_back(make_block(offs_move2, 1));
+    // End of first chunk.
+    raw.push_back(make_block(offs_move3, 1));
+    raw.push_back(make_exit());
+
+    static const int CHUNK_INSTR_COUNT = 5;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, nullptr, CHUNK_INSTR_COUNT))
+        return false;
+    int idx = 0;
+    return (
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        // jmp
+        // No encoding for the i-filtered instr with 0-instr count.
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, 0) &&
+        check_entry(entries, idx, TRACE_TYPE_READ, -1) &&
+        // jcc
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#    ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#    endif
+        // Since we cannot infer branch targets accurately for i-filtered traces, this
+        // has the generic conditional jump type (instead of the more specific
+        // TRACE_TYPE_INSTR_TAKEN_JUMP type).
+        check_entry(entries, idx, TRACE_TYPE_INSTR_CONDITIONAL_JUMP, -1) &&
+        // move1
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        // jmp
+        // This has an encoding because the previous dynamic instance was actually
+        // i-filtered.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#    ifdef X86_32
+        // An extra encoding entry is needed.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+#    endif
+        // In filtered traces, we have one pc entry for the instr itself (if the
+        // instruction is not i-filtered out) which has the instr length, and another
+        // zero-length pc entry before each of the instr's memrefs (if the memref
+        // is not d-filtered out).
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, jmp_length) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, 0) &&
+        check_entry(entries, idx, TRACE_TYPE_READ, -1) &&
+        // jcc. No encoding because it has already been emitted above.
+        // Since we cannot infer branch targets accurately for i-filtered traces, this
+        // has the generic conditional jump type (instead of the more specific
+        // TRACE_TYPE_INSTR_UNTAKEN_JUMP type).
+        check_entry(entries, idx, TRACE_TYPE_INSTR_CONDITIONAL_JUMP, -1) &&
+        // move2
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        // Chunk ends since we've seen exactly 5 instrs.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CHUNK_FOOTER) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_RECORD_ORDINAL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // move3
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+#else
+    // This test requires a CTI (so that it gets accumulated as a delayed branch) that
+    // also reads from memory (so that it's possible to have a case with a zero-sized PC
+    // entry in the raw trace). AArch64 does not have such an instr.
+    return true;
+#endif
+}
+
+/* Tests asynchronous signal handling (i#7050). */
+bool
+test_asynchronous_signal(void *drcontext)
+{
+    bool res = true;
+    {
+        std::cerr << "\n===============\nTesting instr removal by async signal\n";
+        instrlist_t *ilist = instrlist_create(drcontext);
+        // raw2trace doesn't like offsets of 0 so we shift with a nop.
+        instr_t *nop = XINST_CREATE_nop(drcontext);
+        instr_t *move1 =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+        instr_t *move2 =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+        instrlist_append(ilist, nop);
+        instrlist_append(ilist, move1);
+        instrlist_append(ilist, move2);
+        size_t offs_nop = 0;
+        size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp());
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_move1, 2));
+        raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, offs_move1));
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        res = check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            // The move1 instruction is removed because of the asynchronous signal.
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT,
+                        offs_move1) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_FOOTER, -1);
+    }
+    {
+        std::cerr
+            << "\n===============\nTesting instr and memref removal by async signal\n";
+        instrlist_t *ilist = instrlist_create(drcontext);
+        // raw2trace doesn't like offsets of 0 so we shift with a nop.
+        instr_t *nop = XINST_CREATE_nop(drcontext);
+        instr_t *load = XINST_CREATE_load(drcontext, opnd_create_reg(REG1),
+                                          OPND_CREATE_MEMPTR(REG2, 0));
+        instr_t *store = XINST_CREATE_store(drcontext, OPND_CREATE_MEMPTR(REG2, 0),
+                                            opnd_create_reg(REG1));
+        instr_t *move =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+        instrlist_append(ilist, nop);
+        instrlist_append(ilist, load);
+        instrlist_append(ilist, store);
+        instrlist_append(ilist, move);
+        size_t offs_nop = 0;
+        size_t offs_load = offs_nop + instr_length(drcontext, nop);
+        size_t offs_store = offs_load + instr_length(drcontext, load);
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp());
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_load, 3));
+        raw.push_back(make_memref(42));
+        raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, offs_store));
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        res &=
+            (check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+             check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+             check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER,
+                         TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER,
+                         TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+             // The load instruction.
+             check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+             check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_load) &&
+             check_entry(entries, idx, TRACE_TYPE_READ, -1) &&
+             // The store instruction and the memref are removed.
+             check_entry(entries, idx, TRACE_TYPE_MARKER,
+                         TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION) &&
+             check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT,
+                         offs_store) &&
+             check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+             check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+    }
+#ifdef X86
+    {
+        std::cerr << "\n===============\nTesting rep string instr without async signal\n";
+        instrlist_t *ilist = instrlist_create(drcontext);
+        // raw2trace doesn't like offsets of 0 so we shift with a nop.
+        instr_t *nop = XINST_CREATE_nop(drcontext);
+        instr_t *rep_stos = INSTR_CREATE_rep_stos_4(drcontext);
+        instr_t *move =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+        instrlist_append(ilist, nop);
+        instrlist_append(ilist, rep_stos);
+        instrlist_append(ilist, move);
+        size_t offs_nop = 0;
+        size_t offs_rep_stos = offs_nop + instr_length(drcontext, nop);
+        size_t offs_move = offs_rep_stos + instr_length(drcontext, rep_stos);
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp());
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(42));
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(46));
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(50));
+        raw.push_back(make_block(offs_move, 1));
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        res &= check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            // The rep_stos instruction.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_rep_stos) &&
+            check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR_NO_FETCH, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR_NO_FETCH, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_FOOTER, -1);
+    }
+    {
+        std::cerr
+            << "\n===============\nTesting rep string instr removal by async signal\n";
+        instrlist_t *ilist = instrlist_create(drcontext);
+        // raw2trace doesn't like offsets of 0 so we shift with a nop.
+        instr_t *nop = XINST_CREATE_nop(drcontext);
+        instr_t *rep_stos = INSTR_CREATE_rep_stos_4(drcontext);
+        instr_t *move =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+        instrlist_append(ilist, nop);
+        instrlist_append(ilist, rep_stos);
+        instrlist_append(ilist, move);
+        size_t offs_nop = 0;
+        size_t offs_rep_stos = offs_nop + instr_length(drcontext, nop);
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp());
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(42));
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(46));
+        raw.push_back(make_block(offs_rep_stos, 1));
+        raw.push_back(make_memref(50));
+        raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, offs_rep_stos));
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        res &= check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            // The rep_stos instruction.
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_rep_stos) &&
+            check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR_NO_FETCH, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_WRITE, -1) &&
+            // The last rep_stos instruction and the write record are removed because of
+            // the asynchronous signal.
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT,
+                        offs_rep_stos) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_FOOTER, -1);
+    }
+#endif
+    return res;
+}
+
+bool
+test_syscall_injection(void *drcontext)
+{
+    std::cerr << "\n===============\nTesting syscall injection\n";
+    // Our synthetic test first constructs a list of instructions to be encoded into
+    // a buffer for decoding by raw2trace.
+    instrlist_t *ilist = instrlist_create(drcontext);
+    // raw2trace doesn't like offsets of 0 so we shift with a nop.
+    instr_t *nop = XINST_CREATE_nop(drcontext);
+    instr_t *move1 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+    // XXX: Adding an XINST_CREATE_syscall macro will simplify this but there are
+    // complexities (xref create_syscall_instr()).
+#ifdef X86
+    instr_t *sys = INSTR_CREATE_syscall(drcontext);
+#elif defined(AARCHXX)
+    instr_t *sys = INSTR_CREATE_svc(drcontext, opnd_create_immed_int((sbyte)0x0, OPSZ_1));
+#elif defined(RISCV64)
+    instr_t *sys = INSTR_CREATE_ecall(drcontext);
+#else
+#    error Unsupported architecture.
+#endif
+#ifdef X86_32
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR_SYSENTER;
+#else
+    unsigned short expected_syscall_instr_type = TRACE_TYPE_INSTR;
+#endif
+
+    instr_t *move2 =
+        XINST_CREATE_move(drcontext, opnd_create_reg(REG2), opnd_create_reg(REG1));
+    instrlist_append(ilist, nop);
+    instrlist_append(ilist, move1);
+    instrlist_append(ilist, sys);
+    instrlist_append(ilist, move2);
+    size_t offs_nop = 0;
+    size_t offs_move1 = offs_nop + instr_length(drcontext, nop);
+    size_t offs_sys = offs_move1 + instr_length(drcontext, move1);
+    size_t offs_move2 = offs_sys + instr_length(drcontext, sys);
+
+    // Syscall traces may be injected at different points in the trace:
+    // A) for syscalls whose args and retval are traced with -record_syscall, the
+    //    trace is injected before the func_id-func_retval markers.
+    // B) for syscalls that are interrupted by a signal and do not have a post-
+    //    syscall event, the trace is injected just before the kernel_event marker,
+    //    which is also after the func_id-func_arg markers (if any).
+    // C) for syscalls that are not traced with -record_syscall and are not
+    //    interrupted by a signal, the trace is injected just before the timestamp
+    //    marker after the syscall marker, which is also after the syscall and
+    //    maybe_blocking_syscall marker if any.
+    // D) for sigreturn, we inject just before the kernel_xfer marker (which is
+    //    before the post-syscall timestamp marker).
+    // E) if we reach the thread_exit with a pending injection, we inject the trace
+    //    before the thread_exit.
+    //
+    // We test each of the above cases below.
+
+    // Now we synthesize our raw trace itself, including a valid header sequence.
+    static constexpr int SYSCALL_NUM = 42; // Doesn't really matter.
+    static constexpr int FUNC_ID_SYSCALL =
+        static_cast<int>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) + SYSCALL_NUM;
+    std::vector<offline_entry_t> raw;
+    raw.push_back(make_header());
+    raw.push_back(make_tid());
+    raw.push_back(make_pid());
+    raw.push_back(make_line_size());
+    raw.push_back(make_timestamp(1));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_move1, 1));
+
+    // ---------- Type (A) ----------
+    raw.push_back(make_timestamp(2));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_sys, 1));
+    // Entries added by pre-syscall event.
+    raw.push_back(make_timestamp(3));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL, SYSCALL_NUM));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ID, FUNC_ID_SYSCALL));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ARG, 1));
+    // Entries added by post-syscall event.
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ID, FUNC_ID_SYSCALL));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_RETVAL, 1));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL_FAILED, 0));
+    raw.push_back(make_timestamp(4));
+    raw.push_back(make_core());
+    // Trace continues after syscall.
+    raw.push_back(make_block(offs_move2, 1));
+
+    // ---------- Type (B) ----------
+    raw.push_back(make_timestamp(5));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_sys, 1));
+    // Entries added by pre-syscall event.
+    raw.push_back(make_timestamp(6));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL, SYSCALL_NUM));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ID, FUNC_ID_SYSCALL));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ARG, 1));
+    // Syscall interrupted by signal.
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_EVENT, offs_sys));
+    raw.push_back(make_timestamp(7));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_move2, 1));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_XFER, offs_sys));
+
+    // ---------- Type (C) ----------
+    raw.push_back(make_timestamp(8));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_sys, 1));
+    // Entries added by pre-syscall event.
+    raw.push_back(make_timestamp(9));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL, SYSCALL_NUM));
+    // Entries added by post-syscall event.
+    raw.push_back(make_timestamp(10));
+    raw.push_back(make_core());
+    // Trace continues after syscall.
+    raw.push_back(make_block(offs_move2, 1));
+
+    // ---------- Type (D) ----------
+    raw.push_back(make_timestamp(11));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_sys, 1));
+    // Entries added by pre-syscall event.
+    raw.push_back(make_timestamp(12));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL, SYSCALL_NUM));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ID, FUNC_ID_SYSCALL));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_FUNC_ARG, 1));
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_KERNEL_XFER, offs_sys));
+    raw.push_back(make_timestamp(13));
+    raw.push_back(make_core());
+    // Trace continues after syscall.
+    raw.push_back(make_block(offs_move2, 1));
+
+    // ---------- Type (E) ----------
+    raw.push_back(make_timestamp(14));
+    raw.push_back(make_core());
+    raw.push_back(make_block(offs_sys, 1));
+    // Entries added by pre-syscall event.
+    raw.push_back(make_timestamp(15));
+    raw.push_back(make_core());
+    raw.push_back(make_marker(TRACE_MARKER_TYPE_SYSCALL, SYSCALL_NUM));
+    // No post-syscall.
+    raw.push_back(make_exit());
+
+    static constexpr memref_tid_t TID_IN_SYSCALL = 1;
+    static constexpr addr_t SYSCALL_PC_START = 0xfeed101;
+    static constexpr addr_t ENCODING_SIZE = 1;
+    static constexpr addr_t ENCODING_IGNORE = 0xfe;
+    std::vector<trace_entry_t> syscall_sequence = {
+        /* clang-format off */
+        test_util::make_header(TRACE_ENTRY_VERSION),
+        test_util::make_thread(TID_IN_SYSCALL),
+        test_util::make_pid(TID_IN_SYSCALL),
+        test_util::make_version(TRACE_ENTRY_VERSION),
+        test_util::make_timestamp(0),
+        test_util::make_marker(TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM),
+        test_util::make_encoding(ENCODING_SIZE, ENCODING_IGNORE),
+        test_util::make_instr(SYSCALL_PC_START),
+        // The actual branch_target marker value is set during injection; verified
+        // below.
+        test_util::make_marker(TRACE_MARKER_TYPE_BRANCH_TARGET, 0),
+        test_util::make_encoding(ENCODING_SIZE, ENCODING_IGNORE),
+        test_util::make_instr(SYSCALL_PC_START + 1, TRACE_TYPE_INSTR_INDIRECT_JUMP),
+        test_util::make_marker(TRACE_MARKER_TYPE_SYSCALL_TRACE_END, SYSCALL_NUM),
+        test_util::make_exit(TID_IN_SYSCALL)
+        /* clang-format on */
+    };
+    auto syscall_tmpl = std::unique_ptr<record_reader_t>(
+        new test_util::mock_record_reader_t(syscall_sequence));
+    std::vector<uint64_t> stats;
+    std::vector<trace_entry_t> entries;
+    if (!run_raw2trace(drcontext, raw, ilist, entries, &stats, /*chunk_instr_count=*/0,
+                       /*modules=*/ {}, std::move(syscall_tmpl)))
+        return false;
+    int idx = 0;
+    return (
+        stats[RAW2TRACE_STAT_SYSCALL_TRACES_INJECTED] == 5 &&
+        stats[RAW2TRACE_STAT_KERNEL_INSTR_COUNT] == 10 &&
+        check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+        check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The move1 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move1) &&
+        // ---------- Type (A) ----------
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 2) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The sys instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, expected_syscall_instr_type, -1, offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 3) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
+                    SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ID,
+                    FUNC_ID_SYSCALL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ARG, 1) &&
+        // Injected syscall trace.
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, SYSCALL_PC_START) &&
+        // Indirect branch at the end of the injected syscall trace that should point to
+        // the move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1,
+                    SYSCALL_PC_START + 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_TRACE_END,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace -- done.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ID,
+                    FUNC_ID_SYSCALL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_RETVAL, 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_FAILED,
+                    0) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 4) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
+
+        // ---------- Type (B) ----------
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 5) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The sys instr.
+        check_entry(entries, idx, expected_syscall_instr_type, -1, offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 6) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
+                    SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ID,
+                    FUNC_ID_SYSCALL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ARG, 1) &&
+        // Injected syscall trace.
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, SYSCALL_PC_START) &&
+        // Indirect branch at the end of the injected syscall trace that should point to
+        // the move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1,
+                    SYSCALL_PC_START + 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_TRACE_END,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace -- done.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_EVENT,
+                    offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 7) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_XFER,
+                    offs_sys) &&
+
+        // ---------- Type (C) ----------
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 8) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The sys instr.
+        check_entry(entries, idx, expected_syscall_instr_type, -1, offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 9) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace.
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, SYSCALL_PC_START) &&
+        // Indirect branch at the end of the injected syscall trace that should point to
+        // the move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1,
+                    SYSCALL_PC_START + 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_TRACE_END,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace -- done.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 10) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
+
+        // ---------- Type (D) ----------
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 11) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The sys instr.
+        check_entry(entries, idx, expected_syscall_instr_type, -1, offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 12) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
+                    SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ID,
+                    FUNC_ID_SYSCALL) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FUNC_ARG, 1) &&
+        // Injected syscall trace.
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, SYSCALL_PC_START) &&
+        // Indirect branch at the end of the injected syscall trace that should point to
+        // the move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1,
+                    SYSCALL_PC_START + 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_TRACE_END,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace -- done.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_KERNEL_XFER,
+                    offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 13) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, offs_move2) &&
+
+        // ---------- Type (E) ----------
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 14) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        // The sys instr.
+        check_entry(entries, idx, expected_syscall_instr_type, -1, offs_sys) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP, 15) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace.
+        check_entry(entries, idx, TRACE_TYPE_MARKER,
+                    TRACE_MARKER_TYPE_SYSCALL_TRACE_START, SYSCALL_NUM) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR, -1, SYSCALL_PC_START) &&
+        // Indirect branch at the end of the injected syscall trace that should point to
+        // the move2 instr.
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_BRANCH_TARGET,
+                    offs_move2) &&
+        check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_INSTR_INDIRECT_JUMP, -1,
+                    SYSCALL_PC_START + 1) &&
+        check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_SYSCALL_TRACE_END,
+                    SYSCALL_NUM) &&
+        // Injected syscall trace -- done.
+        check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+        check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+}
+bool
+test_negative_timestamps(void *drcontext)
+{
+    std::cerr << "\n===============\nTesting negative timestamps\n";
+    {
+        // Test timestamp handling thresholds.
+        instrlist_t *ilist = instrlist_create(drcontext);
+        constexpr uint64_t TIME_A = 100;
+        constexpr uint64_t TIME_B = 110;
+        constexpr uint64_t TIME_C = 107; // Negative but beyond threshold.
+        constexpr uint64_t TIME_D = 111;
+        constexpr uint64_t TIME_E = 109; // Negative and under threshold.
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp(TIME_A));
+        raw.push_back(make_timestamp(TIME_B));
+        raw.push_back(make_timestamp(TIME_C));
+        raw.push_back(make_timestamp(TIME_D));
+        raw.push_back(make_timestamp(TIME_E));
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        if (!(stats[RAW2TRACE_STAT_NEGATIVE_TIMES_CORRECTED] == 1 &&
+              check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+              check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+              check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER,
+                          TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER,
+                          TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                          TIME_A) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                          TIME_B) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                          // Remains negative.
+                          TIME_C) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                          TIME_D) &&
+              check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                          // Corrected.
+                          TIME_D) &&
+              check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+              check_entry(entries, idx, TRACE_TYPE_FOOTER, -1)))
+            return false;
+    }
+    {
+        // Test timestamp handling with blocks of instrs.
+        instrlist_t *ilist = instrlist_create(drcontext);
+        instr_t *nop = XINST_CREATE_nop(drcontext);
+        instr_t *move =
+            XINST_CREATE_move(drcontext, opnd_create_reg(REG1), opnd_create_reg(REG2));
+        instrlist_append(ilist, nop);
+        instrlist_append(ilist, move);
+        size_t offs_nop = 0;
+        size_t offs_move = offs_nop + instr_length(drcontext, nop);
+
+        constexpr uint64_t TIME_A = 100;
+        constexpr uint64_t TIME_B = 110;
+        constexpr uint64_t TIME_C = 109; // Negative, under threshold.
+        constexpr uint64_t TIME_D = 111;
+
+        std::vector<offline_entry_t> raw;
+        raw.push_back(make_header());
+        raw.push_back(make_tid());
+        raw.push_back(make_pid());
+        raw.push_back(make_line_size());
+        raw.push_back(make_timestamp(TIME_A));
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_move, /*instr_count=*/1));
+        raw.push_back(make_timestamp(TIME_B));
+        raw.push_back(make_core());
+        raw.push_back(make_block(offs_move, /*instr_count=*/1));
+        raw.push_back(make_timestamp(TIME_C));
+        raw.push_back(make_core());
+        raw.push_back(make_timestamp(TIME_D));
+        raw.push_back(make_core());
+        raw.push_back(make_exit());
+
+        std::vector<uint64_t> stats;
+        std::vector<trace_entry_t> entries;
+        if (!run_raw2trace(drcontext, raw, ilist, entries, &stats))
+            return false;
+        int idx = 0;
+        return (
+            stats[RAW2TRACE_STAT_NEGATIVE_TIMES_CORRECTED] == 1 &&
+            check_entry(entries, idx, TRACE_TYPE_HEADER, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_VERSION) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_FILETYPE) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_PID, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CACHE_LINE_SIZE) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER,
+                        TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                        TIME_A) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            check_entry(entries, idx, TRACE_TYPE_ENCODING, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                        TIME_B) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            check_entry(entries, idx, TRACE_TYPE_INSTR, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                        // Ensure corrected from C to B:
+                        TIME_B) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_TIMESTAMP,
+                        TIME_D) &&
+            check_entry(entries, idx, TRACE_TYPE_MARKER, TRACE_MARKER_TYPE_CPU_ID) &&
+            check_entry(entries, idx, TRACE_TYPE_THREAD_EXIT, -1) &&
+            check_entry(entries, idx, TRACE_TYPE_FOOTER, -1));
+    }
 }
 
 int
@@ -2341,12 +4014,19 @@ test_main(int argc, const char *argv[])
         !test_rseq_rollback_legacy(drcontext) || !test_rseq_rollback(drcontext) ||
         !test_rseq_rollback_with_timestamps(drcontext) ||
         !test_rseq_rollback_with_signal(drcontext) ||
+        !test_rseq_rollback_with_signal_after_branch(drcontext) ||
         !test_rseq_rollback_with_chunks(drcontext) || !test_rseq_side_exit(drcontext) ||
         !test_rseq_side_exit_signal(drcontext) ||
         !test_rseq_side_exit_inverted(drcontext) ||
         !test_rseq_side_exit_inverted_with_timestamp(drcontext) ||
+        !test_rseq_side_exit_inverted_with_delayed_branches(drcontext) ||
+        !test_rseq_side_exit_with_timestamps(drcontext) || !test_midrseq_end(drcontext) ||
         !test_xfer_modoffs(drcontext) || !test_xfer_absolute(drcontext) ||
-        !test_branch_decoration(drcontext))
+        !test_branch_decoration(drcontext) ||
+        !test_stats_timestamp_instr_count(drcontext) ||
+        !test_is_maybe_blocking_syscall(drcontext) || !test_ifiltered(drcontext) ||
+        !test_asynchronous_signal(drcontext) || !test_syscall_injection(drcontext) ||
+        !test_negative_timestamps(drcontext))
         return 1;
     return 0;
 }

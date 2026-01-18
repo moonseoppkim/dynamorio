@@ -1,7 +1,7 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # **********************************************************
-# Copyright (c) 2022-2023 Arm Limited    All rights reserved.
+# Copyright (c) 2022-2024 Arm Limited    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -40,7 +40,7 @@ import os
 import re
 import difflib
 
-
+# XXX: This assumes a single line for a function signature!
 def filter_lines(path, regex, ignore_until=''):
     with open(path) as f:
         patterns = []
@@ -108,9 +108,9 @@ def main():
     print('  OK!')
 
     # The Arm AArch64's architecture versions supported by the DynamoRIO codec.
-    # Currently, v8.0 is fully supported, while v8.1, v8.2, v8.3, v8.4, v8.6, SVE,
-    # and SVE2 are partially supported.
-    isa_versions = ['v80', 'v81', 'v82', 'v83', 'v84', 'v86', 'sve', 'sve2']
+    # Currently, v8.0 is fully supported, while v8.1, v8.2, v8.3, v8.4, v8.5,
+    # SVE, and SVE2 are partially supported.
+    isa_versions = ['v80', 'v81', 'v82', 'v83', 'v84', 'v85', 'v87', 'sve', 'sve2']
 
     codecsort_py = os.path.join(src_dir, "codecsort.py")
 

@@ -121,10 +121,6 @@ static int tls_idx;
 
 #define MINSERT instrlist_meta_preinsert
 
-#ifdef AARCH64
-static bool reported_sg_warning = false;
-#endif
-
 static void
 memtrace(void *drcontext)
 {
@@ -320,21 +316,6 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *wher
     for (i = 0; i < instr_num_srcs(instr_operands); i++) {
         const opnd_t src = instr_get_src(instr_operands, i);
         if (opnd_is_memory_reference(src)) {
-#ifdef AARCH64
-            /* TODO i#5844: Memory references involving SVE registers are not
-             * supported yet. To be implemented as part of scatter/gather work.
-             */
-            if (opnd_is_base_disp(src) &&
-                (reg_is_z(opnd_get_base(src)) || reg_is_z(opnd_get_index(src)))) {
-                if (!reported_sg_warning) {
-                    dr_fprintf(STDERR,
-                               "WARNING: Scatter/gather is not supported, results will "
-                               "be inaccurate\n");
-                    reported_sg_warning = true;
-                }
-                continue;
-            }
-#endif
             instrument_mem(drcontext, bb, where, src, false);
         }
     }
@@ -342,21 +323,6 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *wher
     for (i = 0; i < instr_num_dsts(instr_operands); i++) {
         const opnd_t dst = instr_get_dst(instr_operands, i);
         if (opnd_is_memory_reference(dst)) {
-#ifdef AARCH64
-            /* TODO i#5844: Memory references involving SVE registers are not
-             * supported yet. To be implemented as part of scatter/gather work.
-             */
-            if (opnd_is_base_disp(dst) &&
-                (reg_is_z(opnd_get_base(dst)) || reg_is_z(opnd_get_index(dst)))) {
-                if (!reported_sg_warning) {
-                    dr_fprintf(STDERR,
-                               "WARNING: Scatter/gather is not supported, results will "
-                               "be inaccurate\n");
-                    reported_sg_warning = true;
-                }
-                continue;
-            }
-#endif
             instrument_mem(drcontext, bb, where, dst, true);
         }
     }
@@ -372,7 +338,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *wher
          * Using a fault to handle a full buffer should be more robust, and the
          * forthcoming buffer filling API (i#513) will provide that.
          */
-        IF_AARCHXX_ELSE(!instr_is_exclusive_store(instr_operands), true))
+        IF_AARCHXX_OR_RISCV64_ELSE(!instr_is_exclusive_store(instr_operands), true))
         dr_insert_clean_call(drcontext, bb, where, (void *)clean_call, false, 0);
 
     return DR_EMIT_DEFAULT;
@@ -492,7 +458,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
         DR_ASSERT(false);
 
     /* register events */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_thread_init_event(event_thread_init) ||
         !drmgr_register_thread_exit_event(event_thread_exit) ||
         !drmgr_register_bb_app2app_event(event_bb_app2app, NULL) ||

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -37,7 +37,7 @@
 
 #define MINSERT instrlist_meta_preinsert
 
-/* FIXME - module events are not supported on Linux */
+/* XXX - module events are not supported on Linux */
 
 #ifdef WINDOWS
 static app_pc start = NULL;
@@ -207,7 +207,7 @@ callback(void *tag, app_pc next_pc)
             *(volatile uint *)NULL = 0; /* ASSERT_NOT_REACHED() */
         } else if (use_unlink) {
             /* Test dr_unlink_flush_region() half the time (if available).
-             * FIXME - extend once we add unlink callback. */
+             * XXX - extend once we add unlink callback. */
             delay_flush_at_next_build = true;
             dr_unlink_flush_region(tag, 1);
         }
@@ -241,6 +241,42 @@ module_load_event(void *dcontext, const module_data_t *data, bool loaded)
 }
 #endif
 
+static bool
+check_for_marker(instr_t *first_inst)
+{
+    if (instr_is_nop(first_inst)) {
+        instr_t *second = instr_get_next(first_inst);
+
+        if (second != NULL) {
+#ifdef X86
+            /* The test app uses two nops as a marker to identify a specific bb. Since
+             * 2 nop instructions in a row aren't that uncommon on Linux (where we can't
+             * restrict our search to just the test.exe module) we use an unusual nop
+             * for the second one: "xchg xbp, xbp". */
+            if (instr_is_nop(second) && instr_get_opcode(second) == OP_xchg &&
+                instr_writes_to_exact_reg(second, REG_XBP, DR_QUERY_DEFAULT))
+                return true;
+#elif defined(AARCH64)
+            /* For AARCH64 look for a nop followed by two yield instructions. */
+            if (instr_get_opcode(second) == OP_yield) {
+                instr_t *third = instr_get_next(second);
+                if (third != NULL && instr_get_opcode(third) == OP_yield)
+                    return true;
+            }
+#elif defined(RISCV64)
+            /* For RISCV64 look for an uncompressed nop followed by two compressed
+             * ones */
+            if (instr_get_opcode(second) == OP_c_nop) {
+                instr_t *third = instr_get_next(second);
+                if (third != NULL && instr_get_opcode(third) == OP_c_nop)
+                    return true;
+            }
+#endif
+        }
+    }
+    return false;
+}
+
 static dr_emit_flags_t
 bb_event(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool translating)
 {
@@ -256,29 +292,17 @@ bb_event(void *drcontext, void *tag, instrlist_t *bb, bool for_trace, bool trans
 #endif
         instr = instrlist_first(bb);
 
-        if (instr_is_nop(instr)) {
-            instr_t *next = instr_get_next(instr);
+        if (check_for_marker(instr)) {
+            bb_build_count++;
 
-            /* The test app uses two nops as a marker to identify a specific bb.  Since
-             * 2 nop instructions in a row aren't that uncommon on Linux (where we can't
-             * restrict our search to just the test.exe module) we use an unusual nop
-             * for the second one: xchg xbp, xbp */
-            if (next != NULL && instr_is_nop(next) && instr_get_opcode(next) == OP_xchg &&
-                instr_writes_to_exact_reg(next, REG_XBP, DR_QUERY_DEFAULT)) {
-
-                bb_build_count++;
-
-                if (delay_flush_at_next_build) {
-                    delay_flush_at_next_build = false;
-                    dr_delay_flush_region((app_pc)tag - 20, 30, callback_count,
-                                          flush_event);
-                }
-
-                dr_insert_clean_call_ex(drcontext, bb, instr, (void *)callback,
-                                        DR_CLEANCALL_READS_APP_CONTEXT, 2,
-                                        OPND_CREATE_INTPTR(tag),
-                                        OPND_CREATE_INTPTR(instr_get_app_pc(instr)));
+            if (delay_flush_at_next_build) {
+                delay_flush_at_next_build = false;
+                dr_delay_flush_region((app_pc)tag - 20, 30, callback_count, flush_event);
             }
+
+            dr_insert_clean_call_ex(
+                drcontext, bb, instr, (void *)callback, DR_CLEANCALL_READS_APP_CONTEXT, 2,
+                OPND_CREATE_INTPTR(tag), OPND_CREATE_INTPTR(instr_get_app_pc(instr)));
         }
 #ifdef WINDOWS
     }

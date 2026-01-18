@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2023-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -33,7 +33,7 @@
 /* Scheduler of traced software threads onto simulated cpus. */
 
 #ifndef _DRMEMTRACE_SCHEDULER_H_
-#define _DRMEMTRACE_SCHEDULER_H_ 1
+#define _DRMEMTRACE_SCHEDULER_H_
 
 /**
  * @file drmemtrace/scheduler.h
@@ -45,8 +45,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include <atomic>
 #include <deque>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <queue>
@@ -59,8 +61,10 @@
 
 #include "archive_istream.h"
 #include "archive_ostream.h"
+#include "flexible_queue.h"
 #include "memref.h"
 #include "memtrace_stream.h"
+#include "mutex_dbg_owned.h"
 #include "reader.h"
 #include "record_file_reader.h"
 #include "speculator.h"
@@ -69,6 +73,8 @@
 
 namespace dynamorio {  /**< General DynamoRIO namespace. */
 namespace drmemtrace { /**< DrMemtrace tracing + simulation infrastructure namespace. */
+
+template <typename RecordType, typename ReaderType> class scheduler_impl_tmpl_t;
 
 /**
  * Schedules traced software threads onto simulated cpus.
@@ -94,6 +100,7 @@ public:
         STATUS_ERROR_FILE_READ_FAILED,  /**< Error: file read failed. */
         STATUS_ERROR_NOT_IMPLEMENTED,   /**< Error: not implemented. */
         STATUS_ERROR_FILE_WRITE_FAILED, /**< Error: file write failed. */
+        STATUS_ERROR_RANGE_INVALID,     /**< Error: region of interest invalid. */
     };
 
     /**
@@ -108,10 +115,12 @@ public:
          * For dynamic scheduling with cross-stream dependencies, the scheduler may pause
          * a stream if it gets ahead of another stream it should have a dependence on.
          * This value is also used for schedules following the recorded timestamps
-         * (#DEPENDENCY_TIMESTAMPS) to avoid one stream getting ahead of another.  For
-         * replaying a schedule as it was traced with #MAP_TO_RECORDED_OUTPUT this can
-         * indicate an idle period on a core where the traced workload was not currently
-         * scheduled.
+         * (#DEPENDENCY_TIMESTAMPS) to avoid one stream getting ahead of another.
+         * #STATUS_WAIT should be treated as artificial, an artifact of enforcing a
+         * recorded schedule on concurrent differently-timed output streams.
+         * Simulators are suggested to not advance simulated time for #STATUS_WAIT while
+         * they should advance time for #STATUS_IDLE as the latter indicates a true
+         * lack of work.
          */
         STATUS_WAIT,
         STATUS_INVALID,         /**< Error condition. */
@@ -119,12 +128,26 @@ public:
         STATUS_NOT_IMPLEMENTED, /**< Feature not implemented. */
         STATUS_SKIPPED,         /**< Used for internal scheduler purposes. */
         STATUS_RECORD_FAILED,   /**< Failed to record schedule for future replay. */
+        /**
+         * This code indicates that all inputs are blocked waiting for kernel resources
+         * (such as i/o).  This is similar to #STATUS_WAIT, but #STATUS_WAIT indicates an
+         * artificial pause due to imposing the original ordering while #STATUS_IDLE
+         * indicates actual idle time in the application.  Simulators are suggested
+         * to not advance simulated time for #STATUS_WAIT while they should advance
+         * time for #STATUS_IDLE.
+         */
+        STATUS_IDLE,
+        /**
+         * Indicates an input has a binding whose outputs are all marked inactive.
+         */
+        STATUS_IMPOSSIBLE_BINDING,
+        STATUS_STOLE, /**< Used for internal scheduler purposes. */
     };
 
-    /** Identifies an input stream by its index. */
+    /** Identifies an input stream by its index (0-based). */
     typedef int input_ordinal_t;
 
-    /** Identifies an output stream by its index. */
+    /** Identifies an output stream by its index (0-based). */
     typedef int output_ordinal_t;
 
     /** Sentinel value indicating that no input stream is specified. */
@@ -151,14 +174,44 @@ public:
     };
 
     /**
-     * Specifies details about one set of input trace files from one workload,
-     * each input file representing a single software thread.
-     * It is assumed that there is no thread id duplication within one workload.
+     * A time range in units of the microsecond timestamps in the traces..
+     */
+    struct timestamp_range_t {
+        /** Convenience constructor. */
+        timestamp_range_t(uint64_t start, uint64_t stop)
+            : start_timestamp(start)
+            , stop_timestamp(stop)
+        {
+        }
+        /**
+         * The starting time in the microsecond timestamp units in the trace.
+         */
+        uint64_t start_timestamp;
+        /**
+         * The ending time in the microsecond timestamp units in the trace.
+         * The ending time is inclusive.  0 means the end of the trace.
+         */
+        uint64_t stop_timestamp;
+    };
+
+    /**
+     * Specifies details about one set of  input trace files from one workload.  Each
+     * input file typically represents  either one software thread ("thread-sharded")
+     * or one hardware thread ("core-sharded").  The  details in this struct apply to
+     * the inputs listed in the 'tids' (for thread-sharded, if identifying by tid) or
+     * 'shards' (for any sharding, if identifying  by ordinal).  When using 'tids' it
+     * is assumed that there is no thread id duplication within one workload.
      */
     struct input_thread_info_t {
         /** Convenience constructor for common usage. */
         explicit input_thread_info_t(std::vector<range_t> regions)
             : regions_of_interest(regions)
+        {
+        }
+        /** Convenience constructor for common usage. */
+        input_thread_info_t(memref_tid_t tid, std::vector<range_t> regions)
+            : tids(1, tid)
+            , regions_of_interest(regions)
         {
         }
         /** Convenience constructor for common usage. */
@@ -175,18 +228,54 @@ public:
             : output_binding(output_binding)
         {
         }
-        /** Size of the struct for binary-compatible additions. */
+        /** Convenience constructor for placing one thread on a set of cores. */
+        input_thread_info_t(memref_tid_t tid, std::set<output_ordinal_t> output_binding)
+            : tids(1, tid)
+            , output_binding(output_binding)
+        {
+        }
+        /**
+         * Size of the struct.  Not used as this structure cannot support
+         * binary-compatible additions due to limits of C++ offsetof support with some
+         * implementations of std::set where it is not a standard-layout class: thus,
+         * changes here require recompiling tools using this code.
+         */
         size_t struct_size = sizeof(input_thread_info_t);
         /**
-         * Which threads the details in this structure apply to.
-         * If empty, the details apply to all not-yet-mentioned (by other 'tids'
-         * vectors in prior entries for this workload) threads in the
-         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.
+         * Which input threads the details in this structure apply to.  Only one of
+         * 'tids' and 'shards' can be non-empty.  If 'tids' is empty and 'shards' is
+         * empty, the details apply to all unmentioned (by other 'tids' or
+         * 'shards' vectors in other entries for this workload) inputs in the
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.  When using
+         * 'tids' it is assumed that there is no thread id duplication within one
+         * workload.  If multiple entries list the same tid, only the last one
+         * is honored.
          */
         std::vector<memref_tid_t> tids;
         /**
-         * Limits these threads to this set of output streams.  They will not
-         * be scheduled on any other output streams.
+         * Which inputs the details in this structure apply to, expressed as 0-based
+         * ordinals in the 'readers' vector or in the files opened at 'path' (which
+         * are sorted lexicographically by path) in the containing
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.  Only one of
+         * 'tids' and 'shards' can be non-empty.  If 'tids' is empty and 'shards' is
+         * empty, the details apply to all not-yet-mentioned (by other 'tids' or
+         * 'shards' vectors in prior entries for this workload) inputs in the
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.
+         * If multiple entries list the same shard ordinal, only the last one is
+         * honored.
+         *
+         * If #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.only_shards
+         * is also set, the indices here apply to the input list *after* only those
+         * matching only_shards are removed.
+         */
+        // The only_shards wart is due to use cases that apply only_shards before
+        // sending a set of reader_t inputs; it is not ideal, but we do not have
+        // a simple solution for now.
+        std::vector<int> shards;
+        /**
+         * Limits these threads to this set of output streams, which are specified by
+         * ordinal 0 through the output count minus oner.  They will not be scheduled
+         * on any other output streams.
          */
         std::set<output_ordinal_t> output_binding;
         /**
@@ -200,10 +289,21 @@ public:
          * though the input were constructed by concatenating these ranges together.  A
          * #TRACE_MARKER_TYPE_WINDOW_ID marker is inserted between
          * ranges (with a value equal to the range ordinal) to notify the client of the
-         * discontinuity (but not before the first range nor between back-to-back regions
-         * with no separation), with a #dynamorio::drmemtrace::TRACE_TYPE_THREAD_EXIT
-         * record inserted after the final range.  These ranges must be non-overlapping
-         * and in increasing order.
+         * discontinuity.  This marker is inserted between back-to-back regions with no
+         * separation, but it is not inserted prior to the first range.  A
+         * #dynamorio::drmemtrace::TRACE_TYPE_THREAD_EXIT record is inserted after the
+         * final range.  These ranges must be non-overlapping and in increasing order.
+         *
+         * Be aware that selecting a subset of code can remove inter-input
+         * communication steps that could be required for forward progress.
+         * For example, if selected subsets include #TRACE_MARKER_TYPE_SYSCALL_UNSCHEDULE
+         * with no timeout but do not include a corresponding
+         * #TRACE_MARKER_TYPE_SYSCALL_SCHEDULE for wakeup, an input could remain
+         * unscheduled.
+         *
+         * Also beware that this can skip over trace header entries (like
+         * #TRACE_MARKER_TYPE_FILETYPE), which should ideally be obtained from the
+         * #dynamorio::drmemtrace::memtrace_stream_t API instead.
          */
         std::vector<range_t> regions_of_interest;
     };
@@ -225,11 +325,16 @@ public:
         /** The end reader for 'reader'. */
         std::unique_ptr<ReaderType> end;
         /**
-         * A unique identifier to distinguish from other readers for this workload.
-         * Typically this will be the thread id but it does not need to be, so long
-         * as it is not 0 (DynamoRIO's INVALID_THREAD_ID sentinel).
-         * This is used to in the 'thread_modifiers' field of 'input_workload_t'
-         * to refer to this input.
+         * A unique identifier to distinguish from other readers for this workload.  This
+         * value is used to fill in the #memref_t "tid" field for synthesized context
+         * switch records in dynamic schedules, for synthesized thread exits when skipping
+         * beyond the end of an input, and for synthesized region separator markers when
+         * skipping.  It is also used to refer to this input in the
+         * 'thread_modifiers.tids' field of 'input_workload_t' (though an alternative is
+         * to use the 'thread_modifiers.shards' field).
+         *
+         * This identifier can be non-unique if the aforementioned uses are not
+         * relevant: which would typically only be in non-dynamically-scheduled modes.
          */
         memref_tid_t tid = INVALID_THREAD_ID;
     };
@@ -249,7 +354,7 @@ public:
             : path(trace_path)
         {
             if (!regions_of_interest.empty())
-                thread_modifiers.push_back(input_thread_info_t(regions_of_interest));
+                thread_modifiers.emplace_back(regions_of_interest);
         }
         /**
          * Create a workload with a set of pre-initialized readers which use the given
@@ -260,7 +365,7 @@ public:
             : readers(std::move(readers))
         {
             if (!regions_of_interest.empty())
-                thread_modifiers.push_back(input_thread_info_t(regions_of_interest));
+                thread_modifiers.emplace_back(regions_of_interest);
         }
         /** Size of the struct for binary-compatible additions. */
         size_t struct_size = sizeof(input_workload_t);
@@ -284,12 +389,62 @@ public:
         /**
          * If empty, every trace file in 'path' or every reader in 'readers' becomes
          * an enabled input.  If non-empty, only those inputs whose thread ids are
-         * in this vector are enabled and the rest are ignored.
+         * in this set are enabled and the rest are ignored.  It is an error to
+         * have both this and 'only_shards' be non-empty.
          */
         std::set<memref_tid_t> only_threads;
 
         /** Scheduling modifiers for the threads in this workload. */
         std::vector<input_thread_info_t> thread_modifiers;
+
+        /**
+         * If non-empty, all input records outside of these ranges are skipped.  These
+         * times cut across all inputs of this workload.  The times are converted into a
+         * separate sequence of instruction
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::range_t for each input.  The end
+         * result is as though the #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * input_thread_info_t.regions_of_interest
+         * field were set for each input.  See the comments by that field for further
+         * details such as the marker inserted between ranges.  Although the times cut
+         * across all inputs for determining the per-input instruction-ordinal ranges, no
+         * barrier is applied to align the resulting regions of interest: i.e., one input
+         * can finish its initial region and move to its next region before all other
+         * inputs finish their initial regions.
+         *
+         * If non-empty, the
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * input_thread_info_t.regions_of_interest
+         * field must be empty for each modifier for this workload.
+         *
+         * If non-empty, the #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * scheduler_options_t.replay_as_traced_istream field must also be specified to
+         * provide the timestamp-to-instruction-ordinal mappings.  These mappings are not
+         * precise due to the coarse-grained timestamps and the elision of adjacent
+         * timestamps in the istream.  Interpolation is used to estimate instruction
+         * ordinals when timestamps fall in between recorded points.
+         *
+         * This field is only supported for thread-sharded inputs, as core-sharded
+         * do not have an automatically generated replay-as-traced file.
+         */
+        std::vector<timestamp_range_t> times_of_interest;
+
+        /**
+         * If empty, every trace file in 'path' or every reader in 'readers' becomes
+         * an enabled input.  If non-empty, only those inputs whose indices are
+         * in this set are enabled and the rest are ignored.  An index is the
+         * 0-based ordinal in the 'readers' vector or in the files opened at
+         * 'path' (which are sorted lexicographically by path).  It is an error to
+         * have both this and 'only_threads' be non-empty.
+         */
+        std::set<input_ordinal_t> only_shards;
+
+        /**
+         * If greater than zero, imposes a maximum number of outputs that the inputs
+         * comprising this workload can execute upon simultaneously.  If an input would
+         * be executed next but would exceed this cap, a different input is selected
+         * instead or the output goes idle if none are found.
+         */
+        int output_limit = 0;
 
         // Work around a known Visual Studio issue where it complains about deleted copy
         // constructors for unique_ptr by deleting our copies and defaulting our moves.
@@ -327,6 +482,13 @@ public:
          * #dynamorio::drmemtrace::scheduler_tmpl_t::
          * scheduler_options_t.replay_as_traced_istream
          * must be specified.
+         * The original as-traced cpuid that is mapped to each output stream can be
+         * obtained by calling the get_output_cpuid() function on each stream.
+         *
+         * An alternative use of this mapping is with a single output to interleave
+         * inputs in a strict timestamp order, as with make_scheduler_serial_options(),
+         * without specifying a schedule file and without recreating core mappings:
+         * only timestamps are honored.
          */
         MAP_TO_RECORDED_OUTPUT,
         /**
@@ -338,6 +500,16 @@ public:
          * or a (potentially) blocking system call is identified.  At this point,
          * a new input is selected, taking into consideration other options such
          * as priorities, core bindings, and inter-input dependencies.
+         * In this mode, input #TRACE_MARKER_TYPE_CPU_ID marker values are modified
+         * to reflect the virtual cores; input #TRACE_MARKER_TYPE_TIMESTAMP values are
+         * modified to reflect a notion of virtual time; and input .tid and .pid
+         * #memref_t fields have the workload ordinal set in the top
+         * (64 - #MEMREF_ID_WORKLOAD_SHIFT) bits in order
+         * to ensure the values are unique across multiple workloads (see also
+         * workload_from_memref_pid(), workload_from_memref_tid(),
+         * pid_from_memref_tid(), and tid_from_memref_tid()).
+         * (The tid and pid changes are not supported for 32-bit builds, and
+         * do not support tid values occupying more than #MEMREF_ID_WORKLOAD_SHIFT bits.)
          */
         MAP_TO_ANY_OUTPUT,
         /**
@@ -348,14 +520,39 @@ public:
          * The same output count and input stream order and count must be re-specified;
          * scheduling details such as regions of interest and core bindings do not
          * need to be re-specified and are in fact ignored.
+         * In this mode, input #TRACE_MARKER_TYPE_CPU_ID marker values are modified
+         * to reflect the virtual cores; input #TRACE_MARKER_TYPE_TIMESTAMP values are
+         * modified to reflect a notion of virtual time; and input .tid and .pid
+         * #memref_t fields have the workload ordinal set in the top 32
+         * (64 - #MEMREF_ID_WORKLOAD_SHIFT) bits in order
+         * to ensure the values are unique across multiple workloads (see also
+         * workload_from_memref_pid(), workload_from_memref_tid(),
+         * pid_from_memref_tid(), and tid_from_memref_tid()).
+         * (The tid and pid changes are not supported for 32-bit builds, and
+         * do not support tid values occupying more than #MEMREF_ID_WORKLOAD_SHIFT bits.)
          */
         MAP_AS_PREVIOUSLY,
     };
 
-    /** Flags specifying how inter-input-stream dependencies are handled. */
+    /**
+     * Flags specifying how inter-input-stream dependencies are handled.  The _BITFIELD
+     * values can be combined.  Typical combinations are provided so the enum type can be
+     * used directly.
+     */
     enum inter_input_dependency_t {
         /** Ignores all inter-input dependencies. */
-        DEPENDENCY_IGNORE,
+        DEPENDENCY_IGNORE = 0x00,
+        /**
+         * Ensures timestamps in the inputs arrive at the outputs in timestamp order.
+         * For #MAP_TO_ANY_OUTPUT, enforcing asked-for context switch rates is more
+         * important that honoring precise trace-buffer-based timestamp inter-input
+         * dependencies: thus, timestamp ordering will be followed at context switch
+         * points for picking the next input, but timestamps will not preempt an input.
+         * To precisely follow the recorded timestamps, use #MAP_TO_RECORDED_OUTPUT.
+         * If this flag is on, #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * scheduler_options_t.read_inputs_in_init must be set to true.
+         */
+        DEPENDENCY_TIMESTAMPS_BITFIELD = 0x01,
         /**
          * Ensures timestamps in the inputs arrive at the outputs in timestamp order.
          * For #MAP_TO_ANY_OUTPUT, enforcing asked-for context switch rates is more
@@ -364,7 +561,14 @@ public:
          * points for picking the next input, but timestamps will not preempt an input.
          * To precisely follow the recorded timestamps, use #MAP_TO_RECORDED_OUTPUT.
          */
-        DEPENDENCY_TIMESTAMPS,
+        DEPENDENCY_DIRECT_SWITCH_BITFIELD = 0x02,
+        /**
+         * Combines #DEPENDENCY_TIMESTAMPS_BITFIELD and
+         * #DEPENDENCY_DIRECT_SWITCH_BITFIELD.  This is the recommended setting for most
+         * schedules.
+         */
+        DEPENDENCY_TIMESTAMPS =
+            (DEPENDENCY_TIMESTAMPS_BITFIELD | DEPENDENCY_DIRECT_SWITCH_BITFIELD),
         // TODO i#5843: Add inferred data dependencies.
     };
 
@@ -400,6 +604,8 @@ public:
          * Causes the get_record_ordinal() and get_instruction_ordinal() results
          * for an output stream to equal those values for the current input stream
          * for that output, rather than accumulating across inputs.
+         * This also changes the behavior of get_shard_index() as documented under that
+         * function.
          */
         SCHEDULER_USE_INPUT_ORDINALS = 0x4,
         // This was added for the analyzer view tool on a single trace specified via
@@ -407,7 +613,8 @@ public:
         // whether to request SCHEDULER_USE_INPUT_ORDINALS.
         /**
          * If there is just one input and just one output stream, this sets
-         * #SCHEDULER_USE_INPUT_ORDINALS; otherwise, it has no effect.
+         * #SCHEDULER_USE_INPUT_ORDINALS.  In all cases, this changes the behavior
+         * of get_shard_index() as documented under that function.
          */
         SCHEDULER_USE_SINGLE_INPUT_ORDINALS = 0x8,
         // TODO i#5843: Add more speculation flags for other strategies.
@@ -444,11 +651,15 @@ public:
         /** The unit of the schedule time quantum. */
         quantum_unit_t quantum_unit = QUANTUM_INSTRUCTIONS;
         /**
-         * The scheduling quantum duration for preemption.  The units are
-         * specified by
-         * #dynamorio::drmemtrace::scheduler_tmpl_t::scheduler_options_t::quantum_unit.
+         * Deprecated: use #quantum_duration_us and #time_units_per_us for #QUANTUM_TIME,
+         * or #quantum_duration_instrs for #QUANTUM_INSTRUCTIONS, instead.  It
+         * is an error to set this to a non-zero value when #struct_size includes
+         * #quantum_duration_us.  When #struct_size does not include
+         * #quantum_duration_us and this value is non-zero, the value in
+         * #quantum_duration_us is replaced with this value divided by the default
+         * value of #time_units_per_us.
          */
-        uint64_t quantum_duration = 10 * 1000 * 1000;
+        uint64_t quantum_duration = 0;
         /**
          * If > 0, diagnostic messages are printed to stderr.  Higher values produce
          * more frequent diagnostics.
@@ -470,9 +681,229 @@ public:
         /**
          * Input stream for replaying the traced schedule when #MAP_TO_RECORDED_OUTPUT is
          * specified for more than one output stream (whose count must match the number
-         * of traced cores).
+         * of traced cores).  Alternatively, if
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.times_of_interest
+         * is non-empty, this stream is required for obtaining the mappings between
+         * timestamps and instruction ordinals.
          */
         archive_istream_t *replay_as_traced_istream = nullptr;
+        /**
+         * Determines the minimum latency in the unit of the trace's timestamps
+         * (microseconds) for which a non-maybe-blocking system call (one without
+         * a #TRACE_MARKER_TYPE_MAYBE_BLOCKING_SYSCALL marker) will be treated as
+         * blocking and trigger a context switch.
+         */
+        uint64_t syscall_switch_threshold = 30000000;
+        /* If we change this, we should change drx time scaling's zero sleep
+         * conversion ZERO_PRE_INFLATE_NSEC so that it hits this threshold
+         * with a 50x (commonly applied) scale.
+         */
+        /**
+         * Determines the minimum latency in the unit of the trace's timestamps
+         * (microseconds) for which a maybe-blocking system call (one with
+         * a #TRACE_MARKER_TYPE_MAYBE_BLOCKING_SYSCALL marker) will be treated as
+         * blocking and trigger a context switch.
+         */
+        uint64_t blocking_switch_threshold = 500;
+        /**
+         * Deprecated: use #block_time_multiplier instead.  It is an error to set
+         * this to a non-zero value when #struct_size includes #block_time_multiplier.
+         * When #struct_size does not include #block_time_multiplier and this value is
+         * non-zero, the value in #block_time_multiplier is replaced with this value
+         * divided by the default value of #time_units_per_us.
+         */
+        double block_time_scale = 0.;
+        /**
+         * Deprecated: use #block_time_max_us and #time_units_per_us instead.  It is
+         * an error to set this to a non-zero value when #struct_size includes
+         * #block_time_max_us.  When #struct_size does not include #block_time_max_us
+         * and this value is non-zero, the value in #block_time_max_us is replaced
+         * with this value divided by the default value of #time_units_per_us.
+         */
+        uint64_t block_time_max = 0;
+        // XXX: Should we share the file-to-reader code currently in the scheduler
+        // with the analyzer and only then need reader interfaces and not pass paths
+        // to the scheduler?
+        /**
+         * Input file containing template sequences of kernel context switch code.
+         * Each sequence must start with a #TRACE_MARKER_TYPE_CONTEXT_SWITCH_START
+         * marker and end with #TRACE_MARKER_TYPE_CONTEXT_SWITCH_END.
+         * The values of each marker must hold a #dynamorio::drmemtrace::switch_type_t
+         * enum value indicating which type of switch it corresponds to.
+         * Each sequence can be stored as a separate subfile of an archive file,
+         * or concatenated into a single file.
+         * Each sequence should be in the regular offline drmemtrace format.
+         * The sequence is inserted into the output stream on each context switch
+         * of the indicated type. Each record in the inserted sequence holds the
+         * next input stream's tid and pid.
+         * The same file (or reader) must be passed when replaying as this kernel
+         * code is not stored when recording.
+         * An alternative to passing the file path is to pass #kernel_switch_reader
+         * and #kernel_switch_reader_end.
+         */
+        std::string kernel_switch_trace_path;
+        /**
+         * An alternative to #kernel_switch_trace_path is to pass a reader and
+         * #kernel_switch_reader_end.  See the description of #kernel_switch_trace_path.
+         * This field is only examined if #kernel_switch_trace_path is empty.
+         * The scheduler will call the init() function for the reader.
+         */
+        std::unique_ptr<ReaderType> kernel_switch_reader;
+        /** The end reader for #kernel_switch_reader. */
+        std::unique_ptr<ReaderType> kernel_switch_reader_end;
+        /**
+         * If true, enables a mode where all outputs are serialized into one global outer
+         * layer output.  The single global output stream alternates in round-robin
+         * lockstep among each core output.  The core outputs operate just like they
+         * would with no serialization, other than timing differences relative to other
+         * core outputs.
+         */
+        bool single_lockstep_output = false;
+        /**
+         * If true, enables a mode where the normal methods of choosing the next input
+         * based on priority, timestamps (if -sched_order_time is set), and FIFO order
+         * are disabled.  Instead, the scheduler selects the next input randomly.  Output
+         * bindings are still honored.  This is intended for experimental use in
+         * sensitivity studies.
+         */
+        bool randomize_next_input = false;
+        /**
+         * If true, the scheduler will read from each input to determine its filetype
+         * during initialization.  If false, the filetype will not be available prior
+         * to explicit record retrieval by the user, but this may be required for
+         * inputs whose sources are not yet set up at scheduler init time (e.g.,
+         * inputs over blocking pipes with data only becoming available after
+         * initializing the scheduler, as happens with online trace analyzers).
+         * This must be true for #DEPENDENCY_TIMESTAMPS as it also requires reading
+         * ahead.
+         */
+        bool read_inputs_in_init = true;
+        /**
+         * If true, the scheduler will attempt to switch to the recorded targets of
+         * #TRACE_MARKER_TYPE_DIRECT_THREAD_SWITCH system call metadata markers
+         * regardless of system call latency.  Furthermore, the scheduler will model
+         * "unscheduled" semantics and honor the #TRACE_MARKER_TYPE_SYSCALL_UNSCHEDULE
+         * and #TRACE_MARKER_TYPE_SYSCALL_SCHEDULE markers.  If false, these markers are
+         * ignored and only system call latency thresholds are used to determine switches
+         * (these markers remain: they are not removed from the trace).
+         */
+        bool honor_direct_switches = true;
+        /**
+         * How many time units for the "cur_time" value passed to next_record() are
+         * equivalent to one simulated microsecond.  E.g., if the time units are in
+         * picoseconds, pass one million here.  This is used to scale all of the
+         * other parameters that are in microseconds (they all end in "_us": e.g.,
+         * #quantum_duration_us) so that they operate on the right time scale for the
+         * passed-in simulator time (or wall-clock microseconds if no time is passed).
+         * The default value is a rough estimate when no accurate simulated time is
+         * available: the instruction count is used in that case, and we use the
+         * instructions per microsecond for a 2GHz clock at 0.5 IPC as our default.
+         */
+        double time_units_per_us = 1000.;
+        /**
+         * The scheduling quantum duration for preemption, in simulated microseconds,
+         * for #QUANTUM_TIME.  This value is multiplied by #time_units_per_us to
+         * produce a value that is compared to the "cur_time" parameter to
+         * next_record() to determine when to force a quantum switch.
+         */
+        uint64_t quantum_duration_us = 5000;
+        /**
+         * The scheduling quantum duration for preemption, in instruction count,
+         * for #QUANTUM_INSTRUCTIONS.  The time passed to next_record() is ignored
+         * for purposes of quantum preempts.
+         *
+         * Instructions executed in a quantum may end up higher than the specified
+         * value to avoid interruption of the kernel system call sequence.
+         */
+        // We pick 10 million to match 2 instructions per nanosecond with a 5ms quantum.
+        uint64_t quantum_duration_instrs = 10 * 1000 * 1000;
+        /**
+         * Controls the amount of time inputs are considered blocked at a syscall
+         * whose as-traced latency (recorded in timestamp records in the trace)
+         * exceeds #syscall_switch_threshold or #blocking_switch_threshold.  The
+         * as-traced syscall latency (which is in traced microseconds) is multiplied
+         * by this field to produce the blocked time in simulated microseconds.  Once
+         * that many simulated microseconds have passed according to the "cur_time"
+         * value passed to next_record() (multiplied by #time_units_per_us), the
+         * input will be no longer considered blocked.  The blocked time is clamped
+         * to a maximum value controlled by #block_time_max.
+         *
+         * While there is no direct overhead during tracing, indirect overhead
+         * does result in some inflation of recorded system call latencies.
+         * Thus, a value below 0 is typically used here.  This value, in combination
+         * with #block_time_max_us, can be tuned to achieve a desired idle rate.
+         * The default value errs on the side of less idle time.
+         */
+        double block_time_multiplier = 0.1;
+        /**
+         * The maximum time in microseconds for an input to be considered blocked for
+         * any one system call.  This value is multiplied by #time_units_per_us to
+         * produce a value that is compared to the "cur_time" parameter to
+         * next_record().  If any block time (see #block_time_multiplier) exceeds
+         * this value, it is capped to this value.  This value is also used as a
+         * fallback to avoid hangs when there are no scheduled inputs: if the only
+         * inputs left are "unscheduled" (see #TRACE_MARKER_TYPE_SYSCALL_UNSCHEDULE),
+         * after this amount of time those inputs are all re-scheduled.
+         */
+        // TODO i#6959: Once we have -exit_if_all_unscheduled raise this.
+        uint64_t block_time_max_us = 2500;
+        /**
+         * The minimum time in microseconds that must have elapsed after an input last
+         * ran on an output before that input is allowed to be migrated to a different
+         * output.  This value is multiplied by #time_units_per_us to produce a value
+         * that is compared to the "cur_time" parameter to next_record().
+         */
+        uint64_t migration_threshold_us = 500;
+        /**
+         * The period in microseconds at which rebalancing is performed to keep output
+         * run queues from becoming uneven.  This value is multiplied by
+         * #time_units_per_us to produce a value that is compared to the "cur_time"
+         * parameter to next_record().
+         */
+        uint64_t rebalance_period_us = 50000;
+        /**
+         * Determines whether an unscheduled-indefinitely input really is unscheduled for
+         * an infinite time, or instead is treated as blocked for the maxiumim time
+         * (#block_time_max_us) scaled by #block_time_multiplier.
+         */
+        bool honor_infinite_timeouts = false;
+        /**
+         * For #MAP_TO_ANY_OUTPUT, when an input reaches EOF, if the number of non-EOF
+         * inputs left as a fraction of the original inputs is equal to or less than
+         * this value then the scheduler exits (sets all outputs to EOF) rather than
+         * finishing off the final inputs.  This helps avoid long sequences of idles
+         * during staggered endings with fewer inputs left than cores and only a small
+         * fraction of the total instructions left in those inputs.  Since the remaining
+         * instruction count is not considered (as it is not available), use discretion
+         * when raising this value on uneven inputs.
+         */
+        double exit_if_fraction_inputs_left = 0.1;
+        /**
+         * Input file containing template sequences of kernel system call code.
+         * Each sequence must start with a #TRACE_MARKER_TYPE_SYSCALL_TRACE_START
+         * marker and end with #TRACE_MARKER_TYPE_SYSCALL_TRACE_END.
+         * The value of each marker must hold the system call number for the system call
+         * it corresponds to. Sequences for multiple system calls are concatenated into a
+         * single file. Each sequence should be in the regular offline drmemtrace format.
+         * Whenever a #TRACE_MARKER_TYPE_SYSCALL marker is encountered in a trace, if a
+         * corresponding sequence with the same marker value exists it is inserted into
+         * the output stream after the #TRACE_MARKER_TYPE_SYSCALL marker.
+         * The same file (or reader) must be passed when replaying as this kernel
+         * code is not stored when recording.
+         * An alternative to passing the file path is to pass #kernel_syscall_reader
+         * and #kernel_syscall_reader_end.
+         */
+        std::string kernel_syscall_trace_path;
+        /**
+         * An alternative to #kernel_syscall_trace_path is to pass a reader and
+         * #kernel_syscall_reader_end.  See the description of #kernel_syscall_trace_path.
+         * This field is only examined if #kernel_syscall_trace_path is empty.
+         * The scheduler will call the init() function for the reader.
+         */
+        std::unique_ptr<ReaderType> kernel_syscall_reader;
+        /** The end reader for #kernel_syscall_reader. */
+        std::unique_ptr<ReaderType> kernel_syscall_reader_end;
+        // When adding new options, also add to print_configuration().
     };
 
     /**
@@ -509,10 +940,11 @@ public:
      */
     class stream_t : public memtrace_stream_t {
     public:
-        stream_t(scheduler_tmpl_t<RecordType, ReaderType> *scheduler, int ordinal,
-                 int verbosity = 0)
+        stream_t(scheduler_impl_tmpl_t<RecordType, ReaderType> *scheduler, int ordinal,
+                 int verbosity = 0, int max_ordinal = -1)
             : scheduler_(scheduler)
             , ordinal_(ordinal)
+            , max_ordinal_(max_ordinal)
             , verbosity_(verbosity)
         {
         }
@@ -529,7 +961,8 @@ public:
         // diminished.
         /**
          * Advances to the next record in the stream.  Returns a status code on whether
-         * and how to continue.
+         * and how to continue.  Uses the instruction count plus idle count to this point
+         * as the time; use the variant that takes "cur_time" to instead provide a time.
          */
         virtual stream_status_t
         next_record(RecordType &record);
@@ -537,24 +970,41 @@ public:
         /**
          * Advances to the next record in the stream.  Returns a status code on whether
          * and how to continue.  Supplies the current time for #QUANTUM_TIME.  The time
-         * should be considered to be the time prior to processing the returned record.
-         * The time is unitless but needs to be a globally consistent increasing value
-         * across all output streams.  A 0 value for "cur_time" is not allowed.
-         * #STATUS_INVALID is returned if 0 or a value smaller than the start time of the
-         * current input's quantum is passed in.
+         * should be considered to be the simulated time prior to processing the returned
+         * record.  The time's units can be chosen by the caller, with
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::scheduler_options_t.time_units_per_us
+         * providing the conversion to simulated microseconds.  #STATUS_INVALID is
+         * returned if 0 or a value smaller than the start time of the current input's
+         * quantum is passed in when #QUANTUM_TIME and #MAP_TO_ANY_OUTPUT are specified.
          */
         virtual stream_status_t
         next_record(RecordType &record, uint64_t cur_time);
 
         /**
+         * Queues the last-read record returned by next_record() such that it will be
+         * returned on the subsequent call to next_record() when this same input is
+         * active.  Causes ordinal queries on the current input to be off by one until the
+         * record is re-read.  Furthermore, the get_last_timestamp() query may still
+         * include this record, whether called on the input or output stream, immediately
+         * after this call.  Fails if called multiple times in a row without an
+         * intervening next_record() call.  Fails if called during speculation (between
+         * start_speculation() and stop_speculation() calls).
+         */
+        virtual stream_status_t
+        unread_last_record();
+
+        /**
          * Begins a diversion from the regular inputs to a side stream of records
          * representing speculative execution starting at 'start_address'.
          *
-         * Because the instruction record after a branch typically needs to be read
-         * before knowing whether a simulator is on the wrong path or not, this routine
-         * supports putting back the current record so that it will be re-provided as
-         * the first record after (the outermost) stop_speculation(), if
-         * "queue_current_record" is true.
+         * Because the instruction record after a branch typically needs to be read before
+         * knowing whether a simulator is on the wrong path or not, this routine supports
+         * putting back the current record so that it will be re-provided as the first
+         * record after stop_speculation(), if "queue_current_record" is true.  The same
+         * caveats on the input stream ordinals and last timestamp described under
+         * unread_last_record() apply to this record queueing.  Calling
+         * start_speculation() immediately after unread_last_record() and requesting
+         * queueing will return a failure code.
          *
          * This call can be nested; each call needs to be paired with a corresponding
          * stop_speculation() call.
@@ -576,7 +1026,7 @@ public:
         /**
          * Disables or re-enables this output stream.  If "active" is false, this
          * stream becomes inactive and its currently assigned input is moved to the
-         * ready queue to be scheduled on other outputs.  The #STATUS_WAIT code is
+         * ready queue to be scheduled on other outputs.  The #STATUS_IDLE code is
          * returned to next_record() for inactive streams.  If "active" is true,
          * this stream becomes active again.
          * This is only supported for #MAP_TO_ANY_OUTPUT.
@@ -603,15 +1053,22 @@ public:
          * output stream skipped ahead.
          */
         uint64_t
-        get_record_ordinal() const override
+        get_record_ordinal() const override;
+        /**
+         * Identical to get_record_ordinal() but ignores the
+         * #SCHEDULER_USE_INPUT_ORDINALS flag.
+         */
+        uint64_t
+        get_output_record_ordinal() const
         {
-            if (TESTANY(sched_type_t::SCHEDULER_USE_INPUT_ORDINALS,
-                        scheduler_->options_.flags))
-                return scheduler_->get_input_stream(ordinal_)->get_record_ordinal();
             return cur_ref_count_;
         }
         /**
          * Returns the count of instructions from the start of the trace to this point.
+         * For record_scheduler_t, if any encoding records or the internal record
+         * TRACE_MARKER_TYPE_BRANCH_TARGET records are present prior to an instruction
+         * marker, the count will increase at the first of those records as they are
+         * considered part of the instruction.
          * If #SCHEDULER_USE_INPUT_ORDINALS is set, then this value matches the
          * instruction ordinal for the current input stream (and thus might decrease or
          * not change across records if the input changed). Otherwise, if multiple input
@@ -624,11 +1081,14 @@ public:
          * output stream skipped ahead.
          */
         uint64_t
-        get_instruction_ordinal() const override
+        get_instruction_ordinal() const override;
+        /**
+         * Identical to get_instruction_ordinal() but ignores the
+         * #SCHEDULER_USE_INPUT_ORDINALS flag.
+         */
+        uint64_t
+        get_output_instruction_ordinal() const
         {
-            if (TESTANY(sched_type_t::SCHEDULER_USE_INPUT_ORDINALS,
-                        scheduler_->options_.flags))
-                return scheduler_->get_input_stream(ordinal_)->get_instruction_ordinal();
             return cur_instr_count_;
         }
         /**
@@ -637,18 +1097,12 @@ public:
          * traces, this is the name of the pipe.
          */
         std::string
-        get_stream_name() const override
-        {
-            return scheduler_->get_input_name(ordinal_);
-        }
+        get_stream_name() const override;
         /**
          * Returns the ordinal for the current input stream feeding this output stream.
          */
         virtual input_ordinal_t
-        get_input_stream_ordinal()
-        {
-            return scheduler_->get_input_ordinal(ordinal_);
-        }
+        get_input_stream_ordinal() const;
         /**
          * Returns the ordinal for the workload which is the source of the current input
          * stream feeding this output stream.  This workload ordinal is the index into the
@@ -657,36 +1111,25 @@ public:
          * stream.
          */
         virtual int
-        get_input_workload_ordinal()
-        {
-            return scheduler_->get_workload_ordinal(ordinal_);
-        }
+        get_input_workload_ordinal() const;
         /**
          * Returns the value of the most recently seen #TRACE_MARKER_TYPE_TIMESTAMP
          * marker.
          */
         uint64_t
-        get_last_timestamp() const override
-        {
-            if (TESTANY(sched_type_t::SCHEDULER_USE_INPUT_ORDINALS,
-                        scheduler_->options_.flags))
-                return scheduler_->get_input_stream(ordinal_)->get_last_timestamp();
-            return last_timestamp_;
-        }
+        get_last_timestamp() const override;
         /**
          * Returns the value of the first seen #TRACE_MARKER_TYPE_TIMESTAMP marker.
          */
         uint64_t
-        get_first_timestamp() const override
-        {
-            if (TESTANY(sched_type_t::SCHEDULER_USE_INPUT_ORDINALS,
-                        scheduler_->options_.flags))
-                return scheduler_->get_input_stream(ordinal_)->get_first_timestamp();
-            return first_timestamp_;
-        }
+        get_first_timestamp() const override;
         /**
          * Returns the #trace_version_t value from the
          * #TRACE_MARKER_TYPE_VERSION record in the trace header.
+         * This can be queried prior to explicitly retrieving any records from
+         * output streams, unless #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * scheduler_options_t.read_inputs_in_init is false (which is the
+         * case for online drmemtrace analysis).
          */
         uint64_t
         get_version() const override
@@ -698,6 +1141,10 @@ public:
          * #offline_file_type_t identifying the architecture and
          * other key high-level attributes of the trace from the
          * #TRACE_MARKER_TYPE_FILETYPE record in the trace header.
+         * This can be queried prior to explicitly retrieving any records from
+         * output streams, unless #dynamorio::drmemtrace::scheduler_tmpl_t::
+         * scheduler_options_t.read_inputs_in_init is false (which is the
+         * case for online drmemtrace analysis).
          */
         uint64_t
         get_filetype() const override
@@ -741,34 +1188,132 @@ public:
          * count and get_record_ordinal() will return the value of the prior record.
          */
         bool
-        is_record_synthetic() const override
+        is_record_synthetic() const override;
+
+        /**
+         * Returns a unique identifier for the current output stream.  For
+         * #MAP_TO_RECORDED_OUTPUT, the identifier is the as-traced cpuid mapped to this
+         * output.  For dynamic schedules, the identifier is the output stream ordinal,
+         * except for #OFFLINE_FILE_TYPE_CORE_SHARDED inputs where the identifier
+         * is the input stream ordinal.
+         */
+        int64_t
+        get_output_cpuid() const override;
+
+        /**
+         * Returns the ordinal for the current
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::input_workload_t.
+         *
+         * For a core-sharded-on-disk trace (#OFFLINE_FILE_TYPE_CORE_SHARDED), which
+         * is already scheduled, get_workload_id() will not return the original
+         * separate inputs but rather the new inputs as seen by the scheduler which
+         * are a single workload with one input per core.  Use the modified #memref_t
+         * tid and pid fields with the helpers workload_from_memref_pid() and
+         * workload_from_memref_tid() to obtain the workload in this case.
+         */
+        int64_t
+        get_workload_id() const override
         {
-            return scheduler_->is_record_synthetic(ordinal_);
+            return static_cast<int64_t>(get_input_workload_ordinal());
         }
 
+        /**
+         * Returns the ordinal for the current input stream feeding this output stream.
+         */
+        int64_t
+        get_input_id() const override
+        {
+            return static_cast<int64_t>(get_input_stream_ordinal());
+        }
+
+        /**
+         * Returns the thread identifier for the current input stream feeding this
+         * output stream.
+         */
+        int64_t
+        get_tid() const override;
+
+        /**
+         * Returns the #dynamorio::drmemtrace::memtrace_stream_t interface for the
+         * current input stream feeding this output stream. When we're at a
+         * #TRACE_MARKER_TYPE_CORE_IDLE record, it returns a nullptr as there is no
+         * input feeding the output stream at that time.
+         */
+        memtrace_stream_t *
+        get_input_interface() const override;
+
+        /**
+         * Returns the ordinal for the current output stream. If
+         * #dynamorio::drmemtrace::scheduler_tmpl_t::scheduler_options_t::
+         * single_lockstep_output
+         * is set to true, this returns the ordinal of the currently active "inner"
+         * output stream.  Otherwise, this returns the constant ordinal for this output
+         * stream as there is no concept of inner or outer streams.
+         */
+        output_ordinal_t
+        get_output_stream_ordinal() const
+        {
+            return ordinal_;
+        }
+
+        /**
+         * For #SCHEDULER_USE_INPUT_ORDINALS or
+         * #SCHEDULER_USE_SINGLE_INPUT_ORDINALS, returns the input stream ordinal, except
+         * for the case of a single combined-stream input with the passed-in thread id
+         * set to INVALID_THREAD_ID (the online analysis mode for analyzer tools where the
+         * inputs for multiple threads are all combined in one process-wide pipe) in which
+         * case the last trace record's tid as an ordinal (in the order observed in the
+         * output stream) is returned; otherwise returns the output stream ordinal.
+         */
+        int
+        get_shard_index() const override;
+
+        /**
+         * Returns whether the current record is from a part of the trace corresponding
+         * to kernel execution.
+         */
+        bool
+        is_record_kernel() const override;
+
+        uint64_t
+        get_next_trace_pc() const override;
+
+        /**
+         * Returns the value of the specified statistic for this output stream.
+         * The values for all output streams must be summed to obtain global counts.
+         * These statistics are not guaranteed to be accurate when replaying a
+         * prior schedule via #MAP_TO_RECORDED_OUTPUT.
+         */
+        double
+        get_schedule_statistic(schedule_statistic_t stat) const override;
+
     protected:
-        scheduler_tmpl_t<RecordType, ReaderType> *scheduler_ = nullptr;
+        scheduler_impl_tmpl_t<RecordType, ReaderType> *scheduler_ = nullptr;
         int ordinal_ = -1;
+        // If max_ordinal_ >= 0, ordinal_ is incremented modulo max_ordinal_ at the start
+        // of every next_record() invocation.
+        int max_ordinal_ = -1;
         int verbosity_ = 0;
         uint64_t cur_ref_count_ = 0;
         uint64_t cur_instr_count_ = 0;
         uint64_t last_timestamp_ = 0;
         uint64_t first_timestamp_ = 0;
+        bool in_kernel_trace_ = false;
         // Remember top-level headers for the memtrace_stream_t interface.
         uint64_t version_ = 0;
         uint64_t filetype_ = 0;
         uint64_t cache_line_size_ = 0;
         uint64_t chunk_instr_count_ = 0;
         uint64_t page_size_ = 0;
+        RecordType prev_record_ = {};
 
-        // Let the outer class update our state.
-        friend class scheduler_tmpl_t<RecordType, ReaderType>;
+        // Let the impl class update our state.
+        friend class scheduler_impl_tmpl_t<RecordType, ReaderType>;
     };
 
     /** Default constructor. */
-    scheduler_tmpl_t()
-    {
-    }
+    scheduler_tmpl_t() = default;
+
     virtual ~scheduler_tmpl_t() = default;
 
     /**
@@ -782,50 +1327,38 @@ public:
     /**
      * Returns the 'ordinal'-th output stream.
      */
-    virtual stream_t *
-    get_stream(output_ordinal_t ordinal)
-    {
-        if (ordinal < 0 || ordinal >= static_cast<output_ordinal_t>(outputs_.size()))
-            return nullptr;
-        return &outputs_[ordinal].stream;
-    }
+    stream_t *
+    get_stream(output_ordinal_t ordinal);
 
     /** Returns the number of input streams. */
-    virtual int
-    get_input_stream_count() const
-    {
-        return static_cast<input_ordinal_t>(inputs_.size());
-    }
+    int
+    get_input_stream_count() const;
 
     /**
      * Returns the #dynamorio::drmemtrace::memtrace_stream_t interface for the
      * 'ordinal'-th input stream.
      */
-    virtual memtrace_stream_t *
-    get_input_stream_interface(input_ordinal_t input) const
-    {
-        if (input < 0 || input >= static_cast<input_ordinal_t>(inputs_.size()))
-            return nullptr;
-        return inputs_[input].reader.get();
-    }
+    memtrace_stream_t *
+    get_input_stream_interface(input_ordinal_t input) const;
 
     /**
      * Returns the name (from get_stream_name()) of the 'ordinal'-th input stream.
      */
-    virtual std::string
-    get_input_stream_name(input_ordinal_t input) const
-    {
-        if (input < 0 || input >= static_cast<input_ordinal_t>(inputs_.size()))
-            return "";
-        return inputs_[input].reader->get_stream_name();
-    }
+    std::string
+    get_input_stream_name(input_ordinal_t input) const;
+
+    /**
+     * Returns the get_output_cpuid() value for the given output.
+     * This interface is exported so that a user can get the cpuids at initialization
+     * time when using single_lockstep_output where there is just one output stream
+     * even with multiple output cpus.
+     */
+    int64_t
+    get_output_cpuid(output_ordinal_t output) const;
 
     /** Returns a string further describing an error code. */
     std::string
-    get_error_string() const
-    {
-        return error_string_;
-    }
+    get_error_string() const;
 
     /**
      * Writes out the recorded schedule.  Requires that
@@ -838,369 +1371,18 @@ public:
 
 protected:
     typedef scheduler_tmpl_t<RecordType, ReaderType> sched_type_t;
-    typedef speculator_tmpl_t<RecordType> spec_type_t;
-
-    struct input_info_t {
-        input_info_t()
-            : lock(new std::mutex)
-        {
-        }
-        int index = -1; // Position in inputs_ vector.
-        std::unique_ptr<ReaderType> reader;
-        std::unique_ptr<ReaderType> reader_end;
-        // While the scheduler only hands an input to one output at a time, during
-        // scheduling decisions one thread may need to access another's fields.
-        // We use a unique_ptr to make this moveable for vector storage.
-        std::unique_ptr<std::mutex> lock;
-        // A tid can be duplicated across workloads so we need the pair of
-        // workload index + tid to identify the original input.
-        int workload = -1;
-        memref_tid_t tid = INVALID_THREAD_ID;
-        // If non-empty these records should be returned before incrementing the reader.
-        // This is used for read-ahead and inserting synthetic records.
-        // We use a deque so we can iterate over it.
-        std::deque<RecordType> queue;
-        std::set<output_ordinal_t> binding;
-        int priority = 0;
-        std::vector<range_t> regions_of_interest;
-        // Index into regions_of_interest.
-        int cur_region = 0;
-        // Whether we have reached the current region proper (or are still on the
-        // preceding inserted timestamp+cpuid).
-        bool in_cur_region = false;
-        bool has_modifier = false;
-        bool needs_init = false;
-        bool needs_advance = false;
-        bool needs_roi = true;
-        bool at_eof = false;
-        uintptr_t next_timestamp = 0;
-        uint64_t instrs_in_quantum = 0;
-        bool recorded_in_schedule = false;
-        // This is a per-workload value, stored in each input for convenience.
-        uint64_t base_timestamp = 0;
-        // This equals 'options_.deps == DEPENDENCY_TIMESTAMPS', stored here for
-        // access in InputTimestampComparator which is static and has no access
-        // to the schedule_t.  (An alternative would be to try to get a lambda
-        // with schedule_t "this" access for the comparator to compile: it is not
-        // simple to do so, however.)
-        bool order_by_timestamp = false;
-        // Global ready queue counter used to provide FIFO for same-priority inputs.
-        uint64_t queue_counter = 0;
-        // Used to switch on the insruction *after* a blocking syscall.
-        bool processing_blocking_syscall = false;
-        // Used to switch before we've read the next instruction.
-        bool switching_pre_instruction = false;
-        // Used for time-based quanta.
-        uint64_t start_time_in_quantum = 0;
+    // We use the "pImpl" idiom to allow us to create the appropriate subclass
+    // without changing callers who are using the scheduler_t constructor.
+    // We need a custom deleter to use an incomplete templated type in unique_ptr.
+    struct scheduler_impl_deleter_t {
+        void
+        operator()(scheduler_impl_tmpl_t<RecordType, ReaderType> *p);
     };
+    std::unique_ptr<scheduler_impl_tmpl_t<RecordType, ReaderType>,
+                    scheduler_impl_deleter_t>
+        impl_;
 
-    // Format for recording a schedule to disk.  A separate sequence of these records
-    // is stored per output stream; each output stream's sequence is in one component
-    // (subfile) of an archive file.
-    START_PACKED_STRUCTURE
-    struct schedule_record_t {
-        enum record_type_t {
-            // A regular entry denoting one thread sequence between context switches.
-            DEFAULT,
-            // The first entry in each component must be this type.  The "key" field
-            // holds a version number.
-            VERSION,
-            FOOTER,        // The final entry in the component.  Other fields are ignored.
-            SKIP,          // Skip ahead to the next region of interest.
-            SYNTHETIC_END, // A synthetic thread exit record must be supplied.
-        };
-        static constexpr int VERSION_CURRENT = 0;
-        schedule_record_t() = default;
-        schedule_record_t(record_type_t type, input_ordinal_t input, uint64_t start,
-                          uint64_t stop, uint64_t time)
-            : type(type)
-            , key(input)
-            , start_instruction(start)
-            , stop_instruction(stop)
-            , timestamp(time)
-        {
-        }
-        record_type_t type;
-        START_PACKED_STRUCTURE
-        union key {
-            key() = default;
-            key(input_ordinal_t input)
-                : input(input)
-            {
-            }
-            // We assume the user will repeat the precise input workload specifications
-            // (including directory ordering of thread files) and we can simply store
-            // the ordinal and rely on the same ordinal on replay being the same input.
-            input_ordinal_t input = -1;
-            int version; // For record_type_t::VERSION.
-        } END_PACKED_STRUCTURE key;
-        // Input stream ordinal of starting point.
-        uint64_t start_instruction = 0;
-        // Input stream ordinal, exclusive.  Max numeric value means continue until EOF.
-        uint64_t stop_instruction = 0;
-        // Timestamp in microseconds to keep context switches ordered.
-        // XXX: To add more fine-grained ordering we could emit multiple entries
-        // per thread segment, and update the context switching code to recognize
-        // that a new entry does not always mean a context switch.
-        uint64_t timestamp = 0;
-    } END_PACKED_STRUCTURE;
-
-    struct output_info_t {
-        output_info_t(scheduler_tmpl_t<RecordType, ReaderType> *scheduler,
-                      output_ordinal_t ordinal,
-                      typename spec_type_t::speculator_flags_t speculator_flags,
-                      int verbosity = 0)
-            : stream(scheduler, ordinal, verbosity)
-            , speculator(speculator_flags, verbosity)
-        {
-        }
-        stream_t stream;
-        // This is an index into the inputs_ vector so -1 is an invalid value.
-        // This is set to >=0 for all non-empty outputs during init().
-        input_ordinal_t cur_input = INVALID_INPUT_ORDINAL;
-        // For static schedules we can populate this up front and avoid needing a
-        // lock for dynamically finding the next input, keeping things parallel.
-        std::vector<input_ordinal_t> input_indices;
-        int input_indices_index = 0;
-        // Speculation support.
-        std::stack<addr_t> speculation_stack; // Stores PC of resumption point.
-        speculator_tmpl_t<RecordType> speculator;
-        addr_t speculate_pc = 0;
-        // Stores the value of speculate_pc before asking the speculator for the current
-        // record.  So if that record was an instruction, speculate_pc holds the next PC
-        // while this field holds the instruction's start PC.  The use case is for
-        // queueing a read-ahead instruction record for start_speculation().
-        addr_t prev_speculate_pc = 0;
-        RecordType last_record;
-        // A list of schedule segments.  These are accessed only while holding
-        // sched_lock_.
-        std::vector<schedule_record_t> record;
-        int record_index = 0;
-        bool waiting = false;
-        bool active = true;
-        // Used for time-based quanta.
-        uint64_t cur_time = 0;
-    };
-
-    // Called just once at initialization time to set the initial input-to-output
-    // mappings and state.
-    scheduler_status_t
-    set_initial_schedule(std::unordered_map<int, std::vector<int>> &workload2inputs);
-
-    // Assumed to only be called at initialization time.
-    // Reads ahead in each input to find its first timestamp (queuing the records
-    // read to feed to the user's first requests).
-    scheduler_status_t
-    get_initial_timestamps();
-
-    // Opens up all the readers for each file in 'path' which may be a directory.
-    // Returns a map of the thread id of each file to its index in inputs_.
-    scheduler_status_t
-    open_readers(const std::string &path, const std::set<memref_tid_t> &only_threads,
-                 std::unordered_map<memref_tid_t, input_ordinal_t> &workload_tids);
-
-    // Opens up a single reader for the (non-directory) file in 'path'.
-    // Returns a map of the thread id of the file to its index in inputs_.
-    scheduler_status_t
-    open_reader(const std::string &path, const std::set<memref_tid_t> &only_threads,
-                std::unordered_map<memref_tid_t, input_ordinal_t> &workload_tids);
-
-    // Creates a reader for the default file type we support.
-    std::unique_ptr<ReaderType>
-    get_default_reader();
-
-    // Creates a reader for the specific file type at (non-directory) 'path'.
-    std::unique_ptr<ReaderType>
-    get_reader(const std::string &path, int verbosity);
-
-    // Advances the 'output_ordinal'-th output stream.
-    stream_status_t
-    next_record(output_ordinal_t output, RecordType &record, input_info_t *&input,
-                uint64_t cur_time = 0);
-
-    // Skips ahead to the next region of interest if necessary.
-    // The caller must hold the input.lock.
-    stream_status_t
-    advance_region_of_interest(output_ordinal_t output, RecordType &record,
-                               input_info_t &input);
-
-    // Does a direct skip, unconditionally.
-    // The caller must hold the input.lock.
-    stream_status_t
-    skip_instructions(output_ordinal_t output, input_info_t &input, uint64_t skip_amount);
-
-    scheduler_status_t
-    read_traced_schedule();
-
-    scheduler_status_t
-    check_and_fix_modulo_problem_in_schedule(
-        std::vector<std::vector<schedule_record_t>> &input_sched,
-        std::vector<std::set<uint64_t>> &start2stop,
-        std::vector<std::vector<schedule_record_t>> &all_sched);
-
-    scheduler_status_t
-    read_recorded_schedule();
-
-    // The caller must hold the lock for the input.
-    stream_status_t
-    record_schedule_segment(
-        output_ordinal_t output, typename schedule_record_t::record_type_t type,
-        // "input" can instead be a version of type int.
-        // As they are the same underlying type we cannot overload.
-        input_ordinal_t input, uint64_t start_instruction,
-        // Wrap max in parens to work around Visual Studio compiler issues with the
-        // max macro (even despite NOMINMAX defined above).
-        uint64_t stop_instruction = (std::numeric_limits<uint64_t>::max)());
-
-    // The caller must hold the input.lock.
-    stream_status_t
-    close_schedule_segment(output_ordinal_t output, input_info_t &input);
-
-    std::string
-    recorded_schedule_component_name(output_ordinal_t output);
-
-    // The sched_lock_ must be held when this is called.
-    stream_status_t
-    set_cur_input(output_ordinal_t output, input_ordinal_t input);
-
-    // Finds the next input stream for the 'output_ordinal'-th output stream.
-    // No input_info_t lock can be held on entry.
-    stream_status_t
-    pick_next_input(output_ordinal_t output, bool in_wait_state);
-
-    // Helper for pick_next_input() for MAP_AS_PREVIOUSLY.
-    // No input_info_t lock can be held on entry.
-    // The sched_lock_ must be held on entry.
-    stream_status_t
-    pick_next_input_as_previously(output_ordinal_t output, input_ordinal_t &index);
-
-    // If the given record has a thread id field, returns true and the value.
-    bool
-    record_type_has_tid(RecordType record, memref_tid_t &tid);
-
-    // Returns whether the given record is an instruction.
-    bool
-    record_type_is_instr(RecordType record);
-
-    // If the given record is a marker, returns true and its fields.
-    bool
-    record_type_is_marker(RecordType record, trace_marker_type_t &type, uintptr_t &value);
-
-    // If the given record is a timestamp, returns true and its fields.
-    bool
-    record_type_is_timestamp(RecordType record, uintptr_t &value);
-
-    // Creates the marker we insert between regions of interest.
-    RecordType
-    create_region_separator_marker(memref_tid_t tid, uintptr_t value);
-
-    // Creates a thread exit record.
-    RecordType
-    create_thread_exit(memref_tid_t tid);
-
-    // Used for diagnostics: prints record fields to stderr.
-    void
-    print_record(const RecordType &record);
-
-    // Returns the get_stream_name() value for the current input stream scheduled on
-    // the 'output_ordinal'-th output stream.
-    std::string
-    get_input_name(output_ordinal_t output);
-
-    // Returns the input ordinal value for the current input stream scheduled on
-    // the 'output_ordinal'-th output stream.
-    input_ordinal_t
-    get_input_ordinal(output_ordinal_t output);
-
-    // Returns the workload ordinal value for the current input stream scheduled on
-    // the 'output_ordinal'-th output stream.
-    int
-    get_workload_ordinal(output_ordinal_t output);
-
-    // Returns whether the current record for the current input stream scheduled on
-    // the 'output_ordinal'-th output stream is synthetic.
-    bool
-    is_record_synthetic(output_ordinal_t output);
-
-    // Returns the direct handle to the current input stream interface for the
-    // 'output_ordinal'-th output stream.
-    memtrace_stream_t *
-    get_input_stream(output_ordinal_t output);
-
-    stream_status_t
-    start_speculation(output_ordinal_t output, addr_t start_address,
-                      bool queue_current_record);
-
-    stream_status_t
-    stop_speculation(output_ordinal_t output);
-
-    stream_status_t
-    set_output_active(output_ordinal_t output, bool active);
-
-    ///////////////////////////////////////////////////////////////////////////
-    // Support for ready queues for who to schedule next:
-
-    // I tried using a lambda where we could capture "this" and so use int indices
-    // in the queues instead of pointers but hit problems (weird crash while running)
-    // so I'm sticking with this solution of a separate struct.
-    struct InputTimestampComparator {
-        bool
-        operator()(input_info_t *a, input_info_t *b) const
-        {
-            if (a->priority != b->priority)
-                return a->priority < b->priority; // Higher is better.
-            if (a->order_by_timestamp &&
-                (a->reader->get_last_timestamp() - a->base_timestamp) !=
-                    (b->reader->get_last_timestamp() - b->base_timestamp)) {
-                // Lower is better.
-                return (a->reader->get_last_timestamp() - a->base_timestamp) >
-                    (b->reader->get_last_timestamp() - b->base_timestamp);
-            }
-            // We use a counter to provide FIFO order for same-priority inputs.
-            return a->queue_counter > b->queue_counter; // Lower is better.
-        }
-    };
-
-    // sched_lock_ must be held by the caller.
-    bool
-    ready_queue_empty();
-
-    // sched_lock_ must be held by the caller.
-    void
-    add_to_ready_queue(input_info_t *input);
-
-    // sched_lock_ must be held by the caller.
-    // "for_output" is which output stream is looking for a new input; only an
-    // input which is able to run on that output will be selected.
-    input_info_t *
-    pop_from_ready_queue(output_ordinal_t for_output);
-    ///
-    ///////////////////////////////////////////////////////////////////////////
-
-    // This has the same value as scheduler_options_t.verbosity (for use in VPRINT).
-    int verbosity_ = 0;
-    const char *output_prefix_ = "[scheduler]";
-    std::string error_string_;
-    scheduler_options_t options_;
-    // Each vector element has a mutex which should be held when accessing its fields.
-    std::vector<input_info_t> inputs_;
-    // Each vector element is accessed only by its owning thread, except the
-    // record and record_index fields which are accessed under sched_lock_.
-    std::vector<output_info_t> outputs_;
-    // We use a central lock for global scheduling.  We assume the synchronization
-    // cost is outweighed by the simulator's overhead.  This protects concurrent
-    // access to inputs_.size(), outputs_.size(), ready_priority_, and
-    // ready_counter_.
-    std::mutex sched_lock_;
-    // Inputs ready to be scheduled, sorted by priority and then timestamp if timestamp
-    // dependencies are requested.  We use the timestamp delta from the first observed
-    // timestamp in each workload in order to mix inputs from different workloads in the
-    // same queue.  FIFO ordering is used for same-priority entries.
-    std::priority_queue<input_info_t *, std::vector<input_info_t *>,
-                        InputTimestampComparator>
-        ready_priority_;
-    // Global ready queue counter used to provide FIFO for same-priority inputs.
-    uint64_t ready_counter_ = 0;
+    friend class scheduler_impl_tmpl_t<RecordType, ReaderType>;
 };
 
 /** See #dynamorio::drmemtrace::scheduler_tmpl_t. */

@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2021 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2026 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -93,6 +93,10 @@
 # its symbols, use:
 #
 #  use_DynamoRIO_static_client(myapp myclient)
+#
+# To create a pure-static binary, every client must be configured with
+# configure_DynamoRIO_static_client() instead of configure_DynamoRIO_client()
+# to avoid the DynamoRIO shared library from thwarting the link.
 #
 ###########
 #
@@ -345,6 +349,7 @@ else ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
 endif ("${CMAKE_GENERATOR}" MATCHES "Visual Studio")
 
 _DR_check_if_linker_is_gnu_gold(LINKER_IS_GNU_GOLD)
+_DR_check_if_linker_is_llvm_lld(LINKER_IS_LLVM_LLD)
 
 # helper function
 function (_DR_get_lang target lang_var)
@@ -431,16 +436,21 @@ if (NOT DynamoRIO_INTERNAL)
   endif ()
 
   # if we were built w/ static drsyms, clients need dependent static libs too
-  if (UNIX AND EXISTS "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libdwarf.a")
-    add_library(elf STATIC IMPORTED)
-    set_property(TARGET elf PROPERTY
-      IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libelf.a")
-    add_library(dwarf STATIC IMPORTED)
-    set_property(TARGET dwarf PROPERTY
-      IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libdwarf.a")
-    add_library(elftc STATIC IMPORTED)
-    set_property(TARGET elftc PROPERTY
-      IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libelftc.a")
+  if (UNIX)
+    # i#6909: Handle libelftc separately because libdwarf and libelf are optional.
+    if (EXISTS "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libelftc.a")
+      add_library(elftc STATIC IMPORTED)
+      set_property(TARGET elftc PROPERTY
+        IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libelftc.a")
+    endif()
+    if (EXISTS "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libdwarf.a")
+      add_library(elf STATIC IMPORTED)
+      set_property(TARGET elf PROPERTY
+        IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libelf.a")
+      add_library(dwarf STATIC IMPORTED)
+      set_property(TARGET dwarf PROPERTY
+        IMPORTED_LOCATION "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/libdwarf.a")
+    endif ()
   endif ()
   if (WIN32 AND EXISTS "${DynamoRIO_cwd}/../ext/lib${_DR_bits}/${_DR_type}/dwarf.lib")
     add_library(dwarf STATIC IMPORTED)
@@ -649,7 +659,7 @@ function (DynamoRIO_extra_cflags flags_out extra_cflags tgt_cxx)
 endfunction (DynamoRIO_extra_cflags)
 
 
-function (_DR_set_compile_flags target is_client extra_flags)
+function (_DR_set_compile_flags target is_client extra_flags static_DR)
   # i#850: we do not want the C flags being used for asm objects so we only set
   # on C/C++ files and not on the target.
   # We do want the defines and include dirs to be global (or at least on the
@@ -778,6 +788,12 @@ function (_DR_set_compile_flags target is_client extra_flags)
         set(extra_flags "${extra_flags} -fno-stack-protector")
       endif (flag_present)
 
+      if (ANDROID AND tgt_cxx)
+          # We use static C++ runtime libraries on Android so we need to wrap the libc
+          # allocation functions. See https://dynamorio.org/using.html#subsec_no_loader.
+        string(APPEND tgt_link_flags " -Xlinker -wrap=malloc -Xlinker -wrap=realloc -Xlinker -wrap=free")
+      endif ()
+
     endif (is_client)
 
     if (NOT APPLE AND NOT ANDROID) # no .gnu.hash support on Android
@@ -805,7 +821,7 @@ function (_DR_set_compile_flags target is_client extra_flags)
     if (is_client)
       # Avoid bringing in libc and/or kernel32 for stack checks
       set(extra_flags "${extra_flags} /GS-")
-      # FIXME: why isn't /debug showing up: is it
+      # XXX: why isn't /debug showing up: is it
     endif (is_client)
 
     # Shrink binaries and pdbs (/Gy should already be there)
@@ -842,7 +858,11 @@ function (_DR_set_compile_flags target is_client extra_flags)
   endif (UNIX)
 
   # DynamoRIOTarget.cmake added the "dynamorio" imported target
-  target_link_libraries(${target} dynamorio)
+  if (static_DR)
+    target_link_libraries(${target} dynamorio_static)
+  else ()
+    target_link_libraries(${target} dynamorio)
+  endif ()
 
   if (DEFINED DynamoRIO_RPATH)
     set(use_rpath ${DynamoRIO_RPATH})
@@ -946,14 +966,15 @@ function (_DR_set_compile_flags target is_client extra_flags)
     COMPILE_DEFINITIONS "${extra_defines};${tgt_defines}")
 endfunction(_DR_set_compile_flags)
 
-
-function (configure_DynamoRIO_client target)
+# This is a macro so that the PARENT_SCOPE changes reach the
+# caller of this macro's caller.
+macro (configure_DynamoRIO_client_helper target static_DR)
   _DR_get_x64(${target} tgt_x64)
 
   # We clear LINK_FLAGS and let the helper routines append to them:
   set_target_properties(${target} PROPERTIES LINK_FLAGS "")
 
-  _DR_set_compile_flags(${target} ON "")
+  _DR_set_compile_flags(${target} ON "" ${static_DR})
   if (just_configured)
     # get around lack of GLOBAL_SCOPE
     # do NOT set just_configured in global scope
@@ -991,7 +1012,9 @@ function (configure_DynamoRIO_client target)
         # 2009.  We could switch to that if we ever drop support for old
         # linkers.
         set(PREFERRED_BASE_FLAGS "-Wl,-Ttext=${PREFERRED_BASE}")
-      else (LINKER_IS_GNU_GOLD)
+      elseif (LINKER_IS_LLVM_LLD)
+        set(PREFERRED_BASE_FLAGS "-Wl,--image-base=${PREFERRED_BASE}")
+      else ()
         # We use a linker script to set the preferred base
         set(LD_SCRIPT ${CMAKE_CURRENT_BINARY_DIR}/${target}.ldscript)
         # We do NOT add ${LD_SCRIPT} as an ADDITIONAL_MAKE_CLEAN_FILES since it's
@@ -1033,7 +1056,7 @@ function (configure_DynamoRIO_client target)
         # -dT is preferred, available on ld 2.18+: we could check for it
         set(LD_SCRIPT_OPTION "-T")
         set(PREFERRED_BASE_FLAGS "-Xlinker ${LD_SCRIPT_OPTION} -Xlinker \"${LD_SCRIPT}\"")
-      endif (LINKER_IS_GNU_GOLD)
+      endif ()
     else (APPLE)
       set(PREFERRED_BASE_FLAGS "/base:${PREFERRED_BASE} /dynamicbase:no")
     endif (APPLE)
@@ -1043,17 +1066,29 @@ function (configure_DynamoRIO_client target)
   # TODO: a nice feature would be to check the client for libc imports or
   # other not-recommended properties
 
-endfunction (configure_DynamoRIO_client)
+endmacro (configure_DynamoRIO_client_helper)
 
+function (configure_DynamoRIO_client target)
+  configure_DynamoRIO_client_helper(${target} OFF)
+endfunction ()
+
+function (configure_DynamoRIO_static_client target)
+  configure_DynamoRIO_client_helper(${target} ON)
+endfunction ()
 
 function (configure_DynamoRIO_standalone target)
   # We don't clear LINK_FLAGS b/c we assume standalone doesn't need to have
   # flags removed.  Usually the target LINK_FLAGS is empty at this point anyway.
   set(extra_flags "-DDYNAMORIO_STANDALONE")
   if (ANDROID)
-    set(extra_flags ${extra_flags} "-fPIE -pie")
+    set(extra_flags "${extra_flags} -fPIE")
+    # Clang complains that -pie is an unused option here, so only add it for
+    # 32-bit Android which uses GCC.
+    if (ANDROID32)
+      set(extra_flags "${extra_flags} -pie")
+    endif(ANDROID32)
   endif (ANDROID)
-  _DR_set_compile_flags(${target} OFF "${extra_flags}")
+  _DR_set_compile_flags(${target} OFF "${extra_flags}" OFF)
 
   # get around lack of GLOBAL_SCOPE
   foreach (config "" ${CMAKE_BUILD_TYPE} ${CMAKE_CONFIGURATION_TYPES})
@@ -1112,13 +1147,6 @@ function (configure_DynamoRIO_static target)
   endif ()
   _DR_append_property_list(TARGET ${target} COMPILE_DEFINITIONS "${extra_defs}")
 
-  if (ANDROID)
-    # The Android linker is not exporting the weak symbol _USES_DR_VERSION_.
-    # We use --dynamic-list-data to do so.
-    # Actually the Linux linker is exporting the entire DR API symbol set:
-    # should we pass -Wl,--export-dynamic here to match it?
-    _DR_append_property_string(TARGET ${target} LINK_FLAGS "-Wl,--dynamic-list-data")
-  endif ()
   # We need libc before the ntdll_imports pulled in for DR.
   _DR_get_static_libc_list(static_libc)
   target_link_libraries(${target} ${static_libc})
@@ -1154,11 +1182,11 @@ endfunction (get_DynamoRIO_defines)
 set(DynamoRIO_EXT_drgui_NOLIB ON)
 set(DynamoRIO_EXT_droption_NOLIB ON)
 set(DynamoRIO_EXT_droption_INC ${DynamoRIO_cwd}/../ext/include)
-# Not really an extension, just for including drmemtrace.h
-# via use_DynamoRIO_extension(target, drmemtrace_static)
-set(DynamoRIO_EXT_drmemtrace_static_NOLIB ON)
 
 # DynamoRIO Extensions
+# Failure to call this in your client CMakeLists.txt when using an extension like
+# drmgr or drx will result in an obscure "using undefined symbol!" runtime
+# error on Linux.
 function (use_DynamoRIO_extension target extname)
   if (NOT DynamoRIO_INTERNAL)
     # We only support Extensions as imported targets that have already
@@ -1232,8 +1260,10 @@ function (use_DynamoRIO_extension target extname)
   endif (NOT DynamoRIO_EXT_${extname}_NOLIB)
 
   if ("${extname}" MATCHES "^droption$")
-    if (NOT WIN32)
-      _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "-std=c++11")
+    if (WIN32)
+      _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "/std:c++14")
+    else ()
+      _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "-std=c++14")
     endif ()
   endif ()
 endfunction (use_DynamoRIO_extension)
@@ -1276,8 +1306,10 @@ function (use_DynamoRIO_drmemtrace target)
       _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "/MT")
     endif ()
   endif ()
-  if (NOT WIN32)
-    _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "-std=c++11")
+  if (WIN32)
+    _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "/std:c++14")
+  else ()
+    _DR_append_property_string(TARGET ${target} COMPILE_FLAGS "-std=c++14")
   endif ()
 endfunction ()
 

@@ -68,7 +68,7 @@ enum {
 #elif defined(AARCH64)
     ISA_ARM_A64,
 #elif defined(RISCV64)
-    ISA_RV64IMAFDC,
+    ISA_RV64,
 #endif
     NUM_ISA_MODE,
 };
@@ -100,7 +100,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
     drx_init();
 
     /* Register events: */
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     if (!drmgr_register_bb_instrumentation_event(NULL, event_app_instruction, NULL))
         DR_ASSERT(false);
 
@@ -203,6 +203,8 @@ get_count_isa_idx(void *drcontext)
     case DR_ISA_ARM_THUMB: return ISA_ARM_THUMB;
 #elif defined(AARCH64)
     case DR_ISA_ARM_A64: return ISA_ARM_A64;
+#elif defined(RISCV64)
+    case DR_ISA_RV64: return ISA_RV64;
 #endif
     default: DR_ASSERT(false); /* NYI */
     }
@@ -236,7 +238,7 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
                                        * here won't be used: drreg's slots will be.
                                        */
                                       SPILL_SLOT_MAX + 1,
-                                      IF_AARCHXX_(SPILL_SLOT_MAX + 1) &
+                                      IF_AARCHXX_OR_RISCV64_(SPILL_SLOT_MAX + 1) &
                                           count[isa_idx][instr_get_opcode(ins)],
                                       1,
                                       /* DRX_COUNTER_LOCK is not yet supported on ARM */

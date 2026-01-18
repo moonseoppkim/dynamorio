@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2023-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -35,6 +35,7 @@
  * trace is analyzed to confirm that futex parameters were included.
  */
 
+#include "test_helpers.h"
 #include "dr_api.h"
 #include "drmemtrace/drmemtrace.h"
 #include "analysis_tool.h"
@@ -102,7 +103,7 @@ post_process(const std::string &out_subdir)
                               dr_context,
                               0
 #ifdef WINDOWS
-                              /* FIXME i#3983: Creating threads in standalone mode
+                              /* XXX i#3983: Creating threads in standalone mode
                                * causes problems.  We disable the pool for now.
                                */
                               ,
@@ -187,7 +188,7 @@ test_main(int argc, const char *argv[])
         }
         if (memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_RETVAL) {
             // Should have succeeded.
-            assert(memref.marker.marker_value == 1);
+            assert(memref.marker.marker_value == 0);
         }
     }
     assert(saw_maybe_blocking);

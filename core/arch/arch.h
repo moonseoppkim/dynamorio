@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2000-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -79,7 +79,7 @@ mixed_mode_enabled(void)
  * unprotected are raw 0..sizeof(unprotected_context_t)
  * protected are raw + sizeof(unprotected_context_t)
  * (see the instr_shared.c routines for dcontext instr building)
- * FIXME: we could get rid of this hack if unprotected_context_t == priv_mcontext_t
+ * XXX: we could get rid of this hack if unprotected_context_t == priv_mcontext_t
  */
 #define PROT_OFFS (sizeof(unprotected_context_t))
 #define MC_OFFS (offsetof(unprotected_context_t, mcontext))
@@ -106,6 +106,7 @@ mixed_mode_enabled(void)
 #    endif /* X64 */
 #    define SIMD_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, simd)))
 #    define OPMASK_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, opmask)))
+#    define XFLAGS_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, xflags)))
 #    define SCRATCH_REG0 DR_REG_XAX
 #    define SCRATCH_REG1 DR_REG_XBX
 #    define SCRATCH_REG2 DR_REG_XCX
@@ -141,6 +142,7 @@ mixed_mode_enabled(void)
 #    define R13_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, r13)))
 #    define R14_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, r14)))
 #    define PC_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, pc)))
+#    define XFLAGS_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, xflags)))
 #    define SCRATCH_REG0 DR_REG_R0
 #    define SCRATCH_REG1 DR_REG_R1
 #    define SCRATCH_REG2 DR_REG_R2
@@ -154,17 +156,28 @@ mixed_mode_enabled(void)
 #    define SCRATCH_REG4_OFFS R4_OFFSET
 #    define SCRATCH_REG5_OFFS R5_OFFSET
 #    define REG_OFFSET(reg) (R0_OFFSET + ((reg)-DR_REG_R0) * sizeof(reg_t))
+#    define Z_REG_OFFSET(reg) \
+        ((MC_OFFS) +          \
+         (offsetof(priv_mcontext_t, simd) + ((reg)-DR_REG_Z0) * sizeof(dr_simd_t)))
 #    define CALL_SCRATCH_REG DR_REG_R11
 #    define MC_IBL_REG r2
 #    define MC_RETVAL_REG r0
 #    define SS_RETVAL_REG r0
 #elif defined(RISCV64)
+#    define X0_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, x0)))
+#    define X1_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, x1)))
+#    define F0_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, f0)))
 #    define REG0_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a0)))
 #    define REG1_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a1)))
 #    define REG2_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a2)))
 #    define REG3_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a3)))
 #    define REG4_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a4)))
 #    define REG5_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, a5)))
+#    define XFLAGS_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, fcsr)))
+#    define VSTART_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, vstart)))
+#    define VCSR_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, vcsr)))
+#    define VL_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, vl)))
+#    define VTYPE_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, vtype)))
 #    define SCRATCH_REG0 DR_REG_A0
 #    define SCRATCH_REG1 DR_REG_A1
 #    define SCRATCH_REG2 DR_REG_A2
@@ -177,14 +190,17 @@ mixed_mode_enabled(void)
 #    define SCRATCH_REG3_OFFS REG3_OFFSET
 #    define SCRATCH_REG4_OFFS REG4_OFFSET
 #    define SCRATCH_REG5_OFFS REG5_OFFSET
-/* FIXME i#3544: Check is T6 safe to use */
+#    define REG_OFFSET(reg) (X0_OFFSET + ((reg)-DR_REG_X0) * sizeof(reg_t))
+#    define FREG_OFFSET(reg) (F0_OFFSET + ((reg)-DR_REG_F0) * sizeof(reg_t))
+#    define VREG_OFFSET(reg) \
+        ((MC_OFFS) +         \
+         (offsetof(priv_mcontext_t, simd) + ((reg)-DR_REG_VR0) * sizeof(dr_simd_t)))
 #    define CALL_SCRATCH_REG DR_REG_T6
 #    define MC_IBL_REG a2
 #    define MC_RETVAL_REG a0
 #    define SS_RETVAL_REG a0
 #endif /* X86/ARM/RISCV64 */
 #define XSP_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, xsp)))
-#define XFLAGS_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, xflags)))
 #define PC_OFFSET ((MC_OFFS) + (offsetof(priv_mcontext_t, pc)))
 
 /* the register holds dcontext on fcache enter/return */
@@ -286,7 +302,7 @@ static inline void
 d_r_set_avx512_code_in_use(bool in_use, app_pc pc)
 {
 #    if !defined(UNIX) || !defined(X64)
-    /* FIXME i#1312: we warn about unsupported AVX-512 present in the app. */
+    /* XXX i#1312: we warn about unsupported AVX-512 present in the app. */
     DO_ONCE({
         if (pc != NULL) {
             char pc_addr[IF_X64_ELSE(20, 12)];
@@ -343,7 +359,7 @@ typedef enum {
 /* we should allow for all {{bb,trace} x {ret,ind call, ind jmp} x {shared, private}} */
 /* combinations of routines which are in turn  x {unlinked, linked} */
 typedef enum {
-    /* FIXME: have a separate flag for private vs shared */
+    /* XXX: have a separate flag for private vs shared */
     IBL_BB_SHARED,
     IBL_SOURCE_TYPE_START = IBL_BB_SHARED,
     IBL_TRACE_SHARED,
@@ -394,7 +410,7 @@ typedef struct {
  * a unique generated_code_t.  Rather than add GLOBAL_DCONTEXT_X86 everywhere,
  * we add mode parameters to a handful of routines that take in GLOBAL_DCONTEXT.
  */
-/* FIXME i#1551: do we want separate Thumb vs ARM gencode, or we'll always
+/* XXX i#1551: do we want separate Thumb vs ARM gencode, or we'll always
  * transition?  For fcache exit that's reasonable, but for ibl it would
  * require two mode transitions.
  */
@@ -524,8 +540,8 @@ void
 clean_call_info_init(clean_call_info_t *cci, void *callee, bool save_fpstate,
                      uint num_args);
 void
-d_r_mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags INOUT, bool mangle_calls,
-           bool record_translation);
+d_r_mangle(dcontext_t *dcontext, instrlist_t *ilist, uint *flags DR_PARAM_INOUT,
+           bool mangle_calls, bool record_translation);
 bool
 parameters_stack_padded(void);
 /* Inserts a complete call to callee with the passed-in arguments */
@@ -590,11 +606,16 @@ instr_t *
 mangle_rel_addr(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                 instr_t *next_instr);
 #endif
-#ifdef AARCHXX
-/* mangle instructions that use pc or dr_reg_stolen */
+#if defined(AARCHXX) || defined(RISCV64)
+/* For ARM, mangle app instr accessing registers pc and dr_reg_stolen;
+ * for AArch64, mangle app instr accessing register dr_reg_stolen;
+ * for RISC-V, mangle app instr accessing registers tp and dr_reg_stolen.
+ */
 instr_t *
 mangle_special_registers(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                          instr_t *next_instr);
+#endif
+#if defined(AARCHXX) || defined(RISCV64)
 instr_t *
 mangle_exclusive_monitor_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                             instr_t *next_instr);
@@ -622,7 +643,7 @@ mangle_insert_clone_code(dcontext_t *dcontext, instrlist_t *ilist,
 #elif defined(ARM)
 #    define ABI_STACK_ALIGNMENT 8
 #elif defined(RISCV64)
-#    define ABI_STACK_ALIGNMENT 8
+#    define ABI_STACK_ALIGNMENT 16
 #endif
 
 /* Returns the number of bytes the stack pointer has to be aligned to. */
@@ -648,10 +669,11 @@ insert_push_all_registers(dcontext_t *dcontext, clean_call_info_t *cci,
                           instrlist_t *ilist, instr_t *instr, uint alignment,
                           opnd_t push_pc,
                           reg_id_t scratch /*optional*/
-                              _IF_AARCH64(bool out_of_line));
+                              _IF_AARCH64_OR_RISCV64(bool out_of_line));
 void
 insert_pop_all_registers(dcontext_t *dcontext, clean_call_info_t *cci, instrlist_t *ilist,
-                         instr_t *instr, uint alignment _IF_AARCH64(bool out_of_line));
+                         instr_t *instr,
+                         uint alignment _IF_AARCH64_OR_RISCV64(bool out_of_line));
 bool
 insert_reachable_cti(dcontext_t *dcontext, instrlist_t *ilist, instr_t *where,
                      byte *encode_pc, byte *target, bool jmp, bool returns, bool precise,
@@ -719,7 +741,7 @@ mangle_mov_seg(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                instr_t *next_instr);
 void
 mangle_float_pc(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
-                instr_t *next_instr, uint *flags INOUT);
+                instr_t *next_instr, uint *flags DR_PARAM_OUT);
 void
 mangle_exit_cti_prefixes(dcontext_t *dcontext, instr_t *instr);
 void
@@ -727,11 +749,14 @@ mangle_far_direct_jump(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                        instr_t *next_instr, uint flags);
 void
 set_selfmod_sandbox_offsets(dcontext_t *dcontext);
+#endif /* X86 */
+
+#ifdef ARCH_SUPPORTS_HW_CACHE_CONSISTENCY
 bool
 insert_selfmod_sandbox(dcontext_t *dcontext, instrlist_t *ilist, uint flags,
                        app_pc start_pc, app_pc end_pc, /* end is open */
                        bool record_translation, bool for_cache);
-#endif /* X86 */
+#endif /* ARCH_SUPPORTS_HW_CACHE_CONSISTENCY */
 
 #ifdef ARM
 /* mangle the instruction that reads thread register */
@@ -741,6 +766,8 @@ mangle_reads_thread_register(dcontext_t *dcontext, instrlist_t *ilist, instr_t *
 #endif /* ARM */
 
 #ifdef AARCH64
+void
+mangle_ctr_read(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr);
 instr_t *
 mangle_icache_op(dcontext_t *dcontext, instrlist_t *ilist, instr_t *instr,
                  instr_t *next_instr, app_pc pc);
@@ -759,7 +786,7 @@ enum {
      * TLS_REG1_SLOT for this because those are used in fragment prefix.
      */
     FCACHE_ENTER_TARGET_SLOT = TLS_REG2_SLOT,
-    /* FIXME: put register name in each enum name to avoid conflicts
+    /* XXX: put register name in each enum name to avoid conflicts
      * when mixed with raw slot names?
      */
     /* ok for the next_tag and direct_stub to overlap as next_tag is
@@ -778,7 +805,7 @@ enum {
      */
     FLOAT_PC_STATE_SLOT = TLS_REG1_SLOT,
     MANGLE_XCX_SPILL_SLOT = TLS_REG2_SLOT,
-/* FIXME: edi is used as the base, yet I labeled this slot for edx
+/* XXX: edi is used as the base, yet I labeled this slot for edx
  * since it's next in the progression -- change one or the other?
  * (this is case 5239)
  */
@@ -1008,7 +1035,7 @@ typedef struct _generated_code_t {
      * Direct exits use entrance stubs that record the target app pc,
      * while coarse indirect stubs record the source cache cti.
      */
-    /* FIXME: these two return routines are only needed in the global struct */
+    /* XXX: these two return routines are only needed in the global struct */
     byte *fcache_return_coarse;
     byte *fcache_return_coarse_end;
     byte *trace_head_return_coarse;
@@ -1210,7 +1237,7 @@ update_syscalls(dcontext_t *dcontext);
 #endif
 
 #ifdef WINDOWS
-/* FIXME If we widen the interface any further, do we want to use an options
+/* XXX If we widen the interface any further, do we want to use an options
  * struct or OR-ed flags to replace the bool args? */
 byte *
 emit_shared_syscall(dcontext_t *dcontext, generated_code_t *code, byte *pc,
@@ -1555,12 +1582,17 @@ get_app_instr_xl8(instr_t *instr);
 #ifdef X64
 /* in x86_to_x64.c */
 void
-translate_x86_to_x64(dcontext_t *dcontext, instrlist_t *ilist, INOUT instr_t **instr);
+translate_x86_to_x64(dcontext_t *dcontext, instrlist_t *ilist,
+                     DR_PARAM_INOUT instr_t **instr);
 #endif
 
-#ifdef AARCHXX
+#if defined(AARCHXX) || defined(RISCV64)
 bool
 instr_is_ldstex_mangling(dcontext_t *dcontext, instr_t *inst);
+#endif
+#if defined(AARCHXX)
+bool
+instr_is_pauth_branch_mangling(dcontext_t *dcontext, instr_t *inst);
 #endif
 
 /****************************************************************************
@@ -1574,10 +1606,7 @@ add_patch_entry_internal(patch_list_t *patch, instr_t *instr, ushort patch_flags
 cache_pc
 get_direct_exit_target(dcontext_t *dcontext, uint flags);
 
-#ifdef AARCHXX
-size_t
-get_fcache_return_tls_offs(dcontext_t *dcontext, uint flags);
-
+#if defined(AARCHXX) || defined(RISCV64)
 size_t
 get_ibl_entry_tls_offs(dcontext_t *dcontext, cache_pc ibl_entry);
 #endif
@@ -1640,7 +1669,7 @@ static inline bool
 use_ibt_prefix(uint flags)
 {
     /* when no traces, all bbs use IBT prefix */
-    /* FIXME: currently to allow bb2bb we simply have a prefix on all BB's
+    /* XXX: currently to allow bb2bb we simply have a prefix on all BB's
      * should experiment with a shorter prefix for targetting BBs
      * by restoring the flags in the IBL routine,
      * or even jump through memory to avoid having the register restore prefix
@@ -1667,7 +1696,7 @@ ibl_use_target_prefix(ibl_code_t *ibl_code)
              ((ibl_code->source_fragment_type == IBL_COARSE_SHARED &&
                DYNAMO_OPTION(bb_ibl_targets)) ||
               (IS_IBL_BB(ibl_code->source_fragment_type) &&
-               /* FIXME case 147/9636: if -coarse_units -bb_ibl_targets
+               /* XXX case 147/9636: if -coarse_units -bb_ibl_targets
                 * but traces are enabled, we won't put prefixes on regular
                 * bbs but will assume we have them here!  We don't support
                 * that combination yet.  When we do this routine should return

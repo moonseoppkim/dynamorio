@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -624,7 +624,8 @@ restore_state_ex_event2(void *drcontext, bool restore_memory,
 }
 
 static size_t
-event_persist_size(void *drcontext, void *perscxt, size_t file_offs, void **user_data OUT)
+event_persist_size(void *drcontext, void *perscxt, size_t file_offs,
+                   void **user_data DR_PARAM_OUT)
 {
     return 0;
 }
@@ -643,7 +644,7 @@ event_persist(void *drcontext, void *perscxt, file_t fd, void *user_data)
 }
 
 static bool
-event_resurrect(void *drcontext, void *perscxt, byte **map INOUT)
+event_resurrect(void *drcontext, void *perscxt, byte **map DR_PARAM_OUT)
 {
     return true;
 }
@@ -652,7 +653,7 @@ DR_EXPORT
 void
 dr_init(client_id_t id)
 {
-    /* FIXME: we should test the nudge events as well, but that
+    /* XXX: we should test the nudge events as well, but that
      * would require some extra stuff our testing infrastructure
      * doesn't currently support.
      */
@@ -739,13 +740,10 @@ dr_init(client_id_t id)
         dr_fprintf(STDERR, "failed to unregister for persist patch event");
 
 #ifdef LINUX
-    /* On Linux, where we have a clear distinction between DR launching the process
-     * with zero threads and a later attach where there are threads, make sure
-     * the post_attach event return value can be used by clients.
-     */
-    if (dr_register_post_attach_event(exit_event1))
-        dr_fprintf(STDERR, "should fail to register for post-attach event");
-    if (dr_unregister_post_attach_event(exit_event1))
-        dr_fprintf(STDERR, "should fail to unregister for post-attach event");
+    if (dr_attached_midrun())
+        dr_fprintf(STDERR, "did *not* attach midrun");
+#else
+    if (!dr_attached_midrun())
+        dr_fprintf(STDERR, "did attach midrun");
 #endif
 }

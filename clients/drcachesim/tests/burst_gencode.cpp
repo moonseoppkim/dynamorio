@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,6 +36,7 @@
 // This is set globally in CMake for other tests so easier to undef here.
 #undef DR_REG_ENUM_COMPATIBILITY
 
+#include "test_helpers.h"
 #include "configure.h"
 #include "dr_api.h"
 #include "drmemtrace/drmemtrace.h"
@@ -150,6 +151,23 @@ private:
         instrlist_append(ilist,
                          XINST_CREATE_store(dc, OPND_CREATE_MEMPTR(base, -ptrsz),
                                             opnd_create_reg(base)));
+
+        // Test raw2trace for filtered traces.
+        instr_t *nop1 = XINST_CREATE_nop(dc);
+        // Start new basic block.
+        instrlist_append(ilist, XINST_CREATE_jump(dc, opnd_create_instr(nop1)));
+        // First instr is one without a memref.
+        instrlist_append(ilist, nop1);
+        // Second instr has a memref. If raw2trace always picks the first bb instr for
+        // gencode bb instrs, this will result in a "memref entry found outside of bb"
+        // error.
+        instrlist_append(ilist,
+                         XINST_CREATE_load_int(dc, opnd_create_reg(base4imm),
+                                               OPND_CREATE_INT32(kGencodeMagic2)));
+        instr_t *nop2 = XINST_CREATE_nop(dc);
+        instrlist_append(ilist, XINST_CREATE_jump(dc, opnd_create_instr(nop2)));
+        // End basic block.
+        instrlist_append(ilist, nop2);
 
 #ifdef LINUX
         // Test a signal in non-module code.
@@ -287,19 +305,21 @@ post_process()
 }
 
 static std::string
-gather_trace()
+gather_trace(const std::string &add_env)
 {
 #ifdef LINUX
     intercept_signal(SIGILL, handle_signal, false);
 #endif
 
-    if (!my_setenv("DYNAMORIO_OPTIONS",
+    std::string env =
 #if defined(LINUX) && defined(X64)
-                   // We pass -satisfy_w_xor_x to further stress that option
-                   // interacting with standalone mode (xref i#5621).
-                   "-satisfy_w_xor_x "
+        // We pass -satisfy_w_xor_x to further stress that option
+        // interacting with standalone mode (xref i#5621).
+        "-satisfy_w_xor_x "
 #endif
-                   "-stderr_mask 0xc -client_lib ';;-offline"))
+        "-stderr_mask 0xc -client_lib ';;-offline";
+    env += add_env;
+    if (!my_setenv("DYNAMORIO_OPTIONS", env.c_str()))
         std::cerr << "failed to set env var!\n";
     code_generator_t gen(false);
     std::cerr << "pre-DR init\n";
@@ -318,7 +338,7 @@ gather_trace()
 }
 
 static int
-look_for_gencode(std::string trace_dir)
+look_for_gencode(std::string trace_dir, bool look_for_magic)
 {
     void *dr_context = dr_standalone_init();
     scheduler_t scheduler;
@@ -331,6 +351,8 @@ look_for_gencode(std::string trace_dir)
     }
     bool found_magic1 = false, found_magic2 = false;
     bool have_instr_encodings = false;
+    // Check that a signal # marker was inserted.
+    bool found_signal_marker = false;
 #ifdef ARM
     // DR will auto-switch locally to Thumb for LSB=1 but not to ARM so we start as ARM.
     dr_set_isa_mode(dr_context, DR_ISA_ARM_A32, nullptr);
@@ -340,10 +362,21 @@ look_for_gencode(std::string trace_dir)
     for (scheduler_t::stream_status_t status = stream->next_record(memref);
          status != scheduler_t::STATUS_EOF; status = stream->next_record(memref)) {
         assert(status == scheduler_t::STATUS_OK);
-        if (memref.marker.type == TRACE_TYPE_MARKER &&
-            memref.marker.marker_type == TRACE_MARKER_TYPE_FILETYPE &&
-            TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, memref.marker.marker_value)) {
-            have_instr_encodings = true;
+        if (memref.marker.type == TRACE_TYPE_MARKER) {
+            if (memref.marker.marker_type == TRACE_MARKER_TYPE_FILETYPE &&
+                TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, memref.marker.marker_value)) {
+                have_instr_encodings = true;
+            }
+#ifdef LINUX
+            else if (memref.marker.marker_type == TRACE_MARKER_TYPE_SIGNAL_NUMBER) {
+                if (memref.marker.marker_value != SIGILL) {
+                    std::cerr << "Found unexpected signal #" << memref.marker.marker_value
+                              << "\n";
+                    return 1;
+                }
+                found_signal_marker = true;
+            }
+#endif
         }
         if (!type_is_instr(memref.instr.type)) {
             found_magic1 = false;
@@ -372,15 +405,29 @@ look_for_gencode(std::string trace_dir)
         instr_free(dr_context, &instr);
     }
     dr_standalone_exit();
-    assert(found_magic2);
+#ifdef LINUX
+    if (!found_signal_marker) {
+        std::cerr << "Failed to find signal # marker\n";
+        return 1;
+    }
+#endif
+    assert(!look_for_magic || found_magic2);
     return 0;
 }
 
 int
 test_main(int argc, const char *argv[])
 {
-    std::string trace_dir = gather_trace();
-    return look_for_gencode(trace_dir);
+    std::string extra_client_opts = "";
+    for (int i = 1; i < argc; ++i) {
+        extra_client_opts += " ";
+        extra_client_opts += argv[i];
+    }
+    std::string trace_dir = gather_trace(extra_client_opts);
+    bool look_for_magic = true;
+    if (extra_client_opts.find("-L0_filter") != std::string::npos)
+        look_for_magic = false;
+    return look_for_gencode(trace_dir, look_for_magic);
 }
 
 } // namespace drmemtrace

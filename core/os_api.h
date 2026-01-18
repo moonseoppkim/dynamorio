@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _DR_OS_UTILS_H_
-#define _DR_OS_UTILS_H_ 1
+#define _DR_OS_UTILS_H_
 
 /**
  * @file dr_os_utils.h
@@ -64,6 +64,18 @@ typedef enum {
     DR_STATE_GO_NATIVE = ~0,                  /**< Switch all state.  Use with care. */
 #endif
 } dr_state_flags_t;
+
+DR_API
+/**
+ * Returns whether DR was injected into a pre-existing process, whether
+ * externally triggered or internally triggered (via dr_app_start() or
+ * related functions).  If the current process was launched by DR *and*
+ * DR presented its very first instruction to clients, returns false.
+ * On Windows, the default injection returns true here as it does not
+ * take over prior to the very first instruction.
+ */
+bool
+dr_attached_midrun(void);
 
 DR_API
 /**
@@ -193,7 +205,7 @@ DR_API
  * \note An error code may be obtained via dr_get_error_code() when this routine fails.
  */
 int
-dr_get_app_args(OUT dr_app_arg_t *args_array, int args_count);
+dr_get_app_args(DR_PARAM_OUT dr_app_arg_t *args_array, int args_count);
 
 DR_API
 /**
@@ -224,7 +236,7 @@ DR_API
  * \note An error code may be obtained via dr_get_error_code() when this routine fails.
  */
 const char *
-dr_app_arg_as_cstring(IN dr_app_arg_t *app_arg, char *buf, int buf_size);
+dr_app_arg_as_cstring(DR_PARAM_IN dr_app_arg_t *app_arg, char *buf, int buf_size);
 
 DR_API
 /** Returns the image name (without path) of the current application. */
@@ -624,7 +636,7 @@ DR_API
 bool
 dr_memory_is_readable(const byte *pc, size_t size);
 
-/* FIXME - this is a real view of memory including changes made for dr cache consistency,
+/* XXX - this is a real view of memory including changes made for dr cache consistency,
  * but what we really want to show the client is the apps view of memory (which would
  * requires fixing correcting the view and fixing up exceptions for areas we made read
  * only) - see PR 198873 */
@@ -669,7 +681,7 @@ DR_API
  * and #DR_MEMPROT_PRETEND_WRITE in \p info->prot.
  */
 bool
-dr_query_memory_ex(const byte *pc, OUT dr_mem_info_t *info);
+dr_query_memory_ex(const byte *pc, DR_PARAM_OUT dr_mem_info_t *info);
 
 #ifdef WINDOWS
 DR_API

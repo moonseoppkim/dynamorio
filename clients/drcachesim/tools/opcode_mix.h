@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2018-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2018-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _OPCODE_MIX_H_
-#define _OPCODE_MIX_H_ 1
+#define _OPCODE_MIX_H_
 
 #include <stddef.h>
 #include <stdint.h>
@@ -39,13 +39,14 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <utility>
 #include <unordered_map>
 
 #include "dr_api.h" // Must be before trace_entry.h from analysis_tool.h.
 #include "analysis_tool.h"
+#include "decode_cache.h"
 #include "memref.h"
 #include "raw2trace.h"
-#include "raw2trace_directory.h"
 #include "trace_entry.h"
 
 namespace dynamorio {
@@ -61,7 +62,7 @@ public:
                  const std::string &alt_module_dir = "");
     virtual ~opcode_mix_t();
     std::string
-    initialize() override;
+    initialize_stream(dynamorio::drmemtrace::memtrace_stream_t *serial_stream) override;
     bool
     process_memref(const memref_t &memref) override;
     bool
@@ -69,11 +70,9 @@ public:
     bool
     parallel_shard_supported() override;
     void *
-    parallel_worker_init(int worker_index) override;
-    std::string
-    parallel_worker_exit(void *worker_data) override;
-    void *
-    parallel_shard_init(int shard_index, void *worker_data) override;
+    parallel_shard_init_stream(
+        int shard_index, void *worker_data,
+        dynamorio::drmemtrace::memtrace_stream_t *shard_stream) override;
     bool
     parallel_shard_exit(void *shard_data) override;
     bool
@@ -81,32 +80,77 @@ public:
     std::string
     parallel_shard_error(void *shard_data) override;
 
+    // Interval support.
+    interval_state_snapshot_t *
+    generate_interval_snapshot(uint64_t interval_id) override;
+    interval_state_snapshot_t *
+    combine_interval_snapshots(
+        const std::vector<const interval_state_snapshot_t *> latest_shard_snapshots,
+        uint64_t interval_end_timestamp) override;
+    bool
+    print_interval_results(
+        const std::vector<interval_state_snapshot_t *> &interval_snapshots) override;
+    bool
+    release_interval_snapshot(interval_state_snapshot_t *interval_snapshot) override;
+    interval_state_snapshot_t *
+    generate_shard_interval_snapshot(void *shard_data, uint64_t interval_id) override;
+
+    // Convert the captured cumulative snapshots to deltas.
+    bool
+    finalize_interval_snapshots(
+        std::vector<interval_state_snapshot_t *> &interval_snapshots) override;
+
 protected:
-    struct worker_data_t {
-        std::unordered_map<app_pc, int> opcode_cache;
+    std::string
+    get_category_names(uint category);
+
+    class opcode_data_t : public decode_info_base_t {
+    public:
+        opcode_data_t()
+            : opcode_(OP_INVALID)
+            , category_(DR_INSTR_CATEGORY_UNCATEGORIZED)
+        {
+        }
+        opcode_data_t(int opcode, uint category)
+            : opcode_(opcode)
+            , category_(category)
+        {
+        }
+        int opcode_;
+        /*
+         * The category field is a uint instead of a dr_instr_category_t because
+         * multiple category bits can be set when an instruction belongs to more
+         * than one category.  We assume 32 bits (i.e., 32 categories) is enough
+         * to be future-proof.
+         */
+        uint category_;
+
+    private:
+        std::string
+        set_decode_info_derived(
+            void *dcontext, const dynamorio::drmemtrace::_memref_instr_t &memref_instr,
+            instr_t *instr, app_pc decode_pc) override;
+    };
+
+    class snapshot_t : public interval_state_snapshot_t {
+    public:
+        // Snapshot the counts as cumulative stats, and then converted them to deltas in
+        // finalize_interval_snapshots().  Printed interval results are all deltas.
+        std::unordered_map<int, int64_t> opcode_counts_;
+        std::unordered_map<uint, int64_t> category_counts_;
     };
 
     struct shard_data_t {
         shard_data_t()
-            : worker(nullptr)
-            , instr_count(0)
         {
         }
-        shard_data_t(worker_data_t *worker)
-            : worker(worker)
-            , instr_count(0)
-            , last_trace_module_start(nullptr)
-            , last_trace_module_size(0)
-            , last_mapped_module_start(nullptr)
-        {
-        }
-        worker_data_t *worker;
-        int64_t instr_count;
+
+        int64_t instr_count = 0;
         std::unordered_map<int, int64_t> opcode_counts;
+        std::unordered_map<uint, int64_t> category_counts;
         std::string error;
-        app_pc last_trace_module_start;
-        size_t last_trace_module_size;
-        app_pc last_mapped_module_start;
+        dynamorio::drmemtrace::memtrace_stream_t *stream = nullptr;
+        std::unique_ptr<decode_cache_t<opcode_data_t>> decode_cache;
         offline_file_type_t filetype = OFFLINE_FILE_TYPE_DEFAULT;
     };
 
@@ -120,6 +164,11 @@ protected:
         void *dcontext = nullptr;
     };
 
+    // Creates and initializes a decode cache object in the given shard. Made virtual to
+    // allow subclasses to customize.
+    virtual bool
+    init_decode_cache(shard_data_t *shard, void *dcontext, offline_file_type_t filetype);
+
     /* We make this the first field so that dr_standalone_exit() is called after
      * destroying the other fields which may use DR heap.
      */
@@ -129,13 +178,8 @@ protected:
     // XXX: Once we update our toolchains to guarantee C++17 support we could use
     // std::optional here.
     std::string module_file_path_;
-    std::unique_ptr<module_mapper_t> module_mapper_;
-    std::mutex mapper_mutex_;
-    // We reference directory.modfile_bytes throughout operation, so its lifetime
-    // must match ours.
-    raw2trace_directory_t directory_;
 
-    std::unordered_map<memref_tid_t, shard_data_t *> shard_map_;
+    std::unordered_map<int, shard_data_t *> shard_map_;
     // This mutex is only needed in parallel_shard_init.  In all other accesses to
     // shard_map (process_memref, print_results) we are single-threaded.
     std::mutex shard_map_mutex_;
@@ -143,8 +187,9 @@ protected:
     std::string knob_alt_module_dir_;
     static const std::string TOOL_NAME;
     // For serial operation.
-    worker_data_t serial_worker_;
     shard_data_t serial_shard_;
+    // To guard the setting of isa_mode in dcontext.
+    std::mutex dcontext_mutex_;
 };
 
 } // namespace drmemtrace

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2020 Google, Inc.   All rights reserved.
+ * Copyright (c) 2020-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _DRMGR_PRIV_H_
-#define _DRMGR_PRIV_H_ 1
+#define _DRMGR_PRIV_H_
 
 /* An internal interface that acts as a beachhead for other extensions, e.g. drbbdup,
  * to integrate their functionalities with drmgr. The interface should only be used
@@ -56,7 +56,7 @@ extern "C" {
  */
 typedef bool (*drmgr_bbdup_duplicate_bb_cb_t)(void *drcontext, void *tag, instrlist_t *bb,
                                               bool for_trace, bool translating,
-                                              OUT void **local_info);
+                                              DR_PARAM_OUT void **local_info);
 
 /* Extracts and returns a pending basic block copy from the main basic block. Returns
  * NULL, if no further copies are pending.

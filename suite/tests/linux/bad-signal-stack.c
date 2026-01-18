@@ -30,13 +30,14 @@
  * DAMAGE.
  */
 
-#include "tools.h"
 #include <unistd.h>
 #include <signal.h>
-#include <ucontext.h>
 #include <errno.h>
 #include <stdlib.h>
 #include <assert.h>
+/* i#6615 include tools.h after signal.h to avoid issues on
+ * ubuntu 22:04 caused by _GNU_SOURCE being defined */
+#include "tools.h"
 
 #define ALT_STACK_SIZE (SIGSTKSZ * 4)
 
@@ -88,7 +89,7 @@ main(int argc, char *argv[])
     /* Make an alternate stack that's not writable. */
     sigstack.ss_sp = alloc;
     sigstack.ss_size = ALT_STACK_SIZE;
-    sigstack.ss_flags = SS_ONSTACK;
+    sigstack.ss_flags = 0;
     rc = sigaltstack(&sigstack, NULL);
     ASSERT_NOERR(rc);
     protect_mem((void *)sigstack.ss_sp, ALT_STACK_SIZE, ALLOW_READ);

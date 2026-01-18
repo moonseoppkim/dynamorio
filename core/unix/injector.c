@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2012-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -56,7 +56,7 @@
 #include "dr_inject.h"
 
 #include <assert.h>
-#ifndef MACOS
+#if !(defined(MACOS) || defined(ANDROID64))
 /* If we don't define _EXTERNALIZE_CTYPE_INLINES_*, we get errors vs tolower
  * in globals.h; if we do, we get errors on isspace missing.  We solve that
  * by just by supplying our own isspace.
@@ -93,13 +93,15 @@ typedef enum {
     PLATFORM_UNKNOWN,
 } platform_status_t;
 
-#ifdef MACOS
+#if defined(MACOS) || defined(ANDROID64)
 /* The type is just "int", and the values are different, so we use the Linux
  * type name to match the Linux constant names.
  */
 #    ifndef PT_ATTACHEXC /* New replacement for PT_ATTACH */
 #        define PT_ATTACHEXC PT_ATTACH
 #    endif
+
+#    ifdef MACOS
 enum __ptrace_request {
     PTRACE_TRACEME = PT_TRACE_ME,
     PTRACE_CONT = PT_CONTINUE,
@@ -108,6 +110,7 @@ enum __ptrace_request {
     PTRACE_DETACH = PT_DETACH,
     PTRACE_SINGLESTEP = PT_STEP,
 };
+#    endif
 
 /* clang-format off */ /* (work around clang-format bug) */
 static int inline
@@ -498,7 +501,7 @@ exe_is_right_bitwidth(const char *exe, int *errcode)
  */
 DR_EXPORT
 int
-dr_inject_process_create(const char *exe, const char **argv, void **data OUT)
+dr_inject_process_create(const char *exe, const char **argv, void **data DR_PARAM_OUT)
 {
     int r;
     int fds[2];
@@ -550,7 +553,7 @@ error:
 
 DR_EXPORT
 int
-dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data OUT)
+dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data DR_PARAM_OUT)
 {
     dr_inject_info_t *info = create_inject_info(exe, argv);
     int errcode = 0;
@@ -572,7 +575,7 @@ dr_inject_prepare_to_exec(const char *exe, const char **argv, void **data OUT)
 DR_EXPORT
 int
 dr_inject_prepare_to_attach(process_id_t pid, const char *appname, bool wait_syscall,
-                            void **data OUT)
+                            void **data DR_PARAM_OUT)
 {
     dr_inject_info_t *info = create_inject_info(appname, NULL);
     int errcode = 0;
@@ -632,7 +635,7 @@ dr_inject_get_image_name(void *data)
     return (char *)info->image_name;
 }
 
-/* FIXME: Use the parser in options.c.  The implementation here will find
+/* XXX: Use the parser in options.c.  The implementation here will find
  * options in quoted strings, like the client options string.
  */
 static bool
@@ -893,6 +896,7 @@ enum { MAX_SHELL_CODE = 4096 };
 #        define REG_RETVAL_FIELD uregs[0] /* r0 in user_regs */
 #    elif defined(DR_HOST_AARCH64)
 #        define USER_REGS_TYPE user_pt_regs
+#        define USER_VREGS_TYPE user_fpsimd_struct
 #        define REG_PC_FIELD pc
 #        define REG_SP_FIELD sp
 #        define REG_RETVAL_FIELD regs[0] /* x0 in user_regs_struct */
@@ -901,6 +905,10 @@ enum { MAX_SHELL_CODE = 4096 };
 #        define REG_PC_FIELD pc
 #        define REG_SP_FIELD sp
 #        define REG_RETVAL_FIELD a0
+#    endif
+
+#    if defined(DR_HOST_AARCH64)
+#        define MAX_SUPPORTED_SVE_VECTOR_LENGTH sizeof(dr_simd_t)
 #    endif
 
 enum { REG_PC_OFFSET = offsetof(struct USER_REGS_TYPE, REG_PC_FIELD) };
@@ -1034,6 +1042,95 @@ our_ptrace_getregs(pid_t pid, struct USER_REGS_TYPE *regs)
 #    endif
 }
 
+#    if defined(DR_HOST_AARCH64)
+static long
+our_ptrace_getvregs(pid_t pid, struct USER_VREGS_TYPE *vregs)
+{
+    struct iovec iovec = { vregs, sizeof(*vregs) };
+    return our_ptrace(PTRACE_GETREGSET, pid, (void *)NT_FPREGSET, &iovec);
+}
+
+static long
+our_ptrace_get_sve(pid_t pid, struct user_sve_header *sve_header, size_t size)
+{
+    ASSERT(size >= sizeof(struct user_sve_header));
+    struct iovec iovec = { sve_header, size };
+    return our_ptrace(PTRACE_GETREGSET, pid, (void *)NT_ARM_SVE, &iovec);
+}
+
+static long
+our_ptrace_set_sve(pid_t pid, struct user_sve_header *sve_state)
+{
+    struct iovec iovec = { sve_state, sve_state->size };
+    return our_ptrace(PTRACE_SETREGSET, pid, (void *)NT_ARM_SVE, &iovec);
+}
+
+/* Get the SVE register state for the target process.
+ * Returns false if an error occurs.
+ * On success sve_state_out will be set to a heap allocated user_sve_header containing
+ * the SVE register state if the target process has SVE state active, or NULL if SVE
+ * state is not active.
+ * sve_state_out is allocated using malloc which is safe because this code will never
+ * be run in DR managed mode. The caller is responsible for freeing it using free() when
+ * it is no longer needed.
+ */
+static bool
+get_sve_state(pid_t pid, struct user_sve_header **sve_state_out)
+{
+    /* First we need to read the header to find out the vector length. */
+    struct user_sve_header sve_header = { 0 };
+    if (our_ptrace_get_sve(pid, &sve_header, sizeof(sve_header)) < 0) {
+        /* No SVE support. */
+        *sve_state_out = NULL;
+        return true;
+    }
+
+    if (sve_header.vl > MAX_SUPPORTED_SVE_VECTOR_LENGTH) {
+        /* DynamoRIO supports a maximum of 64-byte (512-bit) vectors so we can't
+         * attach to this process.
+         */
+        fprintf(stderr,
+                "Unable to attach to process. The target process has an SVE vector "
+                "length larger than the maxumum supported by DynamoRIO\n");
+        *sve_state_out = NULL;
+        return false;
+    }
+
+    /* Now we know the vector length we can allocate enough memory to contain the
+     * register data and call our_ptrace_get_sve() again to get the register data (if
+     * there is any).
+     */
+    const size_t full_sve_state_size =
+        SVE_PT_SIZE(sve_vq_from_vl(sve_header.vl), SVE_PT_REGS_SVE);
+
+    /* It is safe to use malloc here because this code will never be run in DR managed
+     * mode.
+     */
+    *sve_state_out = malloc(full_sve_state_size);
+
+    if (*sve_state_out == NULL)
+        return false;
+
+    const bool ptrace_error =
+        our_ptrace_get_sve(pid, *sve_state_out, full_sve_state_size) < 0;
+    ASSERT(!ptrace_error);
+
+    /* Finally we need to check if the target actually has SVE state. Only tasks which
+     * have executed an SVE instruction since the last syscall will have active SVE
+     * state.
+     */
+    const bool has_active_sve_state =
+        !ptrace_error && TEST((*sve_state_out)->flags, SVE_PT_REGS_SVE);
+
+    if (!has_active_sve_state) {
+        free(*sve_state_out);
+        *sve_state_out = NULL;
+    }
+
+    return !ptrace_error;
+}
+#    endif
+
 static long
 our_ptrace_setregs(pid_t pid, struct USER_REGS_TYPE *regs)
 {
@@ -1053,7 +1150,7 @@ ptrace_read_memory(pid_t pid, void *dst, void *src, size_t len)
     uint i;
     ptr_int_t *dst_reg = dst;
     ptr_int_t *src_reg = src;
-    ASSERT(len % sizeof(ptr_int_t) == 0); /* FIXME handle */
+    ASSERT(len % sizeof(ptr_int_t) == 0); /* XXX handle */
     for (i = 0; i < len / sizeof(ptr_int_t); i++) {
         /* We use a raw syscall instead of the libc wrapper, so the value read
          * is stored in the data pointer instead of being returned in r.
@@ -1073,7 +1170,7 @@ ptrace_write_memory(pid_t pid, void *dst, void *src, size_t len)
     uint i;
     ptr_int_t *dst_reg = dst;
     ptr_int_t *src_reg = src;
-    ASSERT(len % sizeof(ptr_int_t) == 0); /* FIXME handle */
+    ASSERT(len % sizeof(ptr_int_t) == 0); /* XXX handle */
     for (i = 0; i < len / sizeof(ptr_int_t); i++) {
         long r = our_ptrace(PTRACE_POKEDATA, pid, &dst_reg[i], (void *)src_reg[i]);
         if (r < 0)
@@ -1240,6 +1337,11 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
     r = our_ptrace_getregs(info->pid, &regs);
     if (r < 0)
         return r;
+#    if defined(DR_HOST_AARCH64)
+    struct user_sve_header *sve_state = NULL;
+    if (!get_sve_state(info->pid, &sve_state))
+        return failure;
+#    endif
 
 #    if defined(X86)
     app_mode = IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32);
@@ -1248,7 +1350,7 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
 #    elif defined(ARM)
     app_mode = TEST(EFLAGS_T, regs.uregs[16]) ? DR_ISA_ARM_THUMB : DR_ISA_ARM_A32;
 #    elif defined(RISCV64)
-    app_mode = DR_ISA_RV64IMAFDC;
+    app_mode = DR_ISA_RV64;
 #    else
 #        error Unsupported arch.
 #    endif
@@ -1345,6 +1447,14 @@ injectee_run_get_retval(dr_inject_info_t *info, void *dc, instrlist_t *ilist)
     r = our_ptrace_setregs(info->pid, &regs);
     if (r < 0)
         return r;
+#    if defined(DR_HOST_AARCH64)
+    if (sve_state != NULL) {
+        r = our_ptrace_set_sve(info->pid, sve_state);
+        free(sve_state);
+        if (r < 0)
+            return r;
+    }
+#    endif
 
     return ret;
 }
@@ -1399,8 +1509,8 @@ injectee_mmap(dr_inject_info_t *info, void *addr, size_t sz, int prot, int flags
  * injector_dr_fd to injectee_dr_fd to map the former to the latter.
  */
 static byte *
-injectee_map_file(file_t f, size_t *size INOUT, uint64 offs, app_pc addr, uint prot,
-                  map_flags_t map_flags)
+injectee_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                  uint prot, map_flags_t map_flags)
 {
     int fd;
     int flags = 0;
@@ -1448,6 +1558,17 @@ injectee_unmap(byte *addr, size_t size)
         return false;
     }
     return true;
+}
+
+static byte *
+injectee_overlap_map_file(file_t f, size_t *size DR_PARAM_INOUT, uint64 offs, app_pc addr,
+                          uint prot, map_flags_t map_flags)
+{
+    /* This works only if the user wants the new mapping only at the given addr,
+     * and it is acceptable to unmap any mapping already existing there.
+     */
+    ASSERT(TEST(MAP_FILE_FIXED, map_flags));
+    return injectee_map_file(f, size, offs, addr, prot, map_flags);
 }
 
 /* Do an mprotect syscall in the injectee. */
@@ -1523,7 +1644,12 @@ injectee_memset(void *dst, int val, size_t size)
  * struct.
  */
 static void
+#    if defined(DR_HOST_AARCH64)
+user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs,
+                struct USER_VREGS_TYPE *vregs, struct user_sve_header *sve_header)
+#    else
 user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
+#    endif
 {
 #    if defined(DR_HOST_NOT_TARGET)
     ASSERT_NOT_IMPLEMENTED(false);
@@ -1609,7 +1735,43 @@ user_regs_to_mc(priv_mcontext_t *mc, struct USER_REGS_TYPE *regs)
     mc->r30 = regs->regs[30];
     mc->sp = regs->sp;
     mc->pc = (app_pc)regs->pc;
-#    endif /* X86/ARM */
+    mc->nzcv = regs->pstate & 0xF0000000;
+
+    if (sve_header != NULL) {
+        /* Process has active SVE state. */
+        ASSERT(TEST(SVE_PT_REGS_SVE, sve_header->flags));
+        ASSERT(sve_header->vl <= MAX_SUPPORTED_SVE_VECTOR_LENGTH);
+
+        /* The ptrace macros calculate sizes based on "vq": the vector length in
+         * quadwords.
+         */
+        const size_t vq = sve_vq_from_vl(sve_header->vl);
+
+        for (size_t i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+            memcpy(&mc->simd[i].u64[0],
+                   (byte *)sve_header + SVE_PT_SVE_ZREG_OFFSET(vq, i),
+                   SVE_PT_SVE_ZREG_SIZE(vq));
+        }
+
+        for (size_t i = 0; i < MCXT_NUM_SVEP_SLOTS; i++) {
+            memcpy(&mc->svep[i].u16[0],
+                   (byte *)sve_header + SVE_PT_SVE_PREG_OFFSET(vq, i),
+                   SVE_PT_SVE_PREG_SIZE(vq));
+        }
+        memcpy(&mc->ffr.u16[0], (byte *)sve_header + SVE_PT_SVE_FFR_OFFSET(vq),
+               SVE_PT_SVE_FFR_SIZE(vq));
+    } else {
+        /* Process does not have active SVE state so fall back to using vregs. */
+        int i;
+        for (i = 0; i < MCXT_NUM_SIMD_SVE_SLOTS; i++) {
+            memcpy(&mc->simd[i].q, &vregs->vregs[i], sizeof(mc->simd->q));
+        }
+    }
+
+    mc->fpsr = vregs->fpsr;
+    mc->fpcr = vregs->fpcr;
+
+#    endif /* X86/ARM/AARCH64 */
 }
 
 /* Detach from the injectee and re-exec ourselves as gdb with --pid.  This is
@@ -1722,6 +1884,9 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     long r;
     int dr_fd;
     struct USER_REGS_TYPE regs;
+#    if defined(DR_HOST_AARCH64)
+    struct USER_VREGS_TYPE vregs;
+#    endif
     ptrace_stack_args_t args;
     app_pc injected_base;
     app_pc injected_dr_start;
@@ -1781,7 +1946,8 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     injectee_dr_fd = dr_fd;
     injected_base = elf_loader_map_phdrs(
         &loader, true /*fixed*/, injectee_map_file, injectee_unmap, injectee_prot, NULL,
-        injectee_memset, MODLOAD_SEPARATE_PROCESS /*!reachable*/);
+        injectee_memset, MODLOAD_SEPARATE_PROCESS /*!reachable*/,
+        injectee_overlap_map_file);
     if (injected_base == NULL) {
         if (verbose)
             fprintf(stderr, "Unable to mmap libdynamorio.so in injectee\n");
@@ -1794,6 +1960,13 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
     injected_dr_start = (app_pc)loader.ehdr->e_entry + loader.load_delta;
 
     our_ptrace_getregs(info->pid, &regs);
+#    if defined(DR_HOST_AARCH64)
+    our_ptrace_getvregs(info->pid, &vregs);
+    struct user_sve_header *sve_state = NULL;
+    if (!get_sve_state(info->pid, &sve_state))
+        return false;
+#    endif
+
     dr_isa_mode_t app_mode;
 #    if defined(X86)
     app_mode = IF_X64_ELSE(DR_ISA_AMD64, DR_ISA_IA32);
@@ -1802,7 +1975,7 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
 #    elif defined(ARM)
     app_mode = TEST(EFLAGS_T, regs.uregs[16]) ? DR_ISA_ARM_THUMB : DR_ISA_ARM_A32;
 #    elif defined(RISCV64)
-    app_mode = DR_ISA_RV64IMAFDC;
+    app_mode = DR_ISA_RV64;
 #    else
 #        error Unsupported arch.
 #    endif
@@ -1852,7 +2025,12 @@ inject_ptrace(dr_inject_info_t *info, const char *library_path)
      * good place to put it.
      */
     memset(&args, 0, sizeof(args));
+#    if defined(DR_HOST_AARCH64)
+    user_regs_to_mc(&args.mc, &regs, &vregs, sve_state);
+    free(sve_state);
+#    else
     user_regs_to_mc(&args.mc, &regs);
+#    endif
     args.argc = ARGC_PTRACE_SENTINEL;
 #    ifdef ARM
     if (app_mode == DR_ISA_ARM_THUMB)

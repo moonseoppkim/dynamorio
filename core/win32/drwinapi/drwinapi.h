@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2013-2014 Google, Inc.   All rights reserved.
+ * Copyright (c) 2013-2025 Google, Inc.   All rights reserved.
  * **********************************************************/
 
 /*
@@ -36,7 +36,7 @@
  */
 
 #ifndef _DRWINAPI_H_
-#define _DRWINAPI_H_ 1
+#define _DRWINAPI_H_
 
 #include "../../module_shared.h"
 
@@ -53,7 +53,8 @@ app_pc
 drwinapi_redirect_imports(privmod_t *impmod, const char *name, privmod_t *importer);
 
 bool
-drwinapi_redirect_getprocaddr(app_pc modbase, const char *name, app_pc *res_out OUT);
+drwinapi_redirect_getprocaddr(app_pc modbase, const char *name,
+                              app_pc *res_out DR_PARAM_OUT);
 
 void
 ntdll_redir_fls_init(PEB *app_peb, PEB *private_peb);

@@ -47,7 +47,7 @@ static void
 event_exit(void);
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data);
+                 bool translating, DR_PARAM_OUT void **user_data);
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void *user_data);
@@ -63,7 +63,7 @@ dr_init(client_id_t id)
 
     drmgr_init();
     drutil_init();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     ok = drmgr_register_bb_instrumentation_ex_event(event_bb_app2app, event_bb_analysis,
                                                     event_bb_insert, NULL, &priority);
@@ -93,7 +93,7 @@ instr_is_stringop_loop(instr_t *inst)
 
 static dr_emit_flags_t
 event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                 bool translating, OUT void **user_data)
+                 bool translating, DR_PARAM_OUT void **user_data)
 {
     instr_t *inst;
     bool repstr_first = false, repstr_seen = false, expanded = true;

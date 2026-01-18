@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _DR_IR_DISASSEMBLE_H_
-#define _DR_IR_DISASSEMBLE_H_ 1
+#define _DR_IR_DISASSEMBLE_H_
 
 /**************************************************
  * DISASSEMBLY ROUTINES
@@ -161,7 +161,8 @@ DR_API
  */
 byte *
 disassemble_to_buffer(void *drcontext, byte *pc, byte *orig_pc, bool show_pc,
-                      bool show_bytes, char *buf, size_t bufsz, int *printed OUT);
+                      bool show_bytes, char *buf, size_t bufsz,
+                      int *printed DR_PARAM_OUT);
 
 DR_API
 /**

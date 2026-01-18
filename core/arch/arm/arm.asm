@@ -1,5 +1,6 @@
 /* **********************************************************
- * Copyright (c) 2014-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
+ * Copyright (c) 2025 Arm Limited. All rights reserved.
  * ********************************************************** */
 
 /*
@@ -34,6 +35,7 @@
  * ARM-specific assembly and trampoline code
  */
 
+#include "asm_offsets.h"
 #include "../asm_defines.asm"
 START_FILE
 #include "include/syscall.h"
@@ -52,28 +54,6 @@ DECL_EXTERN(initstack_mutex)
 
 #define RESTORE_FROM_DCONTEXT_VIA_REG(reg,offs,dest) ldr dest, PTRSZ [reg, POUND (offs)]
 #define SAVE_TO_DCONTEXT_VIA_REG(reg,offs,src) str src, PTRSZ [reg, POUND (offs)]
-
-/* offsetof(dcontext_t, dstack) */
-#define dstack_OFFSET     0x16c
-/* offsetof(dcontext_t, is_exiting) */
-#define is_exiting_OFFSET (dstack_OFFSET+1*ARG_SZ)
-
-#ifdef X64
-# define MCXT_NUM_SIMD_SLOTS 32
-# define SIMD_REG_SIZE       16
-# define NUM_GPR_SLOTS       33 /* incl flags */
-# define GPR_REG_SIZE         8
-#else
-# define MCXT_NUM_SIMD_SLOTS 16
-# define SIMD_REG_SIZE       16
-# define NUM_GPR_SLOTS       17 /* incl flags */
-# define GPR_REG_SIZE         4
-#endif
-#define PRE_SIMD_PADDING     0
-#define PRIV_MCXT_SIMD_SIZE (PRE_SIMD_PADDING + MCXT_NUM_SIMD_SLOTS*SIMD_REG_SIZE)
-#define PRIV_MCXT_SIZE (NUM_GPR_SLOTS*GPR_REG_SIZE + PRIV_MCXT_SIMD_SIZE)
-#define PRIV_MCXT_SP_FROM_SIMD (-(4*GPR_REG_SIZE)) /* flags, pc, lr, then sp */
-#define PRIV_MCXT_PC_FROM_SIMD (-(2*GPR_REG_SIZE)) /* flags, then pc */
 
 #ifndef UNIX
 # error Non-Unix is not supported
@@ -114,7 +94,9 @@ call_dispatch_alt_stack_no_free:
         /* after call, so we can use REG_R3 as the scratch register */
         ldr      REG_R3, [sp, #8/* r4, lr */] /* ARG5 */
         cmp      REG_R3, #0
-        beq      GLOBAL_REF(unexpected_return)
+        bne      call_dispatch_alt_stack_ok_return
+        bl       GLOBAL_REF(unexpected_return)
+call_dispatch_alt_stack_ok_return:
         /* restore and return */
         pop      {REG_R4, pc}
         END_FUNC(call_switch_stack)
@@ -145,7 +127,7 @@ GLOBAL_LABEL(dr_call_on_clean_stack:)
         mov      REG_R4, REG_SP /* save sp across the call */
         mov      REG_R5, ARG2 /* save function in non-param reg */
         /* Swap stacks */
-        RESTORE_FROM_DCONTEXT_VIA_REG(REG_R0, dstack_OFFSET, REG_SP)
+        RESTORE_FROM_DCONTEXT_VIA_REG(REG_R0, dcontext_t_OFFSET_dstack, REG_SP)
         /* Set up args */
         sub      REG_SP, #(4*ARG_SZ)
         ldr      REG_R0, [REG_R4, #(11*ARG_SZ)]
@@ -174,24 +156,31 @@ GLOBAL_LABEL(dr_call_on_clean_stack:)
 #ifdef DR_APP_EXPORTS
         DECLARE_EXPORTED_FUNC(dr_app_start)
 GLOBAL_LABEL(dr_app_start:)
-        push     {lr}
-        vstmdb   sp!, {d16-d31}
-        vstmdb   sp!, {d0-d15}
-        mrs      REG_R0, cpsr /* r0 is scratch */
-        push     {REG_R0}
-        /* We can't push all regs w/ writeback */
-        stmdb    sp, {REG_R0-r15}
-        str      lr, [sp, #(PRIV_MCXT_PC_FROM_SIMD+4)] /* +4 b/c we pushed cpsr */
-        /* we need the sp at function entry */
-        mov      REG_R0, sp
-        add      REG_R0, REG_R0, #(PRIV_MCXT_SIMD_SIZE + 8) /* offset simd,cpsr,lr */
-        str      REG_R0, [sp, #(PRIV_MCXT_SP_FROM_SIMD+4)] /* +4 b/c we pushed cpsr */
-        sub      sp, sp, #(PRIV_MCXT_SIZE-PRIV_MCXT_SIMD_SIZE-4) /* simd,cpsr */
-        mov      REG_R0, sp
+#if priv_mcontext_t_SIZE % 8 != 0
+#    error Size of priv_mcontext_t should be 8-byte aligned.
+#endif
+        /* space for mcontext + padding + LR (stack must be 8-byte aligned */
+        sub      sp, sp, #(priv_mcontext_t_SIZE + 8)
+        str      lr, [sp, #(priv_mcontext_t_SIZE + 4)]
+#if priv_mcontext_t_OFFSET_r0 != 0
+#    error
+#endif
+        stmia    sp, {r0-r12}
+        add      r0, sp, #(priv_mcontext_t_SIZE + 8) /* get SP at function entry */
+        str      r0, [sp, #priv_mcontext_t_OFFSET_sp]
+        str      lr, [sp, #priv_mcontext_t_OFFSET_lr]
+        str      lr, [sp, #priv_mcontext_t_OFFSET_pc] /* save LR as PC */
+        mrs      r0, cpsr
+        str      r0, [sp, #priv_mcontext_t_OFFSET_cpsr]
+        add      r0, sp, #priv_mcontext_t_OFFSET_simd
+        vstmia   r0!, {d0-d15}
+        vstmia   r0!, {d16-d31}
+        mov      r0, sp
         CALLC1(GLOBAL_REF(dr_app_start_helper), REG_R0)
         /* if we get here, DR is not taking over */
-        add      sp, sp, #PRIV_MCXT_SIZE
-        pop      {pc}
+        ldr      lr, [sp, #(priv_mcontext_t_SIZE + 4)]
+        add      sp, sp, #priv_mcontext_t_SIZE
+        bx       lr
         END_FUNC(dr_app_start)
 
 /*
@@ -223,25 +212,32 @@ GLOBAL_LABEL(dr_app_running_under_dynamorio:)
  */
         DECLARE_EXPORTED_FUNC(dynamorio_app_take_over)
 GLOBAL_LABEL(dynamorio_app_take_over:)
-        push     {lr}
-        vstmdb   sp!, {d16-d31}
-        vstmdb   sp!, {d0-d15}
-        mrs      REG_R0, cpsr /* r0 is scratch */
-        push     {REG_R0}
-        /* We can't push all regs w/ writeback */
-        stmdb    sp, {REG_R0-r15}
-        str      lr, [sp, #(PRIV_MCXT_PC_FROM_SIMD+4)] /* +4 b/c we pushed cpsr */
-        /* we need the sp at function entry */
-        mov      REG_R0, sp
-        add      REG_R0, REG_R0, #(PRIV_MCXT_SIMD_SIZE + 8) /* offset simd,cpsr,lr */
-        str      REG_R0, [sp, #(PRIV_MCXT_SP_FROM_SIMD+4)] /* +4 b/c we pushed cpsr */
-        sub      sp, sp, #(PRIV_MCXT_SIZE-PRIV_MCXT_SIMD_SIZE-4) /* simd,cpsr */
-        mov      REG_R0, sp
+#if priv_mcontext_t_SIZE % 8 != 0
+#    error Size of priv_mcontext_t should be 8-byte aligned.
+#endif
+        /* space for mcontext + padding + LR (stack must be 8-byte aligned */
+        sub      sp, sp, #(priv_mcontext_t_SIZE + 8)
+        str      lr, [sp, #(priv_mcontext_t_SIZE + 4)]
+#if priv_mcontext_t_OFFSET_r0 != 0
+#    error
+#endif
+        stmia    sp, {r0-r12}
+        add      r0, sp, #(priv_mcontext_t_SIZE + 8) /* get SP at function entry */
+        str      r0, [sp, #priv_mcontext_t_OFFSET_sp]
+        str      lr, [sp, #priv_mcontext_t_OFFSET_lr]
+        str      lr, [sp, #priv_mcontext_t_OFFSET_pc] /* save LR as PC */
+        mrs      r0, cpsr
+        str      r0, [sp, #priv_mcontext_t_OFFSET_cpsr]
+        add      r0, sp, #priv_mcontext_t_OFFSET_simd
+        vstmia   r0!, {d0-d15}
+        vstmia   r0!, {d16-d31}
+        mov      r0, sp
         CALLC1(GLOBAL_REF(dynamorio_app_take_over_helper), REG_R0)
         /* if we get here, DR is not taking over */
-        add      sp, sp, #PRIV_MCXT_SIZE
-        pop      {pc}
-        END_FUNC(dynamorio_app_take_over)
+        ldr      lr, [sp, #(priv_mcontext_t_SIZE + 4)]
+        add      sp, sp, #priv_mcontext_t_SIZE
+        bx       lr
+        END_FUNC(dr_app_start)
 
 
 /*
@@ -271,14 +267,14 @@ GLOBAL_LABEL(cleanup_and_terminate:)
         /* save dcontext->dstack for freeing later and set dcontext->is_exiting */
         ldr      REG_R4, PTRSZ [sp, #(0*ARG_SZ)] /* dcontext */
         mov      REG_R1, #1
-        SAVE_TO_DCONTEXT_VIA_REG(REG_R4, is_exiting_OFFSET, REG_R1)
+        SAVE_TO_DCONTEXT_VIA_REG(REG_R4, dcontext_t_OFFSET_is_exiting, REG_R1)
         CALLC1(GLOBAL_REF(is_currently_on_dstack), REG_R4) /* r4 is callee-saved */
         cmp      REG_R0, #0
         bne      cat_save_dstack
         mov      REG_R4, #0 /* save 0 for dstack to avoid double-free */
         b        cat_done_saving_dstack
 cat_save_dstack:
-        RESTORE_FROM_DCONTEXT_VIA_REG(REG_R4, dstack_OFFSET, REG_R4)
+        RESTORE_FROM_DCONTEXT_VIA_REG(REG_R4, dcontext_t_OFFSET_dstack, REG_R4)
 cat_done_saving_dstack:
         CALLC0(GLOBAL_REF(get_cleanup_and_terminate_global_do_syscall_entry))
         mov      REG_R5, REG_R0
@@ -368,7 +364,7 @@ GLOBAL_LABEL(atomic_add:)
 
         DECLARE_FUNC(global_do_syscall_int)
 GLOBAL_LABEL(global_do_syscall_int:)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         svc      #0
         END_FUNC(global_do_syscall_int)
 
@@ -383,10 +379,10 @@ DECLARE_GLOBAL(safe_read_asm_recover)
  * can recover.  We return the source pointer from ARG2, and the caller uses this
  * to determine how many bytes were copied and whether it matches size.
  *
- * FIXME i#1551: NYI: we need to save the PC's that can fault and have
+ * TODO i#1551: NYI: we need to save the PC's that can fault and have
  * is_safe_read_pc() identify them.
  *
- * FIXME i#1551: we should optimize this as it can be on the critical path.
+ * XXX i#1551: we should optimize this as it can be on the critical path.
  *
  * void *
  * safe_read_asm(void *dst, const void *src, size_t n);
@@ -462,57 +458,33 @@ GLOBAL_LABEL(atomic_swap:)
 
         DECLARE_FUNC(our_cpuid)
 GLOBAL_LABEL(our_cpuid:)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         bl       GLOBAL_REF(unexpected_return)
         END_FUNC(our_cpuid)
 
 #ifdef UNIX
         DECLARE_FUNC(client_int_syscall)
 GLOBAL_LABEL(client_int_syscall:)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         svc      #0
         blx      lr
         END_FUNC(client_int_syscall)
 
         DECLARE_FUNC(native_plt_call)
 GLOBAL_LABEL(native_plt_call:)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         bl       GLOBAL_REF(unexpected_return)
         END_FUNC(native_plt_call)
 
         DECLARE_FUNC(_dynamorio_runtime_resolve)
 GLOBAL_LABEL(_dynamorio_runtime_resolve:)
-        /* FIXME i#1551: NYI on ARM */
+        /* TODO i#1551: NYI on ARM */
         bl       GLOBAL_REF(unexpected_return)
         END_FUNC(_dynamorio_runtime_resolve)
 
 #endif /* UNIX */
 
 #ifdef LINUX
-/* thread_id_t dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls,
- *                             void *ctid, void (*func)(void))
- */
-        DECLARE_FUNC(dynamorio_clone)
-GLOBAL_LABEL(dynamorio_clone:)
-        /* Save callee-saved regs we clobber in the parent. */
-        push     {r4, r5, r7}
-        ldr      r4, [sp, #12] /* ARG5 minus the pushes above */
-        ldr      r5, [sp, #16] /* ARG6 minus the pushes above */
-        /* All args are now in syscall registers. */
-        /* Push func on the new stack. */
-        stmdb    ARG2!, {r5}
-        mov      r7, #SYS_clone
-        svc      0
-        cmp      r0, #0
-        bne      dynamorio_clone_parent
-        ldmia    sp!, {r0}
-        blx      r0
-        bl       GLOBAL_REF(unexpected_return)
-dynamorio_clone_parent:
-        pop      {r4, r5, r7}
-        bx       lr
-        END_FUNC(dynamorio_clone)
-
         DECLARE_FUNC(dynamorio_sigreturn)
 GLOBAL_LABEL(dynamorio_sigreturn:)
         mov      r7, #SYS_rt_sigreturn
@@ -574,7 +546,7 @@ GLOBAL_LABEL(hashlookup_null_handler:)
 
         DECLARE_FUNC(back_from_native_retstubs)
 GLOBAL_LABEL(back_from_native_retstubs:)
-        /* FIXME i#1582: NYI on ARM */
+        /* TODO i#1582: NYI on ARM */
 DECLARE_GLOBAL(back_from_native_retstubs_end)
 ADDRTAKEN_LABEL(back_from_native_retstubs_end:)
         bl       GLOBAL_REF(unexpected_return)
@@ -582,7 +554,7 @@ ADDRTAKEN_LABEL(back_from_native_retstubs_end:)
 
         DECLARE_FUNC(back_from_native)
 GLOBAL_LABEL(back_from_native:)
-        /* FIXME i#1582: NYI on ARM */
+        /* TODO i#1582: NYI on ARM */
         bl       GLOBAL_REF(unexpected_return)
         END_FUNC(back_from_native)
 

@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2022 Google, Inc.    All rights reserved.
+# Copyright (c) 2022-2025 Google, Inc.    All rights reserved.
 # **********************************************************
 
 # Redistribution and use in source and binary forms, with or without
@@ -28,7 +28,7 @@
 # OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
 # DAMAGE.
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 
 include(../../make/policies.cmake NO_POLICY_SCOPE)
 
@@ -48,9 +48,13 @@ set(srcs
 set(srcs_static ${srcs})
 
 add_library(drpttracer SHARED ${srcs})
-configure_extension(drpttracer OFF)
+configure_extension(drpttracer OFF OFF)
 
 add_library(drpttracer_static STATIC ${srcs_static})
-configure_extension(drpttracer_static ON)
+configure_extension(drpttracer_static ON OFF)
+
+add_library(drpttracer_drstatic STATIC ${srcs_static})
+configure_extension(drpttracer_drstatic ON ON)
 
 install_ext_header(drpttracer.h)
+install_ext_header(drpttracer_shared.h)

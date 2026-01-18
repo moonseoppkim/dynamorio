@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2021-2023 Google, LLC  All rights reserved.
+ * Copyright (c) 2021-2025 Google, LLC  All rights reserved.
  * **********************************************************/
 
 /*
@@ -31,7 +31,7 @@
  */
 
 #ifndef _MEMREF_GEN_
-#define _MEMREF_GEN_ 1
+#define _MEMREF_GEN_
 
 #include "memref.h"
 #include "dr_api.h"
@@ -62,23 +62,31 @@ struct memref_with_IR_t {
 };
 
 inline memref_t
-gen_data(memref_tid_t tid, bool load, addr_t addr, size_t size)
+gen_data_type(memref_tid_t tid, trace_type_t type, addr_t addr, size_t size = 1)
 {
     memref_t memref = {};
-    memref.instr.type = load ? TRACE_TYPE_READ : TRACE_TYPE_WRITE;
-    memref.instr.tid = tid;
-    memref.instr.addr = addr;
-    memref.instr.size = size;
+    memref.data.type = type;
+    memref.data.tid = tid;
+    memref.data.addr = addr;
+    memref.data.size = size;
     return memref;
 }
 
 inline memref_t
+gen_data(memref_tid_t tid, bool load, addr_t addr, size_t size)
+{
+    trace_type_t type = load ? TRACE_TYPE_READ : TRACE_TYPE_WRITE;
+    return gen_data_type(tid, type, addr, size);
+}
+
+inline memref_t
 gen_instr_type(trace_type_t type, memref_tid_t tid, addr_t pc = 1, size_t size = 1,
-               addr_t indirect_branch_target = 0)
+               addr_t indirect_branch_target = 0, memref_pid_t pid = 0)
 {
     memref_t memref = {};
     memref.instr.type = type;
     memref.instr.tid = tid;
+    memref.instr.pid = pid;
     memref.instr.addr = pc;
     memref.instr.size = size;
     memref.instr.indirect_branch_target = indirect_branch_target;
@@ -86,9 +94,10 @@ gen_instr_type(trace_type_t type, memref_tid_t tid, addr_t pc = 1, size_t size =
 }
 
 inline memref_t
-gen_instr(memref_tid_t tid, addr_t pc = 1, size_t size = 1)
+gen_instr(memref_tid_t tid, addr_t pc = 1, size_t size = 1, memref_pid_t pid = 0)
 {
-    return gen_instr_type(TRACE_TYPE_INSTR, tid, pc, size);
+    return gen_instr_type(TRACE_TYPE_INSTR, tid, pc, size, /*indirect_branch_target=*/0,
+                          pid);
 }
 
 inline memref_t
@@ -157,8 +166,8 @@ inline memref_t
 gen_exit(memref_tid_t tid)
 {
     memref_t memref = {};
-    memref.instr.type = TRACE_TYPE_THREAD_EXIT;
-    memref.instr.tid = tid;
+    memref.exit.type = TRACE_TYPE_THREAD_EXIT;
+    memref.exit.tid = tid;
     return memref;
 }
 
@@ -171,35 +180,62 @@ gen_exit(memref_tid_t tid)
  * API for creating instructions. Any PC-relative instr in ilist is encoded as
  * though the final instruction list were located at base_addr.
  * Markers with instr fields will have their values replaced with the instr's PC.
+ * TRACE_MARKER_TYPE_BRANCH_TARGET markers specified in the input ilist are not
+ * included in the returned memref_t list, but if an instr_t* is specified with
+ * those markers, its pc is added to the next indirect branch instr's
+ * memref_t.instr.indirect_branch_target field.
  */
 std::vector<memref_t>
 add_encodings_to_memrefs(instrlist_t *ilist,
                          std::vector<memref_with_IR_t> &memref_instr_vec,
-                         addr_t base_addr)
+                         addr_t base_addr, bool skip_encoding = false)
 {
     static const int MAX_DECODE_SIZE = 2048;
     byte decode_buf[MAX_DECODE_SIZE];
+#ifndef NDEBUG
     byte *pc =
+#endif
         instrlist_encode_to_copy(GLOBAL_DCONTEXT, ilist, decode_buf,
                                  reinterpret_cast<app_pc>(base_addr), nullptr, true);
     assert(pc != nullptr);
     assert(pc <= decode_buf + sizeof(decode_buf));
     std::vector<memref_t> memrefs = {};
+    addr_t next_indirect_branch_target = 0;
     for (auto pair : memref_instr_vec) {
+        bool skip = false;
         if (type_is_instr(pair.memref.instr.type)) {
             assert(pair.instr != nullptr);
             const size_t offset = instr_get_offset(pair.instr);
             const int instr_size = instr_length(GLOBAL_DCONTEXT, pair.instr);
             pair.memref.instr.addr = offset + base_addr;
             pair.memref.instr.size = instr_size;
-            memcpy(pair.memref.instr.encoding, &decode_buf[offset], instr_size);
-            pair.memref.instr.encoding_is_new = true;
-        } else if (pair.memref.marker.type == TRACE_TYPE_MARKER &&
-                   pair.instr != nullptr) {
-            pair.memref.marker.marker_value = instr_get_offset(pair.instr) + base_addr;
+            if (type_is_instr_branch(pair.memref.instr.type) &&
+                !type_is_instr_direct_branch(pair.memref.instr.type)) {
+                pair.memref.instr.indirect_branch_target = next_indirect_branch_target;
+                next_indirect_branch_target = 0;
+            }
+            if (!skip_encoding) {
+                memcpy(pair.memref.instr.encoding, &decode_buf[offset], instr_size);
+                pair.memref.instr.encoding_is_new = true;
+            }
+        } else if (pair.memref.marker.type == TRACE_TYPE_MARKER) {
+            if (pair.memref.marker.marker_type == TRACE_MARKER_TYPE_BRANCH_TARGET) {
+                // TRACE_MARKER_TYPE_BRANCH_TARGET markers are not presented in the
+                // memref_t stream.
+                skip = true;
+                if (pair.instr != nullptr) {
+                    next_indirect_branch_target =
+                        instr_get_offset(pair.instr) + base_addr;
+                }
+            } else if (pair.instr != nullptr) {
+                pair.memref.marker.marker_value =
+                    instr_get_offset(pair.instr) + base_addr;
+            }
         } else
             assert(pair.instr == nullptr);
-        memrefs.push_back(pair.memref);
+        if (!skip) {
+            memrefs.push_back(pair.memref);
+        }
     }
     return memrefs;
 }

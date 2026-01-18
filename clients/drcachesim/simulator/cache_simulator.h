@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2015-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2015-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,7 +34,7 @@
  */
 
 #ifndef _CACHE_SIMULATOR_H_
-#define _CACHE_SIMULATOR_H_ 1
+#define _CACHE_SIMULATOR_H_
 
 #include <limits.h>
 #include <stdint.h>
@@ -70,11 +70,13 @@ public:
     // This constructor is used when the cache hierarchy is configured
     // using a set of knobs. It assumes a 2-level cache hierarchy with
     // private L1 data and instruction caches and a shared LLC.
-    cache_simulator_t(const cache_simulator_knobs_t &knobs);
+    cache_simulator_t(const cache_simulator_knobs_t &knobs,
+                      prefetcher_factory_t *custom_prefetcher_factory = nullptr);
 
     // This constructor is used when the arbitrary cache hierarchy is
     // defined in a configuration file.
-    cache_simulator_t(std::istream *config_file);
+    cache_simulator_t(std::istream *config_file,
+                      prefetcher_factory_t *custom_prefetcher_factory = nullptr);
 
     virtual ~cache_simulator_t();
     bool
@@ -86,9 +88,22 @@ public:
     get_cache_metric(metric_name_t metric, unsigned level, unsigned core = 0,
                      cache_split_t split = cache_split_t::DATA) const;
 
+    // Access snoop filter stats for coherent caches.
+    // These are not per-cache metrics so it doesn't make sense to access them
+    // through get_cache_metric().
+    int64_t
+    get_num_snooped_caches(void);
+    int64_t
+    get_num_snoop_writes(void);
+    int64_t
+    get_num_snoop_writebacks(void);
+    int64_t
+    get_num_snoop_invalidates(void);
+
     // Exposed to make it easy to test
     bool
-    check_warmed_up();
+    is_warmed_up();
+
     uint64_t
     remaining_sim_refs() const;
 
@@ -96,9 +111,11 @@ public:
     get_knobs() const;
 
 protected:
-    // Create a cache_t object with a specific replacement policy.
-    virtual cache_t *
-    create_cache(const std::string &name, const std::string &policy);
+    bool
+    check_warmed_up();
+
+    prefetcher_t *
+    get_prefetcher(std::string prefetcher_name);
 
     cache_simulator_knobs_t knobs_;
 
@@ -119,6 +136,9 @@ protected:
 
     // Snoop filter tracks ownership of cache lines across private caches.
     snoop_filter_t *snoop_filter_ = nullptr;
+
+    // Used to get prefetcher instances if the dataprefetcher knob is "custom".
+    prefetcher_factory_t *custom_prefetcher_factory_ = nullptr;
 
 private:
     bool is_warmed_up_;

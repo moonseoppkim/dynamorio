@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2002-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -35,7 +35,7 @@
 /* Copyright (c) 2002-2003 Massachusetts Institute of Technology */
 
 #ifndef _DR_IR_MACROS_H_
-#define _DR_IR_MACROS_H_ 1
+#define _DR_IR_MACROS_H_
 
 /**
  * @file dr_ir_macros.h
@@ -44,23 +44,23 @@
 
 #ifndef DYNAMORIO_INTERNAL
 #    ifdef X86
-#        include "dr_ir_macros_x86.h"
+#        include "dr_ir_macros_x86.h" // IWYU pragma: export
 #    elif defined(AARCH64)
-#        include "dr_ir_macros_aarch64.h"
+#        include "dr_ir_macros_aarch64.h" // IWYU pragma: export
 #    elif defined(ARM)
-#        include "dr_ir_macros_arm.h"
+#        include "dr_ir_macros_arm.h" // IWYU pragma: export
 #    elif defined(RISCV64)
-#        include "dr_ir_macros_riscv64.h"
+#        include "dr_ir_macros_riscv64.h" // IWYU pragma: export
 #    endif
-#    include "dr_ir_opnd.h"
-#    include "dr_ir_instr.h"
-#    include "dr_ir_utils.h"
+#    include "dr_ir_opnd.h"  // IWYU pragma: export
+#    include "dr_ir_instr.h" // IWYU pragma: export
+#    include "dr_ir_utils.h" // IWYU pragma: export
 #endif
 #include <limits.h> /* For SCHAR_MAX, SCHAR_MIN. */
 
 /**
  * Set the translation field for an instruction. For example:
- * instr_t *pushf_instr = INSTR_XL8(INSTR_CREATE_pushf(drcontext), addr);
+ * #instr_t *pushf_instr = INSTR_XL8(INSTR_CREATE_pushf(drcontext), addr);
  */
 #define INSTR_XL8(instr_ptr, app_addr) instr_set_translation((instr_ptr), (app_addr))
 
@@ -154,10 +154,10 @@
                                                          : OPND_CREATE_INT16(val))
 
 /**
- * Creates an instr_t with opcode OP_LABEL.  An OP_LABEL instruction can be used as a
- * jump or call instr_t target, and when emitted it will take no space in the
+ * Creates an #instr_t with opcode OP_LABEL.  An OP_LABEL instruction can be used as a
+ * jump or call #instr_t target, and when emitted it will take no space in the
  * resulting machine code.
- * \param dc The void * dcontext used to allocate memory for the instr_t.
+ * \param dc The void * dcontext used to allocate memory for the #instr_t.
  */
 #define INSTR_CREATE_label(dc) instr_create_0dst_0src((dc), OP_LABEL)
 

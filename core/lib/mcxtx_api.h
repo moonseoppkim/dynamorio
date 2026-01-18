@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -128,6 +128,7 @@
         uint apsr; /**< The application program status registers in AArch32. */
         uint cpsr; /**< The current program status registers in AArch32. */
     }; /**< The anonymous union of alternative names for apsr/cpsr register. */
+    byte padding[4]; /**< The padding to get simd field 8-byte aligned. */
 #    endif /* 64/32-bit */
 
 #    ifdef X64 /* 64-bit */
@@ -140,12 +141,12 @@
      * The Arm AArch64 Scalable Vector Extension (SVE) predicate registers
      * DR_REG_P0 to DR_REG_P15.
      */
-    dr_simd_t svep[MCXT_NUM_SVEP_SLOTS];
+    dr_svep_t svep[MCXT_NUM_SVEP_SLOTS];
     /**
      * The Arm AArch64 Scalable Vector Extension (SVE) first fault register
      * DR_REG_FFR, for vector load instrcutions.
      */
-    dr_simd_t ffr;
+    dr_ffr_t ffr;
 #   else
     /*
      * For the Arm AArch32 SIMD registers, we would probably be ok if we did
@@ -296,11 +297,11 @@
     /** Storage for #MCXT_NUM_OPMASK_SLOTS mask registers as part of AVX-512. */
     dr_opmask_t opmask[MCXT_NUM_OPMASK_SLOTS];
 #elif defined(RISCV64)
-    /* FIXME i#3544: add rest of machine context and register aliases. */
+    /* XXX i#3544: add rest of machine context and register aliases. */
     /* Any changes in order here must be mirrored in arch/riscv64.asm offsets.
      */
     union {
-        /* FIXME i#3544: This is hard-wired to zero so could be removed */
+        /* XXX i#3544: This is hard-wired to zero so could be removed */
         reg_t x0;   /**< The x0 register. */
         reg_t zero; /**< The hard-wired zero register. */
     }; /**< The anonymous union of alternative names for x0/zero register. */
@@ -564,7 +565,11 @@
         reg_t ft11; /**< The 12th temporary floating-point register. */
     };  /**< The anonymous union of alternative names for the f31/ft11 register. */
     reg_t fcsr; /**< Floating-Point Control Register. */
-    /** The SIMD registers. No support for SIMD on RISC-V so far. */
+    reg_t vstart; /**< Vector Start Index CSR. */
+    reg_t vcsr; /**< Vector Control and Status Register. */
+    reg_t vl; /**< Vector Length Register. */
+    reg_t vtype; /**< Vector Type Register. */
+    /** The Vector registers. */
     dr_simd_t simd[MCXT_NUM_SIMD_SLOTS];
 #else /* RISCV64 */
 #error Unsupported architecture

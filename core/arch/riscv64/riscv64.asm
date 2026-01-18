@@ -42,7 +42,7 @@ START_FILE
 
 /* sizeof(priv_mcontext_t) rounded up to a multiple of 16 */
 /* The reserved space for SIMD is also included. */
-#define PRIV_MCONTEXT_SIZE 0x290
+#define PRIV_MCONTEXT_SIZE 0x630
 
 /* offset of priv_mcontext_t in dr_mcontext_t */
 #define PRIV_MCONTEXT_OFFSET 16
@@ -52,9 +52,9 @@ START_FILE
 #endif
 
 /* offsetof(dcontext_t, dstack) */
-#define dstack_OFFSET     0x2d8
+#define dstack_OFFSET 0x678
 /* offsetof(dcontext_t, is_exiting) */
-#define is_exiting_OFFSET (dstack_OFFSET+1*ARG_SZ)
+#define is_exiting_OFFSET (dstack_OFFSET + 1 * ARG_SZ)
 
 #ifndef RISCV64
 # error RISCV64 must be defined
@@ -95,7 +95,9 @@ call_dispatch_alt_stack_no_free:
         jalr     ARG3
         /* Switch stack back. */
         mv       sp, s0
-        beqz     s1, GLOBAL_LABEL(unexpected_return)
+        bnez     s1, call_dispatch_alt_stack_ok_return
+        jal      GLOBAL_LABEL(unexpected_return)
+call_dispatch_alt_stack_ok_return:
         /* Restore the stack. */
         ld       s1, 0 (sp)
         ld       s0, 8 (sp)
@@ -221,7 +223,8 @@ save_priv_mcontext_helper:
         fsd      f31, 64*ARG_SZ(ARG1)
         frcsr    x3
         sd       x3,  65*ARG_SZ(ARG1)
-        /* No need to save simd registers, at least for now. */
+        /* TODO i#3544: Save vector registers too? That would require runtime detection
+         * for vector support and vlenb. */
         ret
 
         DECLARE_EXPORTED_FUNC(dr_app_start)
@@ -505,43 +508,24 @@ GLOBAL_LABEL(atomic_swap:)
 #ifdef UNIX
         DECLARE_FUNC(client_int_syscall)
 GLOBAL_LABEL(client_int_syscall:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(client_int_syscall)
 
         DECLARE_FUNC(native_plt_call)
 GLOBAL_LABEL(native_plt_call:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(native_plt_call)
 
         DECLARE_FUNC(_dynamorio_runtime_resolve)
 GLOBAL_LABEL(_dynamorio_runtime_resolve:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(_dynamorio_runtime_resolve)
 #endif /* UNIX */
 
 #ifdef LINUX
-/*
- * thread_id_t dynamorio_clone(uint flags, byte *newsp, void *ptid, void *tls,
- *                             void *ctid, void (*func)(void))
- */
-        DECLARE_FUNC(dynamorio_clone)
-GLOBAL_LABEL(dynamorio_clone:)
-        addi     ARG2, ARG2, -16 /* Description: newsp = newsp - 16. */
-        sd       ARG6, 0 (ARG2) /* The func is now on TOS of newsp. */
-        li       SYSNUM_REG, SYS_clone /* All args are already in syscall registers.*/
-        ecall
-        bnez     ARG1, dynamorio_clone_parent
-        ld       ARG1, 0 (sp)
-        addi     sp, sp, 16
-        jalr     ARG1
-        jal      GLOBAL_REF(unexpected_return)
-dynamorio_clone_parent:
-        ret
-        END_FUNC(dynamorio_clone)
-
         DECLARE_FUNC(dynamorio_sigreturn)
 GLOBAL_LABEL(dynamorio_sigreturn:)
         li       SYSNUM_REG, SYS_rt_sigreturn
@@ -574,7 +558,7 @@ GLOBAL_LABEL(main_signal_handler:)
 
         DECLARE_FUNC(hashlookup_null_handler)
 GLOBAL_LABEL(hashlookup_null_handler:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(hashlookup_null_handler)
 
@@ -582,13 +566,13 @@ GLOBAL_LABEL(hashlookup_null_handler:)
 GLOBAL_LABEL(back_from_native_retstubs:)
 DECLARE_GLOBAL(back_from_native_retstubs_end)
 ADDRTAKEN_LABEL(back_from_native_retstubs_end:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(back_from_native_retstubs)
 
         DECLARE_FUNC(back_from_native)
 GLOBAL_LABEL(back_from_native:)
-/* FIXME i#3544: Not implemented */
+/* XXX i#3544: Not implemented */
         jal       GLOBAL_REF(unexpected_return)
         END_FUNC(back_from_native)
 

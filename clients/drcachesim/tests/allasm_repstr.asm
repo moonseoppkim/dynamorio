@@ -1,5 +1,5 @@
  /* **********************************************************
- * Copyright (c) 2021-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2021-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -53,6 +53,17 @@ _start:
         cld
         rep      movsb
 
+        // Make a getpid syscall, which is a non-blocking one.
+        mov      eax, 39          // SYS_getpid
+        syscall
+
+        // Make a membarrier syscall, which is a blocking one.
+        mov      rdi, 0           // MEMBARRIER_CMD_QUERY
+        mov      rsi, 0           // flags
+        mov      rdx, 0           // cpuid
+        mov      eax, 324         // SYS_membarrier
+        syscall
+
         // Test page-spanning accesses.
         lea      rcx, page_str
         // Somehow the GNU assembler 2.38 is adding the load size (4 here) to
@@ -71,6 +82,13 @@ repeat:
         dec      ebx
         cmp      ebx, 0
         jnz      repeat
+
+        // Test a syscall failure.
+        mov      rdi, 42          // Invalid file descriptor.
+        lea      rsi, hello_str
+        mov      rdx, 13          // sizeof(hello_str)
+        mov      eax, 1           // SYS_write
+        syscall
 
         // Exit.
         mov      rdi, 0           // exit code

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2014 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -135,7 +135,7 @@ OPCODE(vpmovsxwqm, vpmovsxwq, vpmovsxwq, 0, REGARG(XMM0), MEMARG(OPSZ_4))
 OPCODE(vpmovsxwqr, vpmovsxwq, vpmovsxwq, 0, REGARG(XMM0), REGARG_PARTIAL(XMM1, OPSZ_4))
 OPCODE(vpmovsxdqm, vpmovsxdq, vpmovsxdq, 0, REGARG(XMM0), MEMARG(OPSZ_8))
 OPCODE(vpmovsxdqr, vpmovsxdq, vpmovsxdq, 0, REGARG(XMM0), REGARG_PARTIAL(XMM1, OPSZ_8))
-OPCODE(vmovntdqa, vmovntdqa, vmovntdqa, 0, MEMARG(OPSZ_16), REGARG(XMM0))
+OPCODE(vmovntdqa, vmovntdqa, vmovntdqa, 0, REGARG(XMM0), MEMARG(OPSZ_16))
 OPCODE(vpmovzxbwm, vpmovzxbw, vpmovzxbw, 0, REGARG(XMM0), MEMARG(OPSZ_8))
 OPCODE(vpmovzxbwr, vpmovzxbw, vpmovzxbw, 0, REGARG(XMM0), REGARG_PARTIAL(XMM1, OPSZ_8))
 OPCODE(vpmovzxbdm, vpmovzxbd, vpmovzxbd, 0, REGARG(XMM0), MEMARG(OPSZ_4))
@@ -218,7 +218,7 @@ OPCODE(vpmovsxwq_256r, vpmovsxwq, vpmovsxwq, 0, REGARG(YMM0),
 OPCODE(vpmovsxdq_256m, vpmovsxdq, vpmovsxdq, 0, REGARG(YMM0), MEMARG(OPSZ_16))
 OPCODE(vpmovsxdq_256r, vpmovsxdq, vpmovsxdq, 0, REGARG(YMM0),
        REGARG_PARTIAL(YMM1, OPSZ_16))
-OPCODE(vmovntdqa_256, vmovntdqa, vmovntdqa, 0, MEMARG(OPSZ_32), REGARG(YMM0))
+OPCODE(vmovntdqa_256, vmovntdqa, vmovntdqa, 0, REGARG(YMM0), MEMARG(OPSZ_32))
 OPCODE(vpmovzxbw_256m, vpmovzxbw, vpmovzxbw, 0, REGARG(YMM0), MEMARG(OPSZ_16))
 OPCODE(vpmovzxbw_256r, vpmovzxbw, vpmovzxbw, 0, REGARG(YMM0),
        REGARG_PARTIAL(YMM1, OPSZ_16))
@@ -325,3 +325,77 @@ OPCODE(bndldx_b0ld, bndldx, bndldx, 0, REGARG(BND0), MEMARG(OPSZ_bnd))
 OPCODE(bndldx_b3ld, bndldx, bndldx, 0, REGARG(BND3), MEMARG(OPSZ_bnd))
 OPCODE(bndstx_b0st, bndstx, bndstx, 0, MEMARG(OPSZ_bnd), REGARG(BND0))
 OPCODE(bndstx_b3st, bndstx, bndstx, 0, MEMARG(OPSZ_bnd), REGARG(BND3))
+
+/* MOVDIRI */
+OPCODE(movdiri32, movdiri, movdiri, 0, MEMARG(OPSZ_4), REGARG(EAX))
+OPCODE(movdiri64, movdiri, movdiri, X64_ONLY, MEMARG(OPSZ_8), REGARG(RAX))
+
+/* MOVDIR64B */
+/* NB: We can never use MEMARG for the dst because we need the segment selector. */
+/* NB: Can't use MEMARG for the src because it doesn't work with addr16 prefix. */
+OPCODE(movdir64b16, movdir64b, movdir64b, X86_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_AX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_SI, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+/* NB: Can't use MEMARG for the src because the base register needs to be the size of EAX.
+ */
+OPCODE(movdir64b32, movdir64b, movdir64b, 0,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(movdir64b32lohi, movdir64b, movdir64b, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R8D, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(movdir64b32hilo, movdir64b, movdir64b, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_R9D, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(movdir64b64, movdir64b, movdir64b, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_RAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))
+OPCODE(movdir64b64lohi, movdir64b, movdir64b, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R9, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))
+
+/* ENQCMD */
+/* NB: We can never use MEMARG for the dst because we need the segment selector. */
+/* NB: Can't use MEMARG for the src because it doesn't work with addr16 prefix. */
+OPCODE(enqcmd16, enqcmd, enqcmd, X86_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_AX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_SI, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+/* NB: Can't use MEMARG for the src because the base register needs to be the size of EAX.
+ */
+OPCODE(enqcmd32, enqcmd, enqcmd, 0,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmd32lohi, enqcmd, enqcmd, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R8D, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmd32hilo, enqcmd, enqcmd, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_R9D, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmd64, enqcmd, enqcmd, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_RAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))
+OPCODE(enqcmd64lohi, enqcmd, enqcmd, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R9, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))
+
+/* NB: Can't use MEMARG for the src because it doesn't work with addr16 prefix. */
+OPCODE(enqcmds16, enqcmds, enqcmds, X86_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_AX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_SI, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+/* NB: Can't use MEMARG for the src because the base register needs to be the size of EAX.
+ */
+OPCODE(enqcmds32, enqcmds, enqcmds, 0,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmds32lohi, enqcmds, enqcmds, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R8D, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_ECX, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmds32hilo, enqcmds, enqcmds, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_EAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       opnd_create_base_disp(DR_REG_R9D, DR_REG_NULL, 0, memarg_disp, OPSZ_64))
+OPCODE(enqcmds64, enqcmds, enqcmds, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_RAX, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))
+OPCODE(enqcmds64lohi, enqcmds, enqcmds, X64_ONLY,
+       opnd_create_far_base_disp(DR_SEG_ES, DR_REG_R9, DR_REG_NULL, 0, 0, OPSZ_64),
+       MEMARG(OPSZ_64))

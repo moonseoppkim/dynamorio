@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2016-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2016-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -34,7 +34,7 @@
  */
 
 #ifndef _INSTRU_H_
-#define _INSTRU_H_ 1
+#define _INSTRU_H_
 
 #include <stdint.h>
 #include <string.h>
@@ -47,15 +47,13 @@
 #include "dr_allocator.h"
 #include "dr_api.h"
 #include "drvector.h"
+#include "raw2trace_shared.h"
 #include "trace_entry.h"
 
 namespace dynamorio {
 namespace drmemtrace {
 
 #define MINSERT instrlist_meta_preinsert
-
-// Versioning for our drmodtrack custom module fields.
-#define CUSTOM_MODULE_VERSION 1
 
 // A std::unordered_set, even using dr_allocator_t, raises transparency risks when
 // statically linked on Windows (from lock functions and other non-allocator
@@ -75,9 +73,13 @@ public:
         memset(present_, 0, sizeof(present_));
     }
 
-    class reg_id_set_iterator_t
-        : public std::iterator<std::input_iterator_tag, reg_id_t> {
+    class reg_id_set_iterator_t {
     public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type = reg_id_t;
+        using difference_type = std::ptrdiff_t;
+        using pointer = value_type *;
+        using reference = value_type &;
         reg_id_set_iterator_t(reg_id_set_t *set)
             : set_(set)
             , index_(-1)
@@ -229,11 +231,13 @@ public:
     // This is a per-buffer-writeout header.
     virtual int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) = 0;
+    virtual int
+    append_timestamp(byte *buf_ptr) = 0;
     // The entry at buf_ptr must be a timestamp.
     // If the timestamp value is < min_timestamp, replaces it with min_timestamp
     // and returns true; else returns false.
     virtual bool
-    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) = 0;
+    clamp_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) = 0;
     virtual void
     set_frozen_timestamp(uint64 timestamp)
     {
@@ -302,7 +306,7 @@ public:
     virtual void
     insert_obtain_addr(void *drcontext, instrlist_t *ilist, instr_t *where,
                        reg_id_t reg_addr, reg_id_t reg_scratch, opnd_t ref,
-                       OUT bool *scratch_used = NULL);
+                       DR_PARAM_OUT bool *scratch_used = NULL);
 
 protected:
     void (*insert_load_buf_ptr_)(void *, instrlist_t *, instr_t *, reg_id_t);
@@ -359,8 +363,10 @@ public:
     append_thread_header(byte *buf_ptr, thread_id_t tid, offline_file_type_t file_type);
     int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) override;
+    int
+    append_timestamp(byte *buf_ptr) override;
     bool
-    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
+    clamp_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
 
     int
     instrument_memref(void *drcontext, void *bb_field, instrlist_t *ilist, instr_t *where,
@@ -413,7 +419,7 @@ public:
                      drvector_t *reg_vector,
                      ssize_t (*write_file)(file_t file, const void *data, size_t count),
                      file_t module_file, file_t encoding_file,
-                     bool disable_optimizations = false,
+                     bool disable_optimizations = false, bool instrs_are_separate = false,
                      void (*log)(uint level, const char *fmt, ...) = nullptr);
     virtual ~offline_instru_t();
 
@@ -427,9 +433,6 @@ public:
     get_entry_addr(void *drcontext, byte *buf_ptr) const override;
     void
     set_entry_addr(byte *buf_ptr, addr_t addr) override;
-
-    uint64_t
-    get_modoffs(void *drcontext, app_pc pc, OUT uint *modidx);
 
     int
     append_pid(byte *buf_ptr, process_id_t pid) override;
@@ -447,8 +450,10 @@ public:
     append_thread_header(byte *buf_ptr, thread_id_t tid, offline_file_type_t file_type);
     int
     append_unit_header(byte *buf_ptr, thread_id_t tid, ptr_int_t window) override;
+    int
+    append_timestamp(byte *buf_ptr) override;
     bool
-    refresh_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
+    clamp_unit_header_timestamp(byte *buf_ptr, uint64 min_timestamp) override;
 
     int
     instrument_memref(void *drcontext, void *bb_field, instrlist_t *ilist, instr_t *where,
@@ -486,20 +491,16 @@ public:
     opnd_disp_is_elidable(opnd_t memop);
     // "version" is an OFFLINE_FILE_VERSION* constant.
     bool
-    opnd_is_elidable(opnd_t memop, OUT reg_id_t &base, int version);
+    opnd_is_elidable(opnd_t memop, DR_PARAM_OUT reg_id_t &base, int version);
     // Inserts labels marking elidable addresses. label_marks_elidable() identifies them.
     // "version" is an OFFLINE_FILE_VERSION* constant.
     void
     identify_elidable_addresses(void *drcontext, instrlist_t *ilist, int version,
                                 bool memref_needs_full_info);
     bool
-    label_marks_elidable(instr_t *instr, OUT int *opnd_index, OUT int *memopnd_index,
-                         OUT bool *is_write, OUT bool *needs_base);
-    static int
-    print_module_data_fields(char *dst, size_t max_len, const void *custom_data,
-                             size_t custom_size,
-                             int (*user_print_cb)(void *data, char *dst, size_t max_len),
-                             void *user_cb_data);
+    label_marks_elidable(instr_t *instr, DR_PARAM_OUT int *opnd_index,
+                         DR_PARAM_OUT int *memopnd_index, DR_PARAM_OUT bool *is_write,
+                         DR_PARAM_OUT bool *needs_base);
 
 private:
     struct custom_module_data_t {
@@ -517,6 +518,8 @@ private:
     struct per_block_t {
         uint64_t id = 0;
         uint instr_count = 0;
+        app_pc start_pc = 0;
+        uint64_t encoding_length_start = 0;
     };
 
     bool
@@ -548,6 +551,10 @@ private:
     void
     flush_instr_encodings();
 
+    bool
+    does_pc_require_encoding(void *drcontext, app_pc pc, uint *modidx_out,
+                             app_pc *modbase_out);
+
     // Custom module fields are global (since drmodtrack's support is global, we don't
     // try to pass void* user data params through).
     static void *(*user_load_)(module_data_t *module, int seg_idx);
@@ -559,6 +566,8 @@ private:
     print_custom_module_data(void *data, char *dst, size_t max_len);
     static void
     free_custom_module_data(void *data);
+    // Unfortunately this cached vdso base must be global as well.
+    static std::atomic<uintptr_t> vdso_modbase_;
 
     // These identify the 4 fields we store in the label data area array.
     static constexpr int LABEL_DATA_ELIDED_INDEX = 0;       // Index among all operands.
@@ -577,7 +586,9 @@ private:
     size_t encoding_buf_sz_ = 0;
     byte *encoding_buf_ptr_ = nullptr;
     uint64_t encoding_id_ = 0;
+    uint64_t encoding_length_ = 0;
     uint64_t encoding_bytes_written_ = 0;
+    bool instrs_are_separate_ = false;
 };
 
 } // namespace drmemtrace

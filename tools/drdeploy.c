@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -52,6 +52,10 @@
 #    include <sys/wait.h>
 #endif
 
+#ifdef LINUX
+#    include <sys/syscall.h>
+#endif
+
 #include <string.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -63,6 +67,15 @@
 #include "dr_config.h" /* MUST be before share.h (it sets HOT_PATCHING_INTERFACE) */
 #include "dr_inject.h"
 #include "dr_frontend.h"
+
+#ifdef LINUX
+/* XXX: It would be cleaner to have a header for this and have nudgesig.c be in its
+ * own static library instead of compiled separately for the core and drdeploy.
+ */
+extern bool
+create_nudge_signal_payload(siginfo_t *info DR_PARAM_OUT, uint action_mask,
+                            client_id_t client_id, uint flags, uint64 client_arg);
+#endif
 
 typedef enum _action_t {
     action_none,
@@ -165,7 +178,7 @@ const char *options_list_str =
 #    endif
 #endif
 #ifdef DRCONFIG
-/* FIXME i#840: Syswide NYI on Linux. */
+/* TODO i#840: Syswide NYI on Linux. */
 #    ifdef WINDOWS
     "       -syswide_on        Set up systemwide injection so that registered\n"
     "                          applications will run under DR however they are\n"
@@ -267,7 +280,7 @@ const char *options_list_str =
     "                          wait.  A value of 0 means don't wait for nudges to\n"
     "                          complete."
 #    else  /* WINDOWS */
-    /* FIXME i#840: integrate drnudgeunix into drconfig on Unix */
+    /* XXX i#840: integrate drnudgeunix into drconfig on Unix */
     "Note: please use the drnudgeunix tool to nudge processes on Unix.\n";
 #    endif /* !WINDOWS */
 #else      /* DRCONFIG */
@@ -294,7 +307,7 @@ const char *options_list_str =
 #    ifndef MACOS /* XXX i#1285: private loader NYI on MacOS */
     "       -late              Requests late injection.\n"
 #    endif
-#    ifdef UNIX       /* FIXME i#725: Windows attach NYI */
+#    ifdef UNIX       /* TODO i#725: Windows attach NYI */
 #        ifndef MACOS /* XXX i#1285: private loader NYI on MacOS */
     "       -early             Requests early injection (the default).\n"
 #        endif
@@ -478,13 +491,13 @@ unregister_proc(const char *process, process_id_t pid, bool global,
  */
 static bool
 expand_dr_root(const char *dr_root, bool debug, dr_platform_t dr_platform, bool preinject,
-               bool report, OUT char *dr_lib_path, size_t dr_lib_path_sz,
-               OUT char *dr_alt_lib_path, size_t dr_alt_lib_path_sz)
+               bool report, DR_PARAM_OUT char *dr_lib_path, size_t dr_lib_path_sz,
+               DR_PARAM_OUT char *dr_alt_lib_path, size_t dr_alt_lib_path_sz)
 {
     int i;
     char buf[MAXIMUM_PATH];
     bool ok = true;
-    /* FIXME i#1569: port DynamoRIO to AArch64 so we can enable the check warning */
+    /* XXX i#1569: port DynamoRIO to AArch64 so we can enable the check warning */
     bool nowarn = IF_X86_ELSE(false, true);
 
     typedef struct _file_entry_t {
@@ -507,7 +520,7 @@ expand_dr_root(const char *dr_root, bool debug, dr_platform_t dr_platform, bool 
         { "lib32/debug/libdynamorio.dylib", true, true, false, DR_PLATFORM_32BIT },
         { "lib32/release/libdrpreload.dylib", false, false, true, DR_PLATFORM_32BIT },
         { "lib32/release/libdynamorio.dylib", true, false, false, DR_PLATFORM_32BIT },
-        { "lib64/debug/libdrpreload.dylib", true, false, true, DR_PLATFORM_64BIT },
+        { "lib64/debug/libdrpreload.dylib", true, true, true, DR_PLATFORM_64BIT },
         { "lib64/debug/libdynamorio.dylib", true, true, false, DR_PLATFORM_64BIT },
         { "lib64/release/libdrpreload.dylib", false, false, true, DR_PLATFORM_64BIT },
         { "lib64/release/libdynamorio.dylib", true, false, false, DR_PLATFORM_64BIT },
@@ -754,7 +767,7 @@ platform_name(dr_platform_t platform)
 }
 #endif
 
-/* FIXME i#840: Port registered process iterator. */
+/* XXX i#840: Port registered process iterator. */
 #ifdef WINDOWS
 static void
 list_process(char *name, bool global, dr_platform_t platform,
@@ -924,7 +937,8 @@ read_tool_file(const char *toolname, const char *dr_root, const char *dr_toolcon
                dr_platform_t dr_platform, char *client, size_t client_size,
                char *alt_client, size_t alt_size, char *ops, size_t ops_size,
                size_t *ops_sofar, char *tool_ops, size_t tool_ops_size,
-               size_t *tool_ops_sofar, char *native_path OUT, size_t native_path_size)
+               size_t *tool_ops_sofar, char *native_path DR_PARAM_OUT,
+               size_t native_path_size)
 {
     FILE *f;
     char config_file[MAXIMUM_PATH];
@@ -985,6 +999,7 @@ read_tool_file(const char *toolname, const char *dr_root, const char *dr_toolcon
             }
         } else if (strstr(line, "CLIENT_ABS=") == line) {
             strncpy(client, line + strlen("CLIENT_ABS="), client_size);
+            client[client_size - 1] = '\0';
             found_client = true;
             if (native_path[0] != '\0') {
                 add_extra_option(tool_ops, tool_ops_size, tool_ops_sofar, "\"%s\"",
@@ -993,6 +1008,7 @@ read_tool_file(const char *toolname, const char *dr_root, const char *dr_toolcon
         } else if (strstr(line, IF_X64_ELSE("CLIENT64_ABS=", "CLIENT32_ABS=")) == line) {
             strncpy(client, line + strlen(IF_X64_ELSE("CLIENT64_ABS=", "CLIENT32_ABS=")),
                     client_size);
+            client[client_size - 1] = '\0';
             found_client = true;
             if (native_path[0] != '\0') {
                 add_extra_option(tool_ops, tool_ops_size, tool_ops_sofar, "\"%s\"",
@@ -1002,6 +1018,7 @@ read_tool_file(const char *toolname, const char *dr_root, const char *dr_toolcon
             strncpy(alt_client,
                     line + strlen(IF_X64_ELSE("CLIENT32_ABS=", "CLIENT64_ABS=")),
                     alt_size);
+            alt_client[alt_size - 1] = '\0';
             if (!does_file_exist(alt_client)) {
                 alt_client[0] = '\0';
             }
@@ -1062,7 +1079,7 @@ read_tool_file(const char *toolname, const char *dr_root, const char *dr_toolcon
  * Caller should continue iterating until *token == NULL.
  */
 static char *
-split_option_token(char *s, char **token OUT, bool split)
+split_option_token(char *s, char **token DR_PARAM_OUT, bool split)
 {
     bool quoted = false;
     char endquote = '\0';
@@ -1173,7 +1190,7 @@ _tmain(int argc, TCHAR *targv[])
     bool use_debug = false;
     dr_platform_t dr_platform = DR_PLATFORM_DEFAULT;
 #ifdef WINDOWS
-    /* FIXME i#840: Implement nudges on Linux. */
+    /* XXX i#840: Implement nudges on Linux. */
     bool nudge_all = false;
     bool use_late_injection = false;
     process_id_t nudge_pid = 0;
@@ -1210,7 +1227,7 @@ _tmain(int argc, TCHAR *targv[])
     bool exit0 = false;
 #endif
 #if defined(DRCONFIG)
-#    ifdef WINDOWS
+#    if defined(WINDOWS) || defined(LINUX)
     process_id_t detach_pid = 0;
 #    endif
 #endif
@@ -1319,7 +1336,7 @@ _tmain(int argc, TCHAR *targv[])
         }
 #ifdef DRCONFIG
 #    ifdef WINDOWS
-        /* FIXME i#840: These are NYI for Linux. */
+        /* TODO i#840: These are NYI for Linux. */
         else if (!strcmp(argv[i], "-list_registered")) {
             action = action_list;
             list_registered = true;
@@ -1487,7 +1504,7 @@ _tmain(int argc, TCHAR *targv[])
             process = argv[++i];
         }
 #    ifdef WINDOWS
-        /* FIXME i#840: Nudge is NYI for Linux. */
+        /* TODO i#840: Nudge is NYI for Linux. */
         else if (strcmp(argv[i], "-nudge_timeout") == 0) {
             nudge_timeout = strtoul(argv[++i], NULL, 10);
         } else if (strcmp(argv[i], "-nudge") == 0 || strcmp(argv[i], "-nudge_pid") == 0 ||
@@ -1507,7 +1524,10 @@ _tmain(int argc, TCHAR *targv[])
                 nudge_all = true;
             nudge_id = strtoul(argv[++i], NULL, 16);
             nudge_arg = _strtoui64(argv[++i], NULL, 16);
-        } else if (strcmp(argv[i], "-detach") == 0) {
+        }
+#    endif
+#    if defined(WINDOWS) || defined(LINUX)
+        else if (strcmp(argv[i], "-detach") == 0) {
             if (i + 1 >= argc)
                 usage(false, "detach requires a process id");
             const char *pid_str = argv[++i];
@@ -1749,7 +1769,7 @@ done_with_options:
         search_env(app_name, "PATH", full_app_name, BUFFER_SIZE_ELEMENTS(full_app_name));
         NULL_TERMINATE_BUFFER(full_app_name);
         if (full_app_name[0] == '\0') {
-            /* may need to append .exe, FIXME : other executable types */
+            /* may need to append .exe, XXX : other executable types */
             char tmp_buf[MAXIMUM_PATH];
             _snprintf(tmp_buf, BUFFER_SIZE_ELEMENTS(tmp_buf), "%s%s", app_name, ".exe");
             NULL_TERMINATE_BUFFER(tmp_buf);
@@ -1802,7 +1822,7 @@ done_with_options:
 #endif
 
 #ifdef WINDOWS
-    /* FIXME i#900: This doesn't work on Linux, and doesn't do the right thing
+    /* XXX i#900: This doesn't work on Linux, and doesn't do the right thing
      * on Windows.
      */
     /* PR 244206: set the registry view before any registry access */
@@ -1835,12 +1855,32 @@ done_with_options:
         if (!unregister_proc(process, 0, global, dr_platform))
             die();
     }
+#    if defined(WINDOWS) || defined(LINUX)
+    else if (detach_pid != 0) {
+#        ifdef WINDOWS
+        dr_config_status_t res = detach(detach_pid, TRUE, detach_timeout);
+        if (res != DR_SUCCESS)
+            error("unable to detach: check pid and system ptrace permissions");
+#        else
+        siginfo_t info;
+        uint action_mask = NUDGE_FREE_ARG;
+        client_id_t client_id = 0;
+        uint64 client_arg = 0;
+        bool success =
+            create_nudge_signal_payload(&info, action_mask, 0, client_id, client_arg);
+        assert(success); /* failure means kernel's sigqueueinfo has changed */
+        /* send the nudge */
+        i = syscall(SYS_rt_sigqueueinfo, detach_pid, NUDGESIG_SIGNUM, &info);
+        if (i < 0)
+            fprintf(stderr, "nudge FAILED with error %d\n", i);
+#        endif
+    }
+#    endif
 #    ifndef WINDOWS
     else {
         usage(false, "no action specified");
     }
 #    else /* WINDOWS */
-    /* FIXME i#840: Nudge NYI on Linux. */
     else if (action == action_nudge) {
         int count = 1;
         dr_config_status_t res = DR_SUCCESS;
@@ -1863,7 +1903,7 @@ done_with_options:
             printf("nudge operation failed, verify permissions and parameters.\n");
     }
 #        ifdef WINDOWS
-    /* FIXME i#840: Process iterator NYI for Linux. */
+    /* TODO i#840: Process iterator NYI for Linux. */
     else if (action == action_list) {
         if (!list_registered)
             list_process(process, global, dr_platform, NULL);
@@ -1877,12 +1917,6 @@ done_with_options:
             dr_registered_process_iterator_stop(iter);
         }
     }
-    /* FIXME i#95: Process detach NYI for UNIX. */
-    else if (detach_pid != 0) {
-        dr_config_status_t res = detach(detach_pid, TRUE, detach_timeout);
-        if (res != DR_SUCCESS)
-            error("unable to detach: check pid and system ptrace permissions");
-    }
 #        endif
     else if (!syswide_on && !syswide_off) {
         usage(false, "no action specified");
@@ -1895,7 +1929,7 @@ done_with_options:
             IF_X64_ELSE(
                 dr_platform != DR_PLATFORM_32BIT,
                 (dr_platform == DR_PLATFORM_64BIT || !is_wow64(GetCurrentProcess())))) {
-            /* FIXME i#1522: enable AppInit for non-WOW64 on win8+ */
+            /* XXX i#1522: enable AppInit for non-WOW64 on win8+ */
             error("syswide_on is not yet supported on Windows 8+ non-WOW64");
             die();
         }
@@ -2131,7 +2165,7 @@ cleanup:
     sc = drfront_cleanup_args(argv, argc);
     if (sc != DRFRONT_SUCCESS)
         fatal("failed to free memory for args: %d", sc);
-    /* FIXME i#840: We can't actually match exit status on Linux perfectly
+    /* XXX i#840: We can't actually match exit status on Linux perfectly
      * since the kernel reserves most of the bits for signal codes.  At the
      * very least, we should ensure if the app exits with a signal we exit
      * non-zero.

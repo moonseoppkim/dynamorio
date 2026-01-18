@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2005-2008 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -56,7 +56,7 @@ extern "C" {
 
 #define DR_MARKER_HOOKED_FUNCTION KiUserCallbackDispatcher
 #define DR_MARKER_HOOKED_FUNCTION_ARGS \
-    (IN PVOID Unknown1, IN PVOID Unknown2, IN PVOID Unknown3)
+    (DR_PARAM_IN PVOID Unknown1, DR_PARAM_IN PVOID Unknown2, DR_PARAM_IN PVOID Unknown3)
 #define DR_MARKER_HOOKED_FUNCTION_STRING STRINGIFY(DR_MARKER_HOOKED_FUNCTION)
 
 enum {
@@ -79,7 +79,7 @@ enum {
  *          should only be field addtions.  NO DELETIONS ALLOWED; to obsolete
  *          fields fill it with an invalid value.  Also, each change should
  *          result in the DR_MARKER_VERSION_CURRENT being increased.
- * FIXME: use size to denote a newer structures in future; same issue needs to
+ * XXX: use size to denote a newer structures in future; same issue needs to
  *        be handled for hotp_policy_status_table.
  */
 struct _dr_statistics_t;

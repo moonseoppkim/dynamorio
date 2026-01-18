@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -52,7 +52,14 @@ namespace drmemtrace {
 bool
 open_single_file_common(const std::string &path, gzFile &out)
 {
-    out = gzopen(path.c_str(), "rb");
+    if (path == "-") {
+        // We assume stdin is 0.
+        // We do not use the glibc-specific "stdin->_fileno" method of finding the
+        // stdin descriptor number as that is not portable to musl or other libc.
+        constexpr int STDIN_FD = 0;
+        out = gzdopen(STDIN_FD, "rb");
+    } else
+        out = gzopen(path.c_str(), "rb");
     return out != nullptr;
 }
 
@@ -91,7 +98,7 @@ file_reader_t<gzip_reader_t>::file_reader_t()
 /* clang-format off */ /* (make vera++ newline-after-type check happy) */
 template <>
 /* clang-format on */
-file_reader_t<gzip_reader_t>::~file_reader_t<gzip_reader_t>()
+file_reader_t<gzip_reader_t>::~file_reader_t()
 {
     if (input_file_.file != nullptr) {
         gzclose(input_file_.file);
@@ -115,10 +122,7 @@ template <>
 trace_entry_t *
 file_reader_t<gzip_reader_t>::read_next_entry()
 {
-    trace_entry_t *entry = read_queued_entry();
-    if (entry != nullptr)
-        return entry;
-    entry = read_next_entry_common(&input_file_, &at_eof_);
+    trace_entry_t *entry = read_next_entry_common(&input_file_, &at_eof_);
     if (entry == nullptr)
         return entry;
     VPRINT(this, 4, "Read from file: type=%s (%d), size=%d, addr=%zu\n",
@@ -134,7 +138,7 @@ file_reader_t<gzip_reader_t>::read_next_entry()
 /* clang-format off */ /* (make vera++ newline-after-type check happy) */
 template <>
 /* clang-format on */
-record_file_reader_t<gzip_reader_t>::~record_file_reader_t<gzip_reader_t>()
+record_file_reader_t<gzip_reader_t>::~record_file_reader_t()
 {
     if (input_file_ != nullptr) {
         gzclose(input_file_->file);
@@ -154,17 +158,17 @@ record_file_reader_t<gzip_reader_t>::open_single_file(const std::string &path)
 }
 
 template <>
-bool
+trace_entry_t *
 record_file_reader_t<gzip_reader_t>::read_next_entry()
 {
-    trace_entry_t *entry = read_next_entry_common(input_file_.get(), &eof_);
+    trace_entry_t *entry = read_next_entry_common(input_file_.get(), &at_eof_);
     if (entry == nullptr)
-        return false;
-    cur_entry_ = *entry;
+        return nullptr;
+    entry_copy_ = *entry;
     VPRINT(this, 4, "Read from file: type=%s (%d), size=%d, addr=%zu\n",
-           trace_type_names[cur_entry_.type], cur_entry_.type, cur_entry_.size,
-           cur_entry_.addr);
-    return true;
+           trace_type_names[entry_copy_.type], entry_copy_.type, entry_copy_.size,
+           entry_copy_.addr);
+    return &entry_copy_;
 }
 
 } // namespace drmemtrace

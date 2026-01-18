@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2014-2015 Google, Inc.  All rights reserved.
+ * Copyright (c) 2014-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2016 ARM Limited. All rights reserved.
  * **********************************************************/
 
@@ -40,7 +40,7 @@ reg_id_t dr_reg_stolen = DR_REG_NULL;
 uint
 opnd_immed_float_arch(uint opcode)
 {
-    ASSERT_NOT_IMPLEMENTED(false); /* FIXME i#1551, i#1569 */
+    ASSERT_NOT_IMPLEMENTED(false); /* TODO i#1551, i#1569 */
     return 0;
 }
 
@@ -63,6 +63,8 @@ opnd_get_reg_dcontext_offs(reg_id_t reg)
         return R0_OFFSET + (R1_OFFSET - R0_OFFSET) * (reg - DR_REG_W0);
     if (reg == DR_REG_XSP || reg == DR_REG_WSP)
         return XSP_OFFSET;
+    if (DR_REG_Z0 <= reg && reg <= DR_REG_Z31)
+        return Z_REG_OFFSET(reg);
     CLIENT_ASSERT(false, "opnd_get_reg_dcontext_offs: invalid reg");
     return -1;
 #else

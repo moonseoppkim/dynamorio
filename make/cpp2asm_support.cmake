@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2010-2022 Google, Inc.    All rights reserved.
+# Copyright (c) 2010-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -102,16 +102,16 @@ endif ()
 
 if (${vsgen_ver} VERSION_GREATER 9)
   # For i#801 workaround
-  cmake_minimum_required(VERSION 3.7)
+  cmake_minimum_required(VERSION 3.14)
 else ()
   if (APPLE)
     # We want ASM NASM support
-    cmake_minimum_required(VERSION 3.7)
+    cmake_minimum_required(VERSION 3.14)
   else (APPLE)
     # Require 2.6.4 to avoid cmake bug #8639, unless this var is
     # properly set (which it is for DR b/c it has a workaround):
     if (NOT "${CMAKE_ASM_SOURCE_FILE_EXTENSIONS}" MATCHES "asm")
-      cmake_minimum_required(VERSION 3.7)
+      cmake_minimum_required(VERSION 3.14)
     endif ()
   endif (APPLE)
 endif ()
@@ -178,6 +178,8 @@ if (NOT "${CMAKE_GENERATOR}" MATCHES "Visual Studio")
     # NASM support was added in 2.8.3.  It clears ASM_DIALECT for us.
     enable_language(ASM_NASM)
   else (APPLE AND NOT AARCH64)
+    # XXX i#6326: Avoid a cmake hang by setting this.
+    set(CMAKE_ASM_LINKER_DEPFILE_SUPPORTED TRUE)
     enable_language(ASM)
   endif ()
 endif ()
@@ -227,8 +229,16 @@ elseif (UNIX)
     # No 64-bit support yet.
     # Some tests and libgcc/arm use deprecated instructions, disable warnings.
     set(ASM_FLAGS "${ASM_FLAGS} -mfpu=neon -mno-warn-deprecated")
+  elseif (DR_HOST_AARCH64)
+    if (proc_supports_sve2)
+        set(ASM_FLAGS "${ASM_FLAGS} ${ASMFLAGS_SVE2}")
+    elseif (proc_supports_sve)
+        set(ASM_FLAGS "${ASM_FLAGS} ${ASMFLAGS_SVE}")
+    endif ()
   endif ()
-  set(ASM_FLAGS "${ASM_FLAGS} --noexecstack")
+  if (NOT ANDROID64)
+    set(ASM_FLAGS "${ASM_FLAGS} --noexecstack")
+  endif ()
   if (DEBUG)
     set(ASM_FLAGS "${ASM_FLAGS} -g")
   endif (DEBUG)
@@ -281,8 +291,9 @@ if (UNIX AND NOT APPLE)
   endif (asm_result OR asm_error)
   # turn the flags into a vector
   string(REGEX REPLACE " " ";" flags_needed "${ASM_FLAGS}")
-  # -mfpu= does not list the possibilities
+  # -mfpu= and -march do not list the possibilities
   string(REGEX REPLACE "-mfpu=[a-z]*" "-mfpu" flags_needed "${flags_needed}")
+  string(REGEX REPLACE "-march=[+-a-z]*" "-march" flags_needed "${flags_needed}")
   # we want "-mmnemonic=intel" to match "-mmnemonic=[att|intel]"
   string(REGEX REPLACE "=" ".*" flags_needed "${flags_needed}")
   set(flag_present 1)
@@ -318,6 +329,10 @@ elseif (proc_supports_avx2)
   set(rule_flags "${rule_flags} ${CFLAGS_AVX2}")
 elseif (proc_supports_avx)
   set(rule_flags "${rule_flags} ${CFLAGS_AVX}")
+elseif (proc_supports_sve2)
+  set(rule_flags "${rule_flags} ${CFLAGS_SVE2}")
+elseif (proc_supports_sve)
+  set(rule_flags "${rule_flags} ${CFLAGS_SVE}")
 endif ()
 
 # Include a define that can be used to identify asm code.
@@ -331,6 +346,12 @@ if (APPLE AND NOT AARCH64)
      "${CMAKE_CPP} ${CMAKE_CPP_FLAGS} ${rule_flags} ${rule_defs} -E <SOURCE> > <OBJECT>.s"
     "<CMAKE_COMMAND> -Dfile=<OBJECT>.s -P \"${cpp2asm_newline_script_path}\""
     "<NASM> ${ASM_FLAGS} -o <OBJECT> <OBJECT>.s"
+    )
+elseif (ANDROID64)
+  set(CMAKE_ASM_COMPILE_OBJECT
+    "${CMAKE_CPP} ${CMAKE_CPP_FLAGS} ${rule_flags} ${rule_defs} -E <SOURCE> -o <OBJECT>.s"
+    "<CMAKE_COMMAND> -Dfile=<OBJECT>.s -P \"${cpp2asm_newline_script_path}\""
+    "<CMAKE_ASM_COMPILER> ${ASM_FLAGS} -xassembler -c -o <OBJECT> <OBJECT>.s"
     )
 elseif (UNIX OR (APPLE AND AARCH64))
   set(CMAKE_ASM_COMPILE_OBJECT

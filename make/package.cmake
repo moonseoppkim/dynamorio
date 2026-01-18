@@ -1,5 +1,5 @@
 # **********************************************************
-# Copyright (c) 2011-2022 Google, Inc.    All rights reserved.
+# Copyright (c) 2011-2025 Google, Inc.    All rights reserved.
 # Copyright (c) 2009-2010 VMware, Inc.    All rights reserved.
 # **********************************************************
 
@@ -41,7 +41,7 @@
 # For example:
 # ctest -V -S /my/path/to/dynamorio/src/make/package.cmake,build=1\;version=5.0.0\;invoke=/my/path/to/drmemory/src/package.cmake\;drmem_only\;cacheappend=TOOL_VERSION_NUMBER:STRING=1.6.0
 
-cmake_minimum_required(VERSION 3.7)
+cmake_minimum_required(VERSION 3.14)
 set(CTEST_SOURCE_DIRECTORY "${CTEST_SCRIPT_DIRECTORY}/..")
 
 # arguments are a ;-separated list (must escape as \; from ctest_run_script())
@@ -125,7 +125,7 @@ if ($ENV{DYNAMORIO_CROSS_ANDROID_ONLY} MATCHES "yes")
     set(arg_cacheappend "${arg_cacheappend}
       PACKAGE_PLATFORM:STRING=ARM-
       PACKAGE_SUBSYS:STRING=-EABI
-      CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android.cmake
+      CMAKE_TOOLCHAIN_FILE:PATH=${CTEST_SOURCE_DIRECTORY}/make/toolchain-android-gcc.cmake
       ANDROID_TOOLCHAIN:PATH=$ENV{DYNAMORIO_ANDROID_TOOLCHAIN}")
   else ()
     message(FATAL_ERROR "Android is only supported as 32_only")
@@ -164,9 +164,14 @@ set(base_cache "
   BUILD_NUMBER:STRING=${arg_build}
   UNIQUE_BUILD_NUMBER:STRING=${arg_ubuild}
   BUILD_PACKAGE:BOOL=ON
-  AUTOMATED_TESTING:BOOL=ON
   ${arg_cacheappend}
   ")
+
+if (WIN32)
+  # TODO i#5767: Install a working zlib package on our Windows GA CI images.
+  set(base_cache "${base_cache}
+    DISABLE_ZLIB:BOOL=ON")
+endif()
 
 # version is optional
 if (arg_version)

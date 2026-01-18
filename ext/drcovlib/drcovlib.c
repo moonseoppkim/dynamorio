@@ -1,5 +1,5 @@
 /* ***************************************************************************
- * Copyright (c) 2012-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2012-2025 Google, Inc.  All rights reserved.
  * ***************************************************************************/
 
 /*
@@ -334,7 +334,7 @@ event_pre_syscall(void *drcontext, int sysnum)
  */
 static dr_emit_flags_t
 event_basic_block_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
-                           bool translating, OUT void **user_data)
+                           bool translating, DR_PARAM_OUT void **user_data)
 {
     per_thread_t *data;
     instr_t *instr;
@@ -463,7 +463,7 @@ event_fork(void *drcontext)
 #endif
 
 drcovlib_status_t
-drcovlib_logfile(void *drcontext, OUT const char **path)
+drcovlib_logfile(void *drcontext, DR_PARAM_OUT const char **path)
 {
     if (path == NULL)
         return DRCOVLIB_ERROR_INVALID_PARAMETER;
@@ -589,7 +589,7 @@ drcovlib_init(drcovlib_options_t *ops)
     drmgr_register_thread_init_event(event_thread_init);
     drmgr_register_thread_exit_event(event_thread_exit);
     drmgr_register_bb_instrumentation_event(event_basic_block_analysis, NULL, NULL);
-    dr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_filter_syscall_event(event_filter_syscall);
     drmgr_register_pre_syscall_event(event_pre_syscall);
 #ifdef UNIX
     dr_register_fork_init_event(event_fork);

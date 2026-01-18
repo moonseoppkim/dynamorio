@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2020 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -49,7 +49,7 @@
  */
 
 #ifdef UNIX
-/* FIXME: i#30: provide safe libc routines like we do on Windows */
+/* XXX: i#30: provide safe libc routines like we do on Windows */
 static int
 tolower(int c)
 {
@@ -504,6 +504,19 @@ hashtable_apply_to_all_payloads_user_data(hashtable_t *table,
     }
 }
 
+void
+hashtable_apply_to_all_key_payload_pairs_user_data(
+    hashtable_t *table, void (*apply_func)(void *key, void *payload, void *user_data),
+    void *user_data)
+{
+    DR_ASSERT_MSG(apply_func != NULL, "The apply_func ptr cannot be NULL.");
+    for (uint i = 0; i < HASHTABLE_SIZE(table->table_bits); i++) {
+        for (hash_entry_t *e = table->table[i]; e != NULL; e = e->next) {
+            apply_func(e->key, e->payload, user_data);
+        }
+    }
+}
+
 static void
 hashtable_clear_internal(hashtable_t *table)
 {
@@ -679,7 +692,7 @@ hashtable_persist(void *drcontext, hashtable_t *table, size_t entry_size, file_t
  * freeing and can avoid freeing a payload in the mmap.
  */
 bool
-hashtable_resurrect(void *drcontext, byte **map INOUT, hashtable_t *table,
+hashtable_resurrect(void *drcontext, byte **map DR_PARAM_INOUT, hashtable_t *table,
                     size_t entry_size, void *perscxt, hasthable_persist_flags_t flags,
                     bool (*process_payload)(void *key, void *payload, ptr_int_t shift))
 {

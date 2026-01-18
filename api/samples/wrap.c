@@ -59,7 +59,7 @@
 static void
 event_exit(void);
 static void
-wrap_pre(void *wrapcxt, OUT void **user_data);
+wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data);
 static void
 wrap_post(void *wrapcxt, void *user_data);
 
@@ -115,7 +115,7 @@ dr_client_main(client_id_t id, int argc, const char *argv[])
 #endif
     drmgr_init();
     drwrap_init();
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     drmgr_register_module_load_event(module_load_event);
     max_lock = dr_mutex_create();
 }
@@ -141,7 +141,7 @@ event_exit(void)
 }
 
 static void
-wrap_pre(void *wrapcxt, OUT void **user_data)
+wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     /* malloc(size) or HeapAlloc(heap, flags, size) */
     size_t sz = (size_t)drwrap_get_arg(wrapcxt, IF_WINDOWS_ELSE(2, 0));

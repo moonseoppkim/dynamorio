@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2022 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2008-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -42,6 +42,10 @@
 #else
 #endif /* WINDOWS */
 
+#ifdef LINUX
+#    include "synch.h"
+#endif
+
 #ifdef HOT_PATCHING_INTERFACE
 #    include "hotpatch.h" /* for hotp_nudge_update() */
 #endif
@@ -78,7 +82,7 @@ void
 generic_nudge_target(nudge_arg_t *arg)
 {
     /* Fix for case 5130; volatile forces a 'call' instruction to be generated
-     * rather than 'jmp' during optimization.  FIXME: need a standardized &
+     * rather than 'jmp' during optimization.  XXX: need a standardized &
      * better way of stopping core from emulating itself.
      */
     volatile bool nudge_result;
@@ -109,7 +113,7 @@ nudge_thread_cleanup(dcontext_t *dcontext, bool exit_process, uint exit_code)
 
     /* Case 9020: no EXITING_DR() as os_terminate will do that for us */
 
-    /* FIXME - these nudge threads do hit dll mains for thread attach so app may have
+    /* XXX - these nudge threads do hit dll mains for thread attach so app may have
      * allocated some TLS memory which won't end up being freed since this won't go
      * through dll main thread detach. The app may also object to unbalanced attach to
      * detach ratio though we haven't seen that in practice. Long term we should take
@@ -138,7 +142,7 @@ nudge_thread_cleanup(dcontext_t *dcontext, bool exit_process, uint exit_code)
      */
 
     if (dynamo_exited || !dynamo_initialized || dcontext == NULL) {
-        /* FIXME - no cleanup so we'll leak any memory allocated for this thread
+        /* XXX - no cleanup so we'll leak any memory allocated for this thread
          * including the application's stack and arg if we were supposed to free them.
          * We only expect to get here in rare races where the nudge thread was created
          * before dr exited (i.e. before drmarker was freed) but didn't end up getting
@@ -224,10 +228,10 @@ generic_nudge_handler(nudge_arg_t *arg_dont_use)
         dcontext->free_app_stack = true;
     }
 
-    /* FIXME - would be nice to inform nudge creator if we need to nop the nudge. */
+    /* XXX - would be nice to inform nudge creator if we need to nop the nudge. */
 
     /* Fix for case 5702.  If a nudge thread comes in during process exit,
-     * don't process it, i.e., nop it. FIXME - this leaks the app stack and nudge arg
+     * don't process it, i.e., nop it. XXX - this leaks the app stack and nudge arg
      * if the nudge was supposed to free them. */
     if (dynamo_exited)
         goto nudge_finished;
@@ -255,7 +259,7 @@ generic_nudge_handler(nudge_arg_t *arg_dont_use)
             /* Allow a syscall for our test in debug build. */
             IF_DEBUG(&&!check_filter("win32.tls.exe",
                                      get_short_name(get_application_name())))) {
-        /* FIXME - should we report this likely attempt to attack us? need
+        /* XXX - should we report this likely attempt to attack us? need
          * a unit test for this (though will then have to tone this down). */
         ASSERT(false && "unauthorized thread tried to nudge");
         /* If we really are under attack we should terminate immediately and
@@ -320,9 +324,9 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
         }
     }
 
-    /* FIXME: NYI action handlers. As implemented move to desired order. */
+    /* TODO: NYI action handlers. As implemented move to desired order. */
     if (TEST(NUDGE_GENERIC(upgrade), nudge_action_mask)) {
-        /* FIXME: watch out for flushed clean-call fragment */
+        /* XXX: watch out for flushed clean-call fragment */
         nudge_action_mask &= ~NUDGE_GENERIC(upgrade);
         ASSERT_NOT_IMPLEMENTED(false && "case 4179");
     }
@@ -336,7 +340,7 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
         ASSERT_NOT_IMPLEMENTED(false);
     }
     if (TEST(NUDGE_GENERIC(invalidate), nudge_action_mask)) {
-        /* FIXME: watch out for flushed clean-call fragment  */
+        /* XXX: watch out for flushed clean-call fragment  */
         nudge_action_mask &= ~NUDGE_GENERIC(invalidate);
         ASSERT_NOT_IMPLEMENTED(false);
     }
@@ -349,7 +353,7 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
         ASSERT_NOT_IMPLEMENTED(false);
     }
     if (TEST(NUDGE_GENERIC(reattach), nudge_action_mask)) {
-        /* FIXME: watch out for flushed clean-call fragment */
+        /* XXX: watch out for flushed clean-call fragment */
         nudge_action_mask &= ~NUDGE_GENERIC(reattach);
         ASSERT_NOT_IMPLEMENTED(false);
     }
@@ -370,7 +374,7 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
     }
     if (TEST(NUDGE_GENERIC(freeze), nudge_action_mask)) {
         nudge_action_mask &= ~NUDGE_GENERIC(freeze);
-        coarse_units_freeze_all(true /*in-place: FIXME: separate nudge for non?*/);
+        coarse_units_freeze_all(true /*in-place: XXX: separate nudge for non?*/);
     }
     if (TEST(NUDGE_GENERIC(persist), nudge_action_mask)) {
         nudge_action_mask &= ~NUDGE_GENERIC(persist);
@@ -384,7 +388,7 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
     if (TEST(NUDGE_GENERIC(process_control), nudge_action_mask)) { /* Case 8594 */
         nudge_action_mask &= ~NUDGE_GENERIC(process_control);
         /* Need to synchronize because process control can be switched between
-         * on (allow or block list) & off.  FIXME - the nudge mask should specify this,
+         * on (allow or block list) & off.  XXX - the nudge mask should specify this,
          * but doesn't hurt to do it again. */
         synchronize_dynamic_options();
         if (IS_PROCESS_CONTROL_ON())
@@ -430,12 +434,30 @@ handle_nudge(dcontext_t *dcontext, nudge_arg_t *arg)
             SYSLOG_INTERNAL_WARNING("nudge reset ignored since resets are disabled");
         }
     }
-#ifdef WINDOWS
+#if defined(WINDOWS) || defined(LINUX)
     /* The detach handler is last since in the common case it doesn't return. */
     if (TEST(NUDGE_GENERIC(detach), nudge_action_mask)) {
+#    ifdef WINDOWS
         dcontext->free_app_stack = false;
         nudge_action_mask &= ~NUDGE_GENERIC(detach);
         detach_helper(DETACH_NORMAL_TYPE);
+#    else
+        nudge_action_mask &= ~NUDGE_GENERIC(detach);
+        /* This is not using stack_alloc() because we can't have this being cleaned up
+         * via normal cleanup paths. */
+        heap_error_code_t error_code_reserve, error_code_commit;
+        void *d_r_detachstack =
+            os_heap_reserve(NULL, DYNAMORIO_STACK_SIZE, &error_code_reserve, false);
+        /* XXX: This memory is not freed. */
+        if (!os_heap_commit(d_r_detachstack, DYNAMORIO_STACK_SIZE,
+                            MEMPROT_READ | MEMPROT_WRITE, &error_code_commit)) {
+            ASSERT_NOT_REACHED();
+        }
+        call_switch_stack(dcontext,
+                          (byte *)((ptr_uint_t)d_r_detachstack + DYNAMORIO_STACK_SIZE),
+                          (void (*)(void *))detach_externally_on_new_stack, NULL, true);
+        ASSERT_NOT_REACHED();
+#    endif
     }
 #endif
 }

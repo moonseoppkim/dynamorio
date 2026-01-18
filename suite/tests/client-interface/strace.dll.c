@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2017 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2009-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -54,6 +54,8 @@
 #        define SYSNUM_SIGPROCMASK SYS_sigprocmask
 #    endif
 #    include <errno.h>
+#    include <unistd.h>
+#    include <sys/resource.h>
 #endif
 
 /* Due to differences among platforms we don't display syscall #s and args
@@ -62,12 +64,6 @@
 
 /* Unlike in api sample, always print to stderr. */
 #define DISPLAY_STRING(msg) dr_fprintf(STDERR, "%s\n", msg);
-
-#ifdef WINDOWS
-#    define ATOMIC_INC(var) _InterlockedIncrement((volatile LONG *)&var)
-#else
-#    define ATOMIC_INC(var) __asm__ __volatile__("lock incl %0" : "=m"(var) : : "memory")
-#endif
 
 /* Some syscalls have more args, but this is the max we need for SYS_write/NtWriteFile */
 #ifdef WINDOWS
@@ -101,7 +97,12 @@ static int tcls_idx;
 /* The system call number of SYS_write/NtWriteFile */
 static int write_sysnum;
 
+/* XXX i#6863: Use _Atomic on Windows once we upgrade to VS2022 */
+#ifdef WINDOWS
 static int num_syscalls;
+#else
+static _Atomic(int) num_syscalls;
+#endif
 
 static int
 get_write_sysnum(void);
@@ -123,10 +124,10 @@ dr_init(client_id_t id)
 {
     drmgr_init();
     write_sysnum = get_write_sysnum();
-    dr_register_filter_syscall_event(event_filter_syscall);
+    drmgr_register_filter_syscall_event(event_filter_syscall);
     drmgr_register_pre_syscall_event(event_pre_syscall);
     drmgr_register_post_syscall_event(event_post_syscall);
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
     tcls_idx =
         drmgr_register_cls_field(event_thread_context_init, event_thread_context_exit);
     DR_ASSERT(tcls_idx != -1);
@@ -138,6 +139,34 @@ dr_init(client_id_t id)
 #    endif
         dr_fprintf(STDERR, "Client syscall is running\n");
     }
+#endif
+
+    /* We don't run the code below on Mac b/c syscall() is deprecated there. */
+#ifdef LINUX
+    /* Test that dr_invoke_syscall_as_app() goes through DR's handling by ensuring
+     * a request for the file limit is correctly reduced for -steal_fds.
+     */
+    uint64 steal_fd_value = 0;
+    bool got_value = dr_get_integer_option("steal_fds", &steal_fd_value);
+    DR_ASSERT(got_value);
+    DR_ASSERT(steal_fd_value > 0);
+    int sysnum_getrlimit =
+#    if defined(X64) || defined(MACOS)
+        SYS_getrlimit
+#    else
+        SYS_ugetrlimit
+#    endif
+        ;
+    struct rlimit rlim_raw, rlim_dr;
+    int res = syscall(sysnum_getrlimit, RLIMIT_NOFILE, &rlim_raw);
+    if (res < 0)
+        dr_fprintf(STDERR, "raw syscall failed with %d\n", res);
+    res = dr_invoke_syscall_as_app(dr_get_current_drcontext(), sysnum_getrlimit, 2,
+                                   RLIMIT_NOFILE, &rlim_dr);
+    if (res < 0)
+        dr_fprintf(STDERR, "dr_invoke_syscall_as_app failed with %d\n", res);
+    if (rlim_raw.rlim_cur == rlim_dr.rlim_cur)
+        dr_fprintf(STDERR, "dr_invoke_syscall_as_app failed to go through DR\n");
 #endif
 }
 
@@ -209,7 +238,13 @@ static bool
 event_pre_syscall(void *drcontext, int sysnum)
 {
     per_thread_t *data = (per_thread_t *)drmgr_get_cls_field(drcontext, tcls_idx);
-    ATOMIC_INC(num_syscalls);
+
+#ifdef WINDOWS
+    _InterlockedIncrement((volatile LONG *)&num_syscalls);
+#else
+    num_syscalls++; /* num_syscalls is declared as _Atomic on non-Windows systems. */
+#endif
+
 #ifdef UNIX
     if (sysnum == SYS_execve) {
         /* our stats will be re-set post-execve so display now */
@@ -344,7 +379,9 @@ event_post_syscall(void *drcontext, int sysnum)
 static int
 get_write_sysnum(void)
 {
-#ifdef UNIX
+#if defined(MACOS)
+    return SYS_write_nocancel;
+#elif defined(UNIX)
     return SYS_write;
 #else
     byte *entry;

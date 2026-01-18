@@ -1,5 +1,5 @@
 /* ******************************************************************************
- * Copyright (c) 2010-2021 Google, Inc.  All rights reserved.
+ * Copyright (c) 2010-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2011 Massachusetts Institute of Technology  All rights reserved.
  * Copyright (c) 2007-2010 VMware, Inc.  All rights reserved.
  * ******************************************************************************/
@@ -111,7 +111,6 @@ stream and acts as a runtime control point, allowing custom tools to be
 embedded inside it:
 
   \image html interpose.png
-  \image rtf interpose.png
   \image latex interpose.eps "Flow chart" width=10cm
 
 The application itself, along with the underlying operating system and
@@ -132,7 +131,6 @@ cache or when the operating system directly transfers control to the
 application (<em>kernel-mediated control transfers</em>):
 
   \image html flow-highlevel.png
-  \image rtf flow-highlevel.png
   \image latex flow-highlevel.eps "Flow chart" width=10cm
 
 DynamoRIO copies the application code one <em>dynamic basic block</em> at a
@@ -149,7 +147,6 @@ The following figure shows the flow of control between the components of
 DynamoRIO and its code caches:
 
   \image html flow.png
-  \image rtf flow.png
   \image latex flow.eps "Flow chart" width=15cm
 
 The context switch is between DynamoRIO's operational state and the machine
@@ -205,7 +202,6 @@ library that is coupled with DynamoRIO in order to jointly operate on an
 input program binary:
 
   \image html client.png
-  \image rtf client.png
   \image latex client.eps "DynamoRIO client" width=10cm
 
 To interact with the client, DynamoRIO provides specific events that a
@@ -224,7 +220,7 @@ set of event callbacks.  These events include the following:
   - Basic block and trace creation or deletion
     (dr_register_bb_event(), dr_register_trace_event(), dr_register_delete_event())
   - Process initialization and exit
-    (dr_client_main(), dr_register_exit_event())
+    (dr_client_main(), dr_register_post_attach_event(), dr_register_exit_event())
   - Thread initialization and exit
     (dr_register_thread_init_event(), dr_register_thread_exit_event())
   - Fork child initialization (Linux-only); meant to be used for
@@ -256,6 +252,14 @@ the names in parentheses in the list above)
 and an associated unregistration routine.  The header file dr_events.h
 contains the declarations for all registration and unregistration
 routines.
+
+When attaching to an already running process, dr_client_main() is called
+in the initially taken over thread before the other threads are taken over.
+Thus, it is not the best place to take a snapshot of global state such
+as the address space.  The post-attach event (dr_register_post_attach_event())
+is provided as a point where all the other threads have been suspended but
+have not yet started executing under instrumentation: the best point to
+take a snapshot and avoid a gap between it and monitored events post-takeover.
 
 Note that clients are allowed to register multiple callbacks for the
 same event.  DynamoRIO also supports mutiple clients, each of which
@@ -474,7 +478,9 @@ preferred client library base in the low 4GB.  The \ref op_reachable_client
 "-reachable_client runtime option" can be used to remove this guarantee.
 The option is automatically turned off when DynamoRIO and clients are
 statically linked with the application: for such static usage, 32-bit
-reachability to the code cache by clients is not guaranteed.
+reachability to the code cache by clients is not guaranteed. It is also
+disabled on macOS, where the lack of a private loader means we cannot
+control where the client library gets loaded.
 
 The net result is that any static data or code in a client library, or any
 data allocated using DynamoRIO's API routines (except dr_raw_mem_alloc() or
@@ -570,7 +576,7 @@ not use any global user-mode resources that would interfere with the
 running application, and as long as no alertable system calls are invoked
 on Windows (see \ref sec_alertable).  While most non-graphical
 non-alertable Windows API routines are supported, native threading libraries
-such as \p libpthread.so on Linux are known to cause problems.
+such as \p libpthread.so on Linux are known to sometimes cause problems.
 
 Currently we provide a private loader for both Windows and Linux which
 supplies support for client external library use.
@@ -586,6 +592,11 @@ allocation in the main process heap to instead use DynamoRIO's internal
 heap.  The loader also attempts to isolate other global resource usage and
 global callbacks.  Please file reports on any transparency problems
 observed when using the private loader.
+
+If DynamoRIO and clients are statically linked into the application,
+the private loader is not available and third-party library usage is
+generally no longer safe, unless that usage only happens during
+process-wide initialization (see \ref sec_static_DR).
 
 By default, all Windows clients link with libc.  To instead
 use the libc subset of routines forwarded from the DynamoRIO library to \p

@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2019 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2003-2010 VMware, Inc.  All rights reserved.
  * **********************************************************/
 
@@ -51,17 +51,18 @@
 #define MIN_ALLOCATION_SIZE 0x10000
 
 typedef NTSTATUS(NTAPI *NtCreateThreadType)(
-    OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess,
-    IN POBJECT_ATTRIBUTES ObjectAttributes, IN HANDLE ProcessHandle,
-    OUT PCLIENT_ID ClientId, IN PCONTEXT ThreadContext, IN PUSER_STACK UserStack,
-    IN BOOLEAN CreateSuspended);
+    DR_PARAM_OUT PHANDLE ThreadHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+    DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes, DR_PARAM_IN HANDLE ProcessHandle,
+    DR_PARAM_OUT PCLIENT_ID ClientId, DR_PARAM_IN PCONTEXT ThreadContext,
+    DR_PARAM_IN PUSER_STACK UserStack, DR_PARAM_IN BOOLEAN CreateSuspended);
 NtCreateThreadType NtCreateThread = NULL;
 typedef NTSTATUS(NTAPI *NtCreateThreadExType)(
-    OUT PHANDLE ThreadHandle, IN ACCESS_MASK DesiredAccess,
-    IN POBJECT_ATTRIBUTES ObjectAttributes, IN HANDLE ProcessHandle,
-    IN LPTHREAD_START_ROUTINE StartAddress, IN LPVOID StartParameter,
-    IN BOOL CreateSuspended, IN uint StackZeroBits, IN SIZE_T StackCommitSize,
-    IN SIZE_T StackReserveSize, INOUT create_thread_info_t *thread_info);
+    DR_PARAM_OUT PHANDLE ThreadHandle, DR_PARAM_IN ACCESS_MASK DesiredAccess,
+    DR_PARAM_IN POBJECT_ATTRIBUTES ObjectAttributes, DR_PARAM_IN HANDLE ProcessHandle,
+    DR_PARAM_IN LPTHREAD_START_ROUTINE StartAddress, DR_PARAM_IN LPVOID StartParameter,
+    DR_PARAM_IN BOOL CreateSuspended, DR_PARAM_IN uint StackZeroBits,
+    DR_PARAM_IN SIZE_T StackCommitSize, DR_PARAM_IN SIZE_T StackReserveSize,
+    DR_PARAM_INOUT create_thread_info_t *thread_info);
 NtCreateThreadExType NtCreateThreadEx = NULL;
 
 #ifdef X64
@@ -100,7 +101,7 @@ typedef uint ptr_uint_t;
  */
 #    define FXSAVE_XMM0_OFFSET 160
 #    define CXT_XMM(cxt, idx) \
-        ((dr_xmm_t *)&((cxt)->ExtendedRegisters[FXSAVE_XMM0_OFFSET + (idx)*16]))
+        ((dr_xmm_t *)&((cxt)->ExtendedRegisters[FXSAVE_XMM0_OFFSET + (idx) * 16]))
 #endif
 
 #define THREAD_START_ADDR IF_X64_ELSE(CXT_XCX, CXT_XAX)
@@ -133,7 +134,7 @@ get_kernel_thread_start_thunk()
             CONTEXT cxt;
             cxt.ContextFlags = CONTEXT_FULL;
             if (GetThreadContext(hThread, &cxt)) {
-                /* FIXME - would be a little more elegant to have a lock
+                /* XXX - would be a little more elegant to have a lock
                  * protecting start_address, but is not necessary for
                  * correctness as we'll always be writing the same value and
                  * the actual write itself should be atomic.  There are places
@@ -174,7 +175,7 @@ get_kernel_thread_start_thunk()
 }
 
 /* returns NULL on error */
-/* FIXME - is similar to core create_thread, but uses API routines where
+/* XXX - is similar to core create_thread, but uses API routines where
  *     possible, could try to share. */
 /* NOTE - stack_reserve and stack commit must be multiples of PAGE_SIZE and reserve
  *     should be at least 5 pages larger then commit */
@@ -265,7 +266,7 @@ nt_create_thread(HANDLE hProcess, PTHREAD_START_ROUTINE start_addr, void *arg,
      * allow us to open it anyways.  Note if for some reason we want to view the
      * SACL we need to enable the ACCESS_SYSTEM_SECURITY privilege when opening
      * the handle.
-     * FIXME - we could instead build our own DACL combining the two, we could
+     * XXX - we could instead build our own DACL combining the two, we could
      * also try setting the owner/group after the thread is created if we
      * really wanted to look like the target process thread, and could also
      * start with a NULL sd and set the DACL later if want to match
@@ -484,7 +485,7 @@ create_remote_thread(HANDLE hProc, PTHREAD_START_ROUTINE pfnThreadRtn, void *arg
     if (remote_stack != NULL)
         *remote_stack = NULL;
     if (TEST(CREATE_REMOTE_THREAD_USE_NT, flags)) {
-        /* FIXME - should we allow the caller to specify the stack sizes?
+        /* XXX - should we allow the caller to specify the stack sizes?
          * we already just use defaults if we're using CreateRemoteThread */
         hThread = nt_create_thread(hProc, pfnThreadRtn, arg, arg_buf, arg_buf_size,
                                    STACK_RESERVE, STACK_COMMIT, false, NULL,
@@ -515,7 +516,7 @@ nudge_dr(process_id_t pid, BOOL allow_upgraded_perms, DWORD timeout_ms,
     int found;
     dr_marker_t marker;
     PTHREAD_START_ROUTINE pfnThreadRtn;
-    /* FIXME: case 7038 */
+    /* XXX: case 7038 */
     /* It is not safe to convert our routines to a PTHREAD_START_ROUTINE?
      * That one is expected to be a
      * DWORD (WINAPI *PTHREAD_START_ROUTINE)(LPVOID lpThreadParameter);
@@ -571,7 +572,7 @@ nudge_dr(process_id_t pid, BOOL allow_upgraded_perms, DWORD timeout_ms,
 
     if (pfnThreadRtn != NULL) { /* Fix for case 5464. */
         /* We use the native api to create the thread (CREATE_REMOTE_THREAD_USE_NT)
-         * to avoid session id issues.  FIXME - we don't really need to TARGET_API
+         * to avoid session id issues.  XXX - we don't really need to TARGET_API
          * anymore since the nudge routine never returns now (which could simplify
          * the core nudge thread detection a little).  Note - if we stop using USE_NT
          * we need to update the stack freeing code below and change the nudge flags. */

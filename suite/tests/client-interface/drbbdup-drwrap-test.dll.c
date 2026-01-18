@@ -103,7 +103,7 @@ event_instrument_instr(void *drcontext, void *tag, instrlist_t *bb, instr_t *ins
 }
 
 static void
-wrap_pre(void *wrapcxt, OUT void **user_data)
+wrap_pre(void *wrapcxt, DR_PARAM_OUT void **user_data)
 {
     dr_fprintf(STDERR, "in wrap_pre\n");
     CHECK(wrapcxt != NULL && user_data != NULL, "invalid arg");
@@ -163,7 +163,7 @@ dr_init(client_id_t id)
     drbbdup_status_t status = drbbdup_init(&opts);
     CHECK(status == DRBBDUP_SUCCESS, "drbbdup init failed");
 
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     /* Make sure requesting inversion fails *after* drwrap_init().
      * This also stresses drwrap re-attach via init;exit;init.

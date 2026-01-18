@@ -61,6 +61,14 @@ main(void)
         skip:
     }
     ;
+#elif defined(AARCH64)
+    __asm("cbnz xzr, 1f");
+#    ifdef MACOS
+    __asm("bl _foo");
+#    else
+    __asm("bl foo");
+#    endif
+    __asm("1:");
 #else
     __asm("movl $0x0, %ecx");
     __asm("cmp $0x0, %ecx");

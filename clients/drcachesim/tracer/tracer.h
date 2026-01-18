@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2011-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2011-2025 Google, Inc.  All rights reserved.
  * Copyright (c) 2010 Massachusetts Institute of Technology  All rights reserved.
  * **********************************************************/
 
@@ -32,7 +32,7 @@
  */
 
 #ifndef _TRACER_
-#define _TRACER_ 1
+#define _TRACER_
 
 #include <stddef.h>
 
@@ -42,6 +42,7 @@
 #include "dr_api.h"
 #include "drmemtrace.h"
 #include "instru.h"
+#include "instr_counter.h"
 #include "named_pipe.h"
 #include "options.h"
 #include "physaddr.h"
@@ -75,7 +76,7 @@ extern named_pipe_t ipc_pipe;
     } while (0)
 
 /* Thread private data.  This is all set to 0 at thread init. */
-typedef struct {
+struct per_thread_t {
     byte *seg_base;
     byte *buf_base;
     uint64 num_refs;
@@ -118,7 +119,14 @@ typedef struct {
     /* For syscall kernel trace. */
     syscall_pt_trace_t syscall_pt_trace;
 #endif
-} per_thread_t;
+#ifdef BUILD_DRMEMTRACE_WITH_DR_SYSCALL
+    /* For syscall records. */
+#    define SYSCALL_RECORD_BUFFER_SIZE 1024
+    file_t syscall_record_file = INVALID_FILE;
+    ssize_t syscall_record_buffer_offset = 0;
+    char syscall_record_buffer[SYSCALL_RECORD_BUFFER_SIZE];
+#endif
+};
 
 /* Allocated TLS slot offsets */
 enum {
@@ -178,6 +186,17 @@ enum {
     BBDUP_MODE_FUNC_ONLY = 2, /* Function tracing during no-full-trace periods. */
     BBDUP_MODE_NOP = 3,       /* No tracing or counting for pre-attach or post-detach. */
     BBDUP_MODE_L0_FILTER = 4, /* Address tracing with L0_filter. */
+};
+
+/* dr_nudge_client takes a 64 bit argument. We use the most significant 8 bits as the
+ * type and the least significant 56 bits to pass a value to the client.
+ */
+#define TRACER_NUDGE_TYPE_SHIFT 56
+#define TRACER_NUDGE_VALUE_MASK 0x00ffffffffffffffLL
+
+/* Tracer nudge types. */
+enum {
+    TRACER_NUDGE_MEM_DUMP = 0, /* Capture a memory dump. */
 };
 
 #if defined(X86_64) || defined(AARCH64)
@@ -266,7 +285,8 @@ has_tracing_windows()
     // We return true for a single-window -trace_for_instrs (without -retrace) setup
     // since we rely on having window numbers for the end-of-block buffer output check
     // used for a single-window transition away from tracing.
-    return op_trace_for_instrs.get_value() > 0 || op_retrace_every_instrs.get_value() > 0;
+    return get_current_trace_for_instrs_value() > 0 ||
+        get_current_no_trace_for_instrs_value() > 0;
 }
 
 static inline bool
@@ -282,7 +302,8 @@ is_in_tracing_mode(uintptr_t mode)
 }
 
 void
-get_L0_filters_enabled(uintptr_t mode, OUT bool *l0i_enabled, OUT bool *l0d_enabled);
+get_L0_filters_enabled(uintptr_t mode, DR_PARAM_OUT bool *l0i_enabled,
+                       DR_PARAM_OUT bool *l0d_enabled);
 
 } // namespace drmemtrace
 } // namespace dynamorio

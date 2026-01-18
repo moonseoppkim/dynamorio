@@ -1,5 +1,5 @@
 /* **********************************************************
- * Copyright (c) 2017-2023 Google, Inc.  All rights reserved.
+ * Copyright (c) 2017-2025 Google, Inc.  All rights reserved.
  * **********************************************************/
 
 /*
@@ -53,9 +53,16 @@
 #include "invariant_checker_create.h"
 #include "trace_entry.h"
 #include "utils.h"
+#ifdef LINUX
+#    include "../../core/unix/include/syscall_target.h"
+#endif
 
 namespace dynamorio {
 namespace drmemtrace {
+
+// We don't expose the alignment requirement for DR_ISA_REGDEPS instructions (4 bytes),
+// so we duplicate it here.
+#define REGDEPS_ALIGN_BYTES 4
 
 analysis_tool_t *
 invariant_checker_create(bool offline, unsigned int verbose)
@@ -66,12 +73,18 @@ invariant_checker_create(bool offline, unsigned int verbose)
 invariant_checker_t::invariant_checker_t(bool offline, unsigned int verbose,
                                          std::string test_name,
                                          std::istream *serial_schedule_file,
-                                         std::istream *cpu_schedule_file)
+                                         std::istream *cpu_schedule_file,
+                                         bool abort_on_invariant_error,
+                                         bool dynamic_syscall_trace_injection,
+                                         bool trace_incomplete)
     : knob_offline_(offline)
     , knob_verbose_(verbose)
     , knob_test_name_(test_name)
     , serial_schedule_file_(serial_schedule_file)
     , cpu_schedule_file_(cpu_schedule_file)
+    , abort_on_invariant_error_(abort_on_invariant_error)
+    , dynamic_syscall_trace_injection_(dynamic_syscall_trace_injection)
+    , trace_incomplete_(trace_incomplete)
 {
     if (knob_test_name_ == "kernel_xfer_app" || knob_test_name_ == "rseq_app")
         has_annotations_ = true;
@@ -79,6 +92,21 @@ invariant_checker_t::invariant_checker_t(bool offline, unsigned int verbose,
 
 invariant_checker_t::~invariant_checker_t()
 {
+}
+
+std::string
+invariant_checker_t::initialize_shard_type(shard_type_t shard_type)
+{
+    if (shard_type == SHARD_BY_CORE) {
+        core_sharded_ = true;
+        // In this mode, the invariant checker limits itself to verifying
+        // various invariants within each thread segment execution bounded
+        // by context switches.
+        // Additionally, when kernel switch injection is enabled, we also
+        // verify that the kernel trace-end indirect branch shows PC
+        // continuity to the other thread.
+    }
+    return "";
 }
 
 std::string
@@ -93,12 +121,31 @@ invariant_checker_t::report_if_false(per_shard_t *shard, bool condition,
                                      const std::string &invariant_name)
 {
     if (!condition) {
+        // TODO i#5505: There are some PC discontinuities in the instr traces
+        // captured using Intel-PT. Since these are not trivial to solve, we
+        // turn this into a non-fatal check for the test for now.
+        if (TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_INSTR_ONLY, shard->file_type_) &&
+            knob_test_name_ == "kernel_syscall_pt_trace" &&
+            shard->between_kernel_syscall_trace_markers_ &&
+            (invariant_name == "Non-explicit control flow has no marker" ||
+             // Some discontinuities are flagged as the following. This is
+             // a false positive of our heuristic to find rseq side exit
+             // discontinuities.
+             invariant_name == "PC discontinuity due to rseq side exit" ||
+             invariant_name == "Branch does not go to the correct target")) {
+            return;
+        }
         std::cerr << "Trace invariant failure in T" << shard->tid_ << " at ref # "
-                  << shard->stream->get_record_ordinal() << " ("
+                  << shard->stream->get_record_ordinal() << " at instruction # "
+                  << shard->stream->get_instruction_ordinal() << " ("
                   << shard->instr_count_since_last_timestamp_
                   << " instrs since timestamp " << shard->last_timestamp_
                   << "): " << invariant_name << "\n";
-        abort();
+        if (abort_on_invariant_error_) {
+            abort();
+        } else {
+            ++shard->error_count_;
+        }
     }
 }
 
@@ -115,7 +162,9 @@ invariant_checker_t::parallel_shard_init_stream(int shard_index, void *worker_da
     auto per_shard = std::unique_ptr<per_shard_t>(new per_shard_t);
     per_shard->stream = shard_stream;
     void *res = reinterpret_cast<void *>(per_shard.get());
-    std::lock_guard<std::mutex> guard(shard_map_mutex_);
+    std::lock_guard<std::mutex> guard(init_mutex_);
+    per_shard->tid_ = shard_stream->get_tid();
+    per_shard->last_next_trace_pc_ = shard_stream->get_next_trace_pc();
     shard_map_[shard_index] = std::move(per_shard);
     return res;
 }
@@ -131,6 +180,50 @@ invariant_checker_t::parallel_shard_init(int shard_index, void *worker_data)
 bool
 invariant_checker_t::parallel_shard_exit(void *shard_data)
 {
+    per_shard_t *shard = reinterpret_cast<per_shard_t *>(shard_data);
+    if (shard->decode_cache_ != nullptr)
+        shard->decode_cache_->clear_cache();
+    if (TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES, shard->file_type_)) {
+        bool has_switch_templates = !shard->saw_switch_trace_.empty();
+        bool has_syscall_templates = !shard->saw_syscall_trace_.empty();
+        bool has_default_syscall_template =
+            shard->saw_syscall_trace_.find(DEFAULT_SYSCALL_TRACE_TEMPLATE_NUM) !=
+            shard->saw_syscall_trace_.end();
+        report_if_false(shard,
+                        (!has_switch_templates && has_syscall_templates) ||
+                            (has_switch_templates && !has_syscall_templates),
+                        "Expected either switch or syscall traces in the template file");
+        report_if_false(shard, has_switch_templates || has_default_syscall_template,
+                        "Missing default syscall trace in template file");
+        // Using >= to avoid multiple invariant errors when there's an invalid context
+        // switch type which is detected separately.
+        report_if_false(shard,
+                        has_syscall_templates ||
+                            shard->saw_switch_trace_.size() >=
+                                switch_type_t::SWITCH_LAST_VALID_ENUM,
+                        "Missing switch traces in template file");
+    }
+    report_if_false(shard,
+                    shard->saw_thread_exit_ ||
+                        trace_incomplete_
+                        // XXX i#6733: For online we sometimes see threads
+                        // exiting w/o the tracer inserting an exit.  Until we figure
+                        // that out we disable this error to unblock testing.
+                        || !knob_offline_,
+                    "Thread is missing exit");
+    if (!TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_DFILTERED |
+                     // In OFFLINE_FILE_TYPE_ARCH_REGDEPS we can have leftover
+                     // shard->expected_[read | write]_records_ as we don't decrease this
+                     // counter when we encounter a TRACE_TYPE_[READ | WRITE]. We cannot
+                     // decrease the counter because the precise number of reads and
+                     // writes a DR_ISA_REGDEPS instruction performs cannot be determined.
+                     OFFLINE_FILE_TYPE_ARCH_REGDEPS,
+                 shard->file_type_)) {
+        report_if_false(shard, shard->expected_read_records_ == 0,
+                        "Missing read records");
+        report_if_false(shard, shard->expected_write_records_ == 0,
+                        "Missing write records");
+    }
     return true;
 }
 
@@ -142,11 +235,70 @@ invariant_checker_t::parallel_shard_error(void *shard_data)
 }
 
 bool
+invariant_checker_t::is_a_unit_test(per_shard_t *shard)
+{
+    // Look for a mock stream.
+    return shard->stream == nullptr || shard->stream->get_input_interface() == nullptr;
+}
+
+#ifdef X86
+bool
+invariant_checker_t::relax_expected_write_count_check_for_kernel(per_shard_t *shard)
+{
+    if (!shard->between_kernel_syscall_trace_markers_ &&
+        !shard->between_kernel_context_switch_markers_)
+        return false;
+    bool relax =
+        // Xsave does multiple writes. Write count cannot be determined using the
+        // decoder. System call trace templates collected on QEMU would show all writes.
+        // XXX: Perhaps we can query the expected size using cpuid and add it as a
+        // marker in the system call trace template, and then adjust it according to the
+        // cpuid value for the trace being injected into.
+        shard->prev_instr_.decoding.is_xsave_;
+    return relax;
+}
+
+bool
+invariant_checker_t::relax_expected_read_count_check_for_kernel(per_shard_t *shard)
+{
+    if (!shard->between_kernel_syscall_trace_markers_ &&
+        !shard->between_kernel_context_switch_markers_)
+        return false;
+    bool relax =
+        // iret pops bunch of data from the stack at interrupt returns. System call
+        // trace templates collected on QEMU would show all reads.
+        // TODO i#6742: iret has different behavior in user vs protected mode. This
+        // difference in iret behavior can be detected in the decoder and perhaps be
+        // accounted for here in a way better than relying on
+        // between_kernel_syscall_trace_markers_.
+        shard->prev_instr_.decoding.opcode_ == OP_iret
+
+        // Xrstor does multiple reads. Read count cannot be determined using the
+        // decoder. System call trace templates collected on QEMU would show all reads.
+        // XXX: Perhaps we can query the expected size using cpuid and add it as a
+        // marker in the system call trace template, and then adjust it according to the
+        // cpuid value for the trace being injected into.
+        || shard->prev_instr_.decoding.is_xrstor_
+
+        // xsave variants also read some fields from the xsave header
+        // (https://www.felixcloutier.com/x86/xsaveopt).
+        // XXX, i#6769: Same as above, can we store any metadata in the trace to allow
+        // us to adapt the decoder to expect this?
+        || shard->prev_instr_.decoding.is_xsave_;
+    return relax;
+}
+#endif
+
+bool
+invariant_checker_t::is_dynamically_core_sharded(per_shard_t *shard)
+{
+    return core_sharded_ && !TESTANY(OFFLINE_FILE_TYPE_CORE_SHARDED, shard->file_type_);
+}
+
+bool
 invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &memref)
 {
     per_shard_t *shard = reinterpret_cast<per_shard_t *>(shard_data);
-    if (shard->tid_ == -1 && memref.data.tid != 0)
-        shard->tid_ = memref.data.tid;
     // We check the memtrace_stream_t counts with our own, unless there was an
     // instr skip from the start where we cannot compare, or we're in a unit
     // test with no stream interface, or we're in serial mode (since we want
@@ -157,17 +309,148 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         ++shard->instr_count_;
         ++shard->instr_count_since_last_timestamp_;
     }
+
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_CORE_IDLE) {
+        report_if_false(shard, memref.data.tid == IDLE_THREAD_ID,
+                        "Unexpected tid for core_idle marker");
+        shard->tid_ = IDLE_THREAD_ID;
+        return true;
+    }
+    report_if_false(shard, core_sharded_ || shard->tid_ == memref.data.tid,
+                    "Shard tid != memref tid");
+    if (shard->tid_ != memref.data.tid) {
+        report_if_false(
+            shard,
+            !TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALLS, shard->file_type_) ||
+                (memref.marker.type == TRACE_TYPE_MARKER &&
+                 memref.marker.marker_type == TRACE_MARKER_TYPE_CONTEXT_SWITCH_START),
+            "Missing context switch trace");
+        shard->reset_at_context_switch(
+            memref, TESTANY(OFFLINE_FILE_TYPE_CORE_SHARDED, shard->file_type_));
+    }
+
+    // These markers are allowed between the syscall marker and a possible
+    // syscall trace.
+    bool prev_was_syscall_marker_saved = shard->prev_was_syscall_marker_;
+    if (memref.marker.type == TRACE_TYPE_MARKER) {
+        switch (memref.marker.marker_type) {
+        // XXX: The following four markers may be added by sub-classes that
+        // provide their own implementation of raw2trace_t::process_marker.
+        // raw2trace_t::process_marker may prepend or append these additional
+        // markers on processing the syscall's TRACE_MARKER_TYPE_FUNC_ARGs. It
+        // may have been cleaner if the syscall trace were injected before the
+        // following four, but it gets messy trying to inject the trace between
+        // the last TRACE_MARKER_TYPE_FUNC_ARG and one of the following added
+        // by raw2trace_t::process_marker. In any case, the dynamic scheduler
+        // waits until the next user-space instr before making any scheduling
+        // decisions, so the order doesn't matter functionally.
+        case TRACE_MARKER_TYPE_SYSCALL_UNSCHEDULE:
+        case TRACE_MARKER_TYPE_SYSCALL_SCHEDULE:
+        case TRACE_MARKER_TYPE_SYSCALL_ARG_TIMEOUT:
+        case TRACE_MARKER_TYPE_DIRECT_THREAD_SWITCH:
+        // Marking end of context for the above comment.
+        case TRACE_MARKER_TYPE_MAYBE_BLOCKING_SYSCALL:
+        case TRACE_MARKER_TYPE_FUNC_ARG:
+            report_if_false(
+                shard,
+                // If a signal arrives just before control enters a function traced
+                // using -record_function, we will see the func_id-func_arg markers
+                // immediately after an injected sigreturn trace. In this case, our
+                // syscall_trace_num_after_last_userspace_instr_ would not be
+                // reset yet so may lead to a false positive.
+                (memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_ARG &&
+                 shard->prev_func_id_ <
+                     static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE)) ||
+                    shard->syscall_trace_num_after_last_userspace_instr_ == -1,
+                "Found unexpected func_arg or syscall marker after injected "
+                "syscall trace");
+            break;
+        case TRACE_MARKER_TYPE_FUNC_ID:
+            // This may be present both before and after the injected syscall trace,
+            // from the pre- and post-syscall callback.
+            break;
+        default:
+            // Remaining markers are not allowed to intervene TRACE_MARKER_TYPE_SYSCALL
+            // and a possible TRACE_MARKER_TYPE_SYSCALL_TRACE_START.
+            // Also lets us detect syscall traces that were injected too late (after a
+            // marker not on the list above, like syscall_failed).
+            shard->prev_was_syscall_marker_ = false;
+        }
+    }
+    if (dynamic_syscall_trace_injection_ &&
+        (shard->between_kernel_syscall_trace_markers_ ||
+         (memref.marker.type == TRACE_TYPE_MARKER &&
+          memref.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL_TRACE_START))) {
+        ++shard->dyn_injected_syscall_ref_count_;
+        if (type_is_instr(memref.instr.type)) {
+            ++shard->dyn_injected_syscall_instr_count_;
+        }
+    }
+    int at_skip = false;
     // XXX: We also can't verify counts with a skip invoked from the middle, but
     // we have no simple way to detect that here.
-    if (shard->instr_count_ <= 1 && !shard->skipped_instrs_ && shard->stream != nullptr &&
-        shard->stream->get_instruction_ordinal() > 1)
+    if (shard->instr_count_ <= 1 && !shard->skipped_instrs_ && !is_a_unit_test(shard) &&
+        shard->stream->get_instruction_ordinal() > 1) {
         shard->skipped_instrs_ = true;
-    if (!shard->skipped_instrs_ && shard->stream != nullptr &&
+        at_skip = true;
+        if (!shard->saw_filetype_) {
+            shard->file_type_ =
+                static_cast<offline_file_type_t>(shard->stream->get_filetype());
+        }
+    }
+
+    if (!is_a_unit_test(shard) && knob_offline_ &&
+        !TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_IFILTERED,
+                 shard->file_type_)) {
+        if (type_is_instr(memref.instr.type)) {
+            report_if_false(shard,
+                            at_skip || shard->last_next_trace_pc_ == memref.instr.addr,
+                            "Unexpected next trace pc from instr");
+        } else if (memref.marker.type == TRACE_TYPE_MARKER &&
+                   memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT) {
+            report_if_false(shard,
+                            at_skip ||
+                                shard->last_next_trace_pc_ == memref.marker.marker_value,
+                            "Unexpected next trace pc from kernel_event marker");
+        } else {
+            report_if_false(
+                shard,
+                at_skip ||
+                    // We do expect the returned next trace pc to change when the
+                    // decision to inject a syscall trace is made at the
+                    // TRACE_MARKER_TYPE_SYSCALL which is when the syscall number
+                    // becomes known.
+                    (memref.marker.type == TRACE_TYPE_MARKER &&
+                     memref.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL) ||
+                    shard->last_next_trace_pc_ == shard->stream->get_next_trace_pc(),
+                "Unexpected change to stream next trace pc");
+        }
+        shard->last_next_trace_pc_ = shard->stream->get_next_trace_pc();
+    }
+
+    if (!shard->skipped_instrs_ && !is_a_unit_test(shard) &&
         (shard->stream != serial_stream_ || shard_map_.size() == 1)) {
-        report_if_false(shard, shard->ref_count_ == shard->stream->get_record_ordinal(),
+        if (trace_incomplete_ && !shard->adjusted_ordinal_for_incomplete_ &&
+            shard->ref_count_ < shard->stream->get_record_ordinal() &&
+            shard->dyn_injected_syscall_ref_count_ == 0) {
+            // There must have been a -skip_records.
+            shard->ref_count_ = shard->stream->get_record_ordinal();
+            shard->adjusted_ordinal_for_incomplete_ = true;
+        }
+        uint64_t adjusted_ref_count = shard->ref_count_;
+        uint64_t adjusted_instr_count = shard->instr_count_;
+        if (!is_dynamically_core_sharded(shard)) {
+            adjusted_ref_count -= shard->dyn_injected_syscall_ref_count_;
+            adjusted_instr_count -= shard->dyn_injected_syscall_instr_count_;
+        } else {
+            // During dynamic core-sharding with kernel injection, the stream ordinals
+            // also include the injected counts.
+        }
+        report_if_false(shard, adjusted_ref_count == shard->stream->get_record_ordinal(),
                         "Stream record ordinal inaccurate");
         report_if_false(shard,
-                        shard->instr_count_ == shard->stream->get_instruction_ordinal(),
+                        adjusted_instr_count == shard->stream->get_instruction_ordinal(),
                         "Stream instr ordinal inaccurate");
     }
 #ifdef UNIX
@@ -188,7 +471,9 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                         shard->file_type_) ||
                     (memref.marker.type == TRACE_TYPE_MARKER &&
                      (memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT ||
-                      memref.marker.marker_type == TRACE_MARKER_TYPE_RSEQ_ABORT)) ||
+                      memref.marker.marker_type == TRACE_MARKER_TYPE_RSEQ_ABORT ||
+                      memref.marker.marker_type ==
+                          TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION)) ||
                     // TODO i#3937: Online instr bundles currently violate this.
                     !knob_offline_,
                 "Interruption marker mis-placed");
@@ -249,19 +534,19 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                 // Still in the region.
             } else {
                 // We should see an abort marker or a side exit if we leave the region.
-                report_if_false(shard,
-                                type_is_instr_branch(shard->prev_instr_.instr.type),
-                                "Rseq region exit requires marker, branch, or commit");
+                report_if_false(
+                    shard, type_is_instr_branch(shard->prev_instr_.memref.instr.type),
+                    "Rseq region exit requires marker, branch, or commit");
                 shard->in_rseq_region_ = false;
             }
         } else {
-            report_if_false(shard,
-                            memref.marker.type != TRACE_TYPE_MARKER ||
-                                memref.marker.marker_type !=
-                                    TRACE_MARKER_TYPE_KERNEL_EVENT ||
-                                // Side exit.
-                                type_is_instr_branch(shard->prev_instr_.instr.type),
-                            "Signal in rseq region should have abort marker");
+            report_if_false(
+                shard,
+                memref.marker.type != TRACE_TYPE_MARKER ||
+                    memref.marker.marker_type != TRACE_MARKER_TYPE_KERNEL_EVENT ||
+                    // Side exit.
+                    type_is_instr_branch(shard->prev_instr_.memref.instr.type),
+                "Signal in rseq region should have abort marker");
         }
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
@@ -271,10 +556,11 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         // case the marker value will point to it.
         report_if_false(shard,
                         shard->rseq_end_pc_ == 0 ||
-                            shard->prev_instr_.instr.addr +
-                                    shard->prev_instr_.instr.size !=
+                            shard->prev_instr_.memref.instr.addr +
+                                    shard->prev_instr_.memref.instr.size !=
                                 shard->rseq_end_pc_ ||
-                            shard->prev_instr_.instr.addr == memref.marker.marker_value,
+                            shard->prev_instr_.memref.instr.addr ==
+                                memref.marker.marker_value,
                         "Rseq post-abort instruction not rolled back");
         shard->in_rseq_region_ = false;
     }
@@ -283,8 +569,9 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         memref.marker.marker_type == TRACE_MARKER_TYPE_FILETYPE) {
         shard->file_type_ = static_cast<offline_file_type_t>(memref.marker.marker_value);
+        shard->saw_filetype_ = true;
         report_if_false(shard,
-                        shard->stream == nullptr ||
+                        is_a_unit_test(shard) ||
                             shard->file_type_ == shard->stream->get_filetype(),
                         "Stream interface filetype != trace marker");
     }
@@ -300,7 +587,7 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         memref.marker.marker_type == TRACE_MARKER_TYPE_CACHE_LINE_SIZE) {
         shard->found_cache_line_size_marker_ = true;
         report_if_false(shard,
-                        shard->stream == nullptr ||
+                        is_a_unit_test(shard) ||
                             memref.marker.marker_value ==
                                 shard->stream->get_cache_line_size(),
                         "Stream interface cache line size != trace marker");
@@ -309,17 +596,57 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         memref.marker.marker_type == TRACE_MARKER_TYPE_PAGE_SIZE) {
         shard->found_page_size_marker_ = true;
         report_if_false(shard,
-                        shard->stream == nullptr ||
+                        is_a_unit_test(shard) || is_a_unit_test(shard) ||
                             memref.marker.marker_value == shard->stream->get_page_size(),
                         "Stream interface page size != trace marker");
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_VECTOR_LENGTH) {
+#ifdef AARCH64
+        static const int MAX_VL_BYTES = 256; // SVE's maximum vector length is 2048-bit
+        // Vector length must be a multiple of 16 bytes between 16 and 256.
+        report_if_false(shard,
+                        memref.marker.marker_value > 0 &&
+                            memref.marker.marker_value <= MAX_VL_BYTES &&
+                            memref.marker.marker_value % 16 == 0,
+                        "Vector length marker has invalid size");
+
+        const int new_vl_bits = memref.marker.marker_value * 8;
+        if (dr_get_vector_length() != new_vl_bits) {
+            dr_set_vector_length(new_vl_bits);
+            // Changing the vector length can change the IR representation of some SVE
+            // instructions but it doesn't effect any of the metadata that is stored
+            // in decode_cache_ so we don't need to flush the cache.
+        }
+#else
+        report_if_false(shard, false, "Unexpected vector length marker");
+#endif
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         memref.marker.marker_type == TRACE_MARKER_TYPE_VERSION) {
         shard->trace_version_ = memref.marker.marker_value;
         report_if_false(shard,
-                        shard->stream == nullptr ||
+                        is_a_unit_test(shard) ||
                             memref.marker.marker_value == shard->stream->get_version(),
                         "Stream interface version != trace marker");
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_CHUNK_FOOTER &&
+        // TODO i#7674: This check can be enabled using per-thread last chunk ordinals
+        // when we have per-thread state tracking for dynamically core-sharded traces.
+        !is_dynamically_core_sharded(shard)) {
+        if (shard->skipped_instrs_) {
+            report_if_false(shard,
+                            static_cast<int64_t>(memref.marker.marker_value) >=
+                                1 + shard->last_chunk_ordinal_,
+                            "Chunks do not increase");
+        } else {
+            report_if_false(shard,
+                            static_cast<int64_t>(memref.marker.marker_value) ==
+                                1 + shard->last_chunk_ordinal_,
+                            "Chunks do not increase monotonically");
+        }
+        shard->last_chunk_ordinal_ = memref.marker.marker_value;
     }
     // Ensure each syscall instruction has a marker immediately afterward.  An
     // asynchronous signal could be delivered after the tracer recorded the syscall
@@ -328,39 +655,49 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         memref.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL) {
         shard->found_syscall_marker_ = true;
+        shard->prev_was_syscall_marker_ = true;
+        shard->last_syscall_marker_value_ = static_cast<int>(memref.marker.marker_value);
+        if (TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALLS, shard->file_type_)) {
+            shard->expect_syscall_trace_ = true;
+        }
         ++shard->syscall_count_;
         // TODO i#5949: For WOW64 instr_is_syscall() always returns false here as it
         // tries to check adjacent instrs; we disable this check until that is solved.
 #if !defined(WINDOWS) || defined(X64)
-        if (shard->prev_instr_decoded_ != nullptr) {
-            report_if_false(shard, instr_is_syscall(shard->prev_instr_decoded_->data),
+        if (shard->prev_instr_.decoding.is_valid()) {
+            report_if_false(shard, shard->prev_instr_.decoding.is_syscall_,
                             "Syscall marker not placed after syscall instruction");
         }
 #endif
-    } else if (TESTANY(OFFLINE_FILE_TYPE_SYSCALL_NUMBERS, shard->file_type_) &&
-               type_is_instr(shard->prev_entry_.instr.type) &&
-               shard->prev_instr_decoded_ != nullptr &&
-               // TODO i#5949: For WOW64 instr_is_syscall() always returns false.
-               instr_is_syscall(shard->prev_instr_decoded_->data) &&
-               // Allow timestamp+cpuid in between.
-               (memref.marker.type != TRACE_TYPE_MARKER ||
-                (memref.marker.marker_type != TRACE_MARKER_TYPE_TIMESTAMP &&
-                 memref.marker.marker_type != TRACE_MARKER_TYPE_CPU_ID))) {
-        report_if_false(shard,
-                        shard->found_syscall_marker_ &&
-                            shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
-                            shard->prev_entry_.marker.marker_type ==
-                                TRACE_MARKER_TYPE_SYSCALL,
-                        "Syscall instruction not followed by syscall marker");
+        shard->expect_syscall_marker_ = false;
+        // TODO i#5949,i#6599: On WOW64 the "syscall" call is delayed by raw2trace
+        // acros the 2nd timestamp+cpuid; we disable this check until that is solved.
+#if !defined(WINDOWS) || defined(X64)
+        // We expect an immediately preceding timestamp + cpuid.
+        if (shard->trace_version_ >= TRACE_ENTRY_VERSION_FREQUENT_TIMESTAMPS) {
+            report_if_false(
+                shard,
+                shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
+                    shard->prev_entry_.marker.marker_type == TRACE_MARKER_TYPE_CPU_ID &&
+                    shard->prev_prev_entry_.marker.type == TRACE_TYPE_MARKER &&
+                    shard->prev_prev_entry_.marker.marker_type ==
+                        TRACE_MARKER_TYPE_TIMESTAMP,
+                "Syscall marker not preceded by timestamp + cpuid");
+        }
+#endif
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         memref.marker.marker_type == TRACE_MARKER_TYPE_MAYBE_BLOCKING_SYSCALL) {
         shard->found_blocking_marker_ = true;
-        report_if_false(shard,
-                        shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
-                            shard->prev_entry_.marker.marker_type ==
-                                TRACE_MARKER_TYPE_SYSCALL,
-                        "Maybe-blocking marker not preceded by syscall marker");
+        report_if_false(
+            shard,
+            (shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
+             shard->prev_entry_.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL) ||
+                // In OFFLINE_FILE_TYPE_ARCH_REGDEPS traces we remove
+                // TRACE_MARKER_TYPE_SYSCALL markers, hence we disable this check for
+                // these traces.
+                TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_),
+            "Maybe-blocking marker not preceded by syscall marker");
     }
 
     // Invariant: each chunk's instruction count must be identical and equal to
@@ -369,18 +706,26 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         memref.marker.marker_type == TRACE_MARKER_TYPE_CHUNK_INSTR_COUNT) {
         shard->chunk_instr_count_ = memref.marker.marker_value;
         report_if_false(shard,
-                        shard->stream == nullptr ||
+                        is_a_unit_test(shard) ||
                             shard->chunk_instr_count_ ==
                                 shard->stream->get_chunk_instr_count(),
                         "Stream interface chunk instr count != trace marker");
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
-        memref.marker.marker_type == TRACE_MARKER_TYPE_CHUNK_FOOTER) {
-        report_if_false(shard,
-                        shard->skipped_instrs_ ||
-                            (shard->chunk_instr_count_ != 0 &&
-                             shard->instr_count_ % shard->chunk_instr_count_ == 0),
-                        "Chunk instruction counts are inconsistent");
+        memref.marker.marker_type == TRACE_MARKER_TYPE_CHUNK_FOOTER &&
+        !is_dynamically_core_sharded(shard)) {
+        report_if_false(
+            shard,
+            // Chunks in kernel trace template files are not defined by any fixed
+            // instr count.
+            TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                    shard->file_type_) ||
+                shard->skipped_instrs_ ||
+                (shard->chunk_instr_count_ != 0 &&
+                 (shard->instr_count_ - shard->dyn_injected_syscall_instr_count_) %
+                         shard->chunk_instr_count_ ==
+                     0),
+            "Chunk instruction counts are inconsistent");
     }
 
     // Invariant: a function marker should not appear between an instruction and its
@@ -396,25 +741,221 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                         "Function marker misplaced between instr and memref");
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
-        memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_ID) {
-        shard->prev_func_id_ = memref.marker.marker_value;
+        memref.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL_TRACE_START) {
+        report_if_false(shard,
+                        TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALLS |
+                                    OFFLINE_FILE_TYPE_KERNEL_SYSCALL_INSTR_ONLY |
+                                    OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                                shard->file_type_),
+                        "Found kernel syscall trace without corresponding file type");
+        report_if_false(shard, !shard->between_kernel_syscall_trace_markers_,
+                        "Nested kernel syscall traces are not expected");
+        report_if_false(shard,
+                        TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_IFILTERED |
+                                    OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                                shard->file_type_) ||
+                            shard->syscall_trace_num_after_last_userspace_instr_ == -1,
+                        "Found multiple syscall traces after a user-space instr");
+        // Need to reset to disable the PC continuity check for syscall trace template
+        // files where we do have consecutive syscall traces without any intervening
+        // user-space instr.
+        shard->prev_kernel_end_branch_target_ = 0;
+        // PT kernel syscall traces are inserted at the TRACE_MARKER_TYPE_SYSCALL_IDX
+        // marker. The marker is deliberately added to the trace in the post-syscall
+        // callback to ensure it is emitted together with the actual PT trace and not
+        // before. If a signal interrupts the syscall, the
+        // TRACE_MARKER_TYPE_SYSCALL_IDX marker may separate away from the
+        // TRACE_MARKER_TYPE_SYSCALL marker.
+        // TODO i#5505: This case needs more thought. Do we pause PT tracing on entry
+        // to the signal handler? Do we discard the PT trace collected until then?
+        if (!TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES |
+                         OFFLINE_FILE_TYPE_KERNEL_SYSCALL_INSTR_ONLY,
+                     shard->file_type_)) {
+            report_if_false(shard, prev_was_syscall_marker_saved,
+                            "System call trace found without prior syscall marker or "
+                            "unexpected intervening records");
+            report_if_false(shard,
+                            shard->last_syscall_marker_value_ ==
+                                static_cast<int>(memref.marker.marker_value),
+                            "Mismatching syscall num in trace start and syscall marker");
+            report_if_false(shard,
+                            !TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, shard->file_type_) ||
+                                shard->prev_instr_.decoding.is_syscall_,
+                            "prev_instr at syscall trace start is not a syscall");
+        }
+        shard->pre_syscall_trace_instr_ = shard->prev_instr_;
+        shard->between_kernel_syscall_trace_markers_ = true;
+#ifdef UNIX
+        shard->signal_stack_depth_at_syscall_trace_start_ = shard->signal_stack_.size();
+#endif
+        shard->saw_syscall_trace_.insert(static_cast<int>(memref.marker.marker_value));
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_SYSCALL_TRACE_END) {
+        shard->expect_syscall_trace_ = false;
+        report_if_false(shard, shard->between_kernel_syscall_trace_markers_,
+                        "Found kernel syscall trace end without start");
+        if (!TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                     shard->file_type_)) {
+            report_if_false(shard,
+                            shard->last_syscall_marker_value_ ==
+                                static_cast<int>(memref.marker.marker_value),
+                            "Mismatching syscall num in trace end and syscall marker");
+            // Syscall trace templates do not have any user-space instr.
+            shard->syscall_trace_num_after_last_userspace_instr_ =
+                static_cast<int>(memref.marker.marker_value);
+        }
+        // TODO i#5505: Ideally the last instruction in the system call PT trace
+        // also would be an indirect CTI with a TRACE_MARKER_TYPE_BRANCH_TARGET
+        // marker pointing to the next user-space instr. But, as also mentioned
+        // in the comment in ir2trace.cpp, there are noise instructions at the
+        // end of the PT traces that don't allow us to add that check yet.
+        if (!TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_INSTR_ONLY, shard->file_type_)) {
+            // E.g., iret/sysret/sysexit for x86, and eret for aarch64.
+            report_if_false(
+                shard,
+                type_is_instr_branch(shard->prev_instr_.memref.instr.type) &&
+                    !type_is_instr_direct_branch(shard->prev_instr_.memref.instr.type),
+                "System call trace does not end with indirect branch");
+            // When we reach the next user-space instr, we check its PC equality with
+            // the value specified in the field below.
+            shard->prev_kernel_end_branch_target_ =
+                shard->prev_instr_.memref.instr.indirect_branch_target;
+        }
+        // Various actions are guarded by the following if-condition to avoid noise from
+        // multiple invariant checks due to the same reason (a missing start marker).
+        if (shard->between_kernel_syscall_trace_markers_) {
+#ifdef UNIX
+            report_if_false(shard,
+                            shard->signal_stack_depth_at_syscall_trace_start_ ==
+                                static_cast<int>(shard->signal_stack_.size()),
+                            "Syscall trace has extra kernel_event marker");
+            shard->signal_stack_depth_at_syscall_trace_start_ = -1;
+#endif
+            shard->between_kernel_syscall_trace_markers_ = false;
+            // Pretend the prev instruction to be the last user-space instruction,
+            // so that later PC continuity checks properly verify the user-space view
+            // of the trace.
+            // PC equality between the syscall-end branch target marker value and the
+            // next instruction PC (or the next kernel_event marker PC if a signal is
+            // next) is also verified in check_for_pc_discontinuity.
+            shard->prev_instr_ = shard->pre_syscall_trace_instr_;
+#ifdef UNIX
+            shard->last_instr_in_cur_context_ = shard->pre_syscall_trace_instr_;
+#endif
+        }
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_CONTEXT_SWITCH_START) {
+        report_if_false(shard, !shard->between_kernel_context_switch_markers_,
+                        "Nested kernel context switch traces are not expected");
+        shard->between_kernel_context_switch_markers_ = true;
+#ifdef UNIX
+        shard->signal_stack_depth_at_context_switch_trace_start_ =
+            shard->signal_stack_.size();
+#endif
+        switch_type_t switch_type =
+            static_cast<switch_type_t>(memref.marker.marker_value);
+        report_if_false(shard,
+                        switch_type > switch_type_t::SWITCH_INVALID &&
+                            switch_type <= switch_type_t::SWITCH_LAST_VALID_ENUM,
+                        "Invalid switch type");
+        shard->saw_switch_trace_.insert(switch_type);
+        // Need to reset to disable the PC continuity check for context switch trace
+        // template files where we do have consecutive switch traces without any
+        // intervening user-space instr.
+        shard->prev_kernel_end_branch_target_ = 0;
+    }
+    if (memref.marker.type == TRACE_TYPE_MARKER &&
+        memref.marker.marker_type == TRACE_MARKER_TYPE_CONTEXT_SWITCH_END) {
+        report_if_false(shard, shard->between_kernel_context_switch_markers_,
+                        "Found kernel context switch trace end without start");
+#ifdef UNIX
+        if (shard->between_kernel_context_switch_markers_) {
+            // Protected by above if-condition to avoid noise from another invariant
+            // error due to a missing start marker.
+            report_if_false(shard,
+                            shard->signal_stack_depth_at_context_switch_trace_start_ ==
+                                static_cast<int>(shard->signal_stack_.size()),
+                            "Context switch trace has extra kernel_event marker");
+        }
+        shard->signal_stack_depth_at_context_switch_trace_start_ = -1;
+#endif
+        report_if_false(
+            shard,
+            type_is_instr_branch(shard->prev_instr_.memref.instr.type) &&
+                !type_is_instr_direct_branch(shard->prev_instr_.memref.instr.type),
+            "Switch trace does not end with indirect branch");
+        // When we reach the next user-space instr, we check its PC equality with
+        // the value specified in the field below.
+        shard->prev_kernel_end_branch_target_ =
+            shard->prev_instr_.memref.instr.indirect_branch_target;
+
+        shard->between_kernel_context_switch_markers_ = false;
+#ifdef UNIX
+        // Forget any prior instruction existed, because this is a core-sharded
+        // trace and now we're going to see instructions from the new context.
+        // Other state was reset at reset_at_context_switch when we saw the
+        // TRACE_MARKER_TYPE_CONTEXT_SWITCH_START.
+        shard->last_instr_in_cur_context_ = {};
+#endif
+    }
+    if (!is_a_unit_test(shard)) {
+        report_if_false(shard,
+                        (shard->between_kernel_syscall_trace_markers_ ||
+                         shard->between_kernel_context_switch_markers_) ==
+                            shard->stream->is_record_kernel(),
+                        "Stream is_record_kernel() inaccurate");
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         marker_type_is_function_marker(memref.marker.marker_type)) {
+        if (memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_ID) {
+            shard->prev_func_id_ = memref.marker.marker_value;
+        }
+        if (memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_RETADDR &&
+            !shard->retaddr_stack_.empty()) {
+            // Current check does not handle long jump, it may fail if a long
+            // jump is used.
+            report_if_false(shard,
+                            memref.marker.marker_value == shard->retaddr_stack_.top(),
+                            "Function marker retaddr should match prior call");
+        }
+        // Function markers may appear in the beginning of the trace before any
+        // instructions are recorded, i.e. shard->instr_count_ == 0. In other to avoid
+        // false positives, we assume the markers are placed correctly.
+#ifdef UNIX
         report_if_false(
             shard,
             shard->prev_func_id_ >=
                     static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) ||
-                type_is_instr_branch(shard->prev_instr_.instr.type),
+                type_is_instr_branch(shard->prev_instr_.memref.instr.type) ||
+                shard->instr_count_ == 0 ||
+                (shard->prev_xfer_marker_.marker.marker_type ==
+                     TRACE_MARKER_TYPE_KERNEL_XFER &&
+                 (
+                     // The last instruction is not known if the signal arrived before any
+                     // instructions in the trace, or the trace started mid-signal. We
+                     // assume the function markers are correct to avoid false positives.
+                     shard->last_signal_context_.pre_signal_instr.memref.instr.addr ==
+                         0 ||
+                     // The last instruction of the outer-most scope was a branch.
+                     type_is_instr_branch(
+                         shard->last_instr_in_cur_context_.memref.instr.type))),
             "Function marker should be after a branch");
-    }
-    if (memref.marker.type == TRACE_TYPE_MARKER &&
-        memref.marker.marker_type == TRACE_MARKER_TYPE_FUNC_RETADDR) {
-        report_if_false(shard, memref.marker.marker_value == shard->last_retaddr_,
-                        "Function marker retaddr should match prior call");
+#else
+        report_if_false(
+            shard,
+            shard->prev_func_id_ >=
+                    static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) ||
+                type_is_instr_branch(shard->prev_instr_.memref.instr.type) ||
+                shard->instr_count_ == 0,
+            "Function marker should be after a branch");
+#endif
     }
 
     if (memref.exit.type == TRACE_TYPE_THREAD_EXIT) {
+        shard->saw_thread_exit_ = true;
+        shard->verify_next_thread_exit_ = false;
         report_if_false(shard,
                         !TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_IFILTERED,
                                  shard->file_type_) ||
@@ -422,12 +963,12 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                         "Missing instr count markers");
         report_if_false(shard,
                         shard->found_cache_line_size_marker_ ||
-                            (shard->skipped_instrs_ && shard->stream != nullptr &&
+                            (shard->skipped_instrs_ && !is_a_unit_test(shard) &&
                              shard->stream->get_cache_line_size() > 0),
                         "Missing cache line marker");
         report_if_false(shard,
                         shard->found_page_size_marker_ ||
-                            (shard->skipped_instrs_ && shard->stream != nullptr &&
+                            (shard->skipped_instrs_ && !is_a_unit_test(shard) &&
                              shard->stream->get_page_size() > 0),
                         "Missing page size marker");
         report_if_false(
@@ -455,6 +996,16 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
             report_if_false(shard, shard->last_instr_count_marker_ == ASM_INSTR_COUNT,
                             "Incorrect instr count marker value");
         }
+        if (!TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_IFILTERED |
+                         OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                     shard->file_type_)) {
+            report_if_false(
+                shard,
+                type_is_instr(shard->prev_instr_.memref.instr.type) ||
+                    shard->prev_instr_.memref.instr.type == TRACE_TYPE_PREFETCH_INSTR ||
+                    shard->prev_instr_.memref.instr.type == TRACE_TYPE_INSTR_NO_FETCH,
+                "An unfiltered thread should have at least 1 user-space instruction");
+        }
     }
     if (shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
         shard->prev_entry_.marker.marker_type == TRACE_MARKER_TYPE_PHYSICAL_ADDRESS) {
@@ -475,19 +1026,100 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
     if (type_is_instr(memref.instr.type) ||
         memref.instr.type == TRACE_TYPE_PREFETCH_INSTR ||
         memref.instr.type == TRACE_TYPE_INSTR_NO_FETCH) {
-        bool expect_encoding = TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, shard->file_type_);
-        std::unique_ptr<instr_autoclean_t> cur_instr_decoded = nullptr;
+        report_if_false(shard, !shard->verify_next_thread_exit_,
+                        "Expected thread exit after branch-to-zero in syscall trace");
+
+        // We wait until we see an actual non-kernel instruction to reset the following
+        // fields. We cannot do this on seeing the respective TRACE_MARKER_TYPE_*_END
+        // marker because we may need it again if there's a consecutive syscall/switch.
+        if (!shard->between_kernel_syscall_trace_markers_) {
+            shard->pre_syscall_trace_instr_ = {};
+            shard->syscall_trace_num_after_last_userspace_instr_ = -1;
+            report_if_false(shard, !shard->expect_syscall_trace_,
+                            "Missing system call trace");
+        }
+        // We'd prefer to report this error at the syscall instr but it is easier
+        // to wait until here:
+        report_if_false(shard,
+                        !TESTANY(OFFLINE_FILE_TYPE_SYSCALL_NUMBERS, shard->file_type_) ||
+                            !shard->expect_syscall_marker_,
+                        "Syscall marker missing after syscall instruction");
+
+        per_shard_t::instr_info_t cur_instr_info;
+        const bool expect_encoding =
+            TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, shard->file_type_);
         if (expect_encoding) {
-            cur_instr_decoded.reset(new instr_autoclean_t(GLOBAL_DCONTEXT));
-            // TODO i#6006: cache the decoding results, and avoid heap with
-            // instr_noalloc_t instead of instr_autoclean_t.
-            app_pc next_pc = decode_from_copy(
-                GLOBAL_DCONTEXT, const_cast<app_pc>(memref.instr.encoding),
-                reinterpret_cast<app_pc>(memref.instr.addr), cur_instr_decoded->data);
-            if (next_pc == nullptr) {
-                cur_instr_decoded.reset(nullptr);
+            if (shard->decode_cache_ == nullptr &&
+                !init_decode_cache(shard, drcontext_)) {
+                return false;
+            }
+            per_shard_t::decoding_info_t *decode_info;
+            std::string err =
+                shard->decode_cache_->add_decode_info(memref.instr, decode_info);
+            if (!err.empty() && decode_info == nullptr) {
+                shard->error_ = err;
+                return false;
+            }
+            // There may have been an error in decoding, in which case decode_info will
+            // be the default-constructed object (with decode_info->is_valid() == false).
+            // Regardless, we use the returned object, as the defaults allow simplifying
+            // some logic later.
+            // XXX: Perhaps we should record an invariant error if the decoding failed.
+            cur_instr_info.decoding = *decode_info;
+#ifdef X86
+            if (cur_instr_info.decoding.opcode_ == OP_sti)
+                shard->instrs_since_sti = 0;
+            else if (shard->instrs_since_sti >= 0)
+                ++shard->instrs_since_sti;
+#endif
+            if (TESTANY(OFFLINE_FILE_TYPE_SYSCALL_NUMBERS, shard->file_type_) &&
+                cur_instr_info.decoding.is_syscall_)
+                shard->expect_syscall_marker_ = true;
+            if (cur_instr_info.decoding.is_valid() &&
+                !cur_instr_info.decoding.is_predicated_ &&
+                !TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_DFILTERED,
+                         shard->file_type_)) {
+                // Verify the number of read/write records matches the last
+                // operand. Skip D-filtered traces which don't have every load or
+                // store records.
+                report_if_false(
+                    shard,
+                    (shard->expected_read_records_ == 0 ||
+                     // Some prefetches did not have any corresponding
+                     // memory access in system call trace templates
+                     // collected on QEMU.
+                     (shard->between_kernel_syscall_trace_markers_ &&
+                      shard->prev_instr_.decoding.is_prefetch_)) ||
+                        // We cannot check for is_predicated in
+                        // OFFLINE_FILE_TYPE_ARCH_REGDEPS traces (it's always false), so
+                        // we disable this check.
+                        TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_),
+                    "Missing read records");
+                shard->expected_read_records_ = 0;
+                report_if_false(
+                    shard,
+                    shard->expected_write_records_ == 0 ||
+                        // We cannot check for is_predicated in
+                        // OFFLINE_FILE_TYPE_ARCH_REGDEPS traces (it's always false), so
+                        // we disable this check.
+                        TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_),
+                    "Missing write records");
+
+                if (!(shard->between_kernel_syscall_trace_markers_ &&
+                      TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_INSTR_ONLY,
+                              shard->file_type_))) {
+                    shard->expected_read_records_ =
+                        cur_instr_info.decoding.num_memory_read_access_;
+                    shard->expected_write_records_ =
+                        cur_instr_info.decoding.num_memory_write_access_;
+                }
             }
         }
+        // We need to assign the memref variable of cur_instr_info here. The memref
+        // variable is not cached as it can dynamically vary based on data values.
+        cur_instr_info.memref = memref;
+        cur_instr_info.is_kernel_instr = shard->between_kernel_syscall_trace_markers_ ||
+            shard->between_kernel_context_switch_markers_;
         if (knob_verbose_ >= 3) {
             std::cerr << "::" << memref.data.pid << ":" << memref.data.tid << ":: "
                       << " @" << (void *)memref.instr.addr
@@ -502,16 +1134,32 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         if (shard->instrs_until_interrupt_ > 0)
             --shard->instrs_until_interrupt_;
 #endif
-        if (memref.instr.type == TRACE_TYPE_INSTR_DIRECT_CALL ||
-            memref.instr.type == TRACE_TYPE_INSTR_INDIRECT_CALL) {
-            shard->last_retaddr_ = memref.instr.addr + memref.instr.size;
+
+        // retaddr_stack_ is used for verifying invariants related to the function
+        // return markers; these are only user-space.
+        if (!(shard->between_kernel_context_switch_markers_ ||
+              shard->between_kernel_syscall_trace_markers_)) {
+            // Tail calls are non-call CTIs. Even though the tail-called function will
+            // have the usual function markers, we intentionally do not push anything for
+            // tail calls here. The later function return address marker check will simply
+            // reuse the top-of-stack address which is indeed the return address of the
+            // tail call also.
+            if (memref.instr.type == TRACE_TYPE_INSTR_DIRECT_CALL ||
+                memref.instr.type == TRACE_TYPE_INSTR_INDIRECT_CALL) {
+                shard->retaddr_stack_.push(memref.instr.addr + memref.instr.size);
+            }
+            if (memref.instr.type == TRACE_TYPE_INSTR_RETURN) {
+                if (!shard->retaddr_stack_.empty()) {
+                    shard->retaddr_stack_.pop();
+                }
+            }
         }
         // Invariant: offline traces guarantee that a branch target must immediately
         // follow the branch w/ no intervening thread switch.
         // If we did serial analyses only, we'd just track the previous instr in the
         // interleaved stream.  Here we look for headers indicating where an interleaved
         // stream *could* switch threads, so we're stricter than necessary.
-        if (knob_offline_ && type_is_instr_branch(shard->prev_instr_.instr.type)) {
+        if (knob_offline_ && type_is_instr_branch(shard->prev_instr_.memref.instr.type)) {
             report_if_false(
                 shard,
                 !shard->saw_timestamp_but_no_instr_ ||
@@ -521,22 +1169,27 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                     // between prev_instr_ and memref.
                     shard->prev_xfer_marker_.marker.marker_type ==
                         TRACE_MARKER_TYPE_KERNEL_EVENT ||
+                    // Core-sharded traces are exempt for transition back to user-mode.
+                    (core_sharded_ && shard->prev_instr_.is_kernel_instr &&
+                     !(shard->between_kernel_syscall_trace_markers_ ||
+                       shard->between_kernel_context_switch_markers_)) ||
+                    // Syscall and switch template files are exempt for the point
+                    // when a new template starts immediately after the prior template's
+                    // branch.
+                    (TESTANY(OFFLINE_FILE_TYPE_KERNEL_SYSCALL_TRACE_TEMPLATES,
+                             shard->file_type_) &&
+                     shard->prev_kernel_end_branch_target_ == 0) ||
                     // Instruction-filtered are exempted.
                     TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_IFILTERED,
                             shard->file_type_),
                 "Branch target not immediately after branch");
         }
         // Invariant: non-explicit control flow (i.e., kernel-mediated) is indicated
-        // by markers.  Checks are relaxed if a kernel event occurred so prev_instr_
-        // is sufficient for now.
-        // XXX i#5912: For adding checks across every part of a signal handler we
-        // should change this to last_instr_in_cur_context_ and remove/adjust the
-        // check relaxations inside check_for_pc_discontinuity().  We will have to
-        // remove/adjust prev_instr_decoded_ as well as currently it is assumed to
-        // match the prev_instr passed in here.
+        // by markers. We are using prev_instr_ here instead of last_instr_in_cur_context_
+        // because after a signal the interruption and resumption checks are done
+        // elsewhere.
         const std::string non_explicit_flow_violation_msg = check_for_pc_discontinuity(
-            shard, memref, shard->prev_instr_, memref.instr.addr, cur_instr_decoded,
-            expect_encoding,
+            shard, shard->prev_instr_, cur_instr_info, expect_encoding,
             /*at_kernel_event=*/false);
         report_if_false(shard, non_explicit_flow_violation_msg.empty(),
                         non_explicit_flow_violation_msg);
@@ -557,39 +1210,22 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                 memref.instr.addr == shard->last_signal_context_.xfer_int_pc ||
                 // DR hands us a different address for sysenter than the
                 // resumption point.
-                shard->last_signal_context_.pre_signal_instr.instr.type ==
-                    TRACE_TYPE_INSTR_SYSENTER;
-            bool pre_signal_flow_continuity =
-                // Skip pre-signal instr check if there was no such instr. May
-                // happen for nested signals without any intervening instr, and
-                // if the signal arrived before the first instr in the trace.
-                shard->last_signal_context_.pre_signal_instr.instr.addr == 0 ||
-                // Skip pre_signal_instr_ check for signals that caused an rseq
-                // abort. In this case, control is transferred directly to the abort
-                // handler, verified using last_signal_context_.xfer_int_pc above.
-                shard->last_signal_context_.xfer_aborted_rseq ||
-                // Pre-signal instr continued after signal.
-                memref.instr.addr ==
-                    shard->last_signal_context_.pre_signal_instr.instr.addr ||
-                // Asynch will go to the subsequent instr.
-                memref.instr.addr ==
-                    shard->last_signal_context_.pre_signal_instr.instr.addr +
-                        shard->last_signal_context_.pre_signal_instr.instr.size ||
-                // Too hard to figure out branch targets.  We have the
-                // last_signal_context_.xfer_int_pc though.
-                // TODO i#5912: since we have the branch decoding now, we can handle
-                // this case.
-                type_is_instr_branch(
-                    shard->last_signal_context_.pre_signal_instr.instr.type) ||
-                shard->last_signal_context_.pre_signal_instr.instr.type ==
-                    TRACE_TYPE_INSTR_SYSENTER;
+                shard->last_signal_context_.pre_signal_instr.memref.instr.type ==
+                    TRACE_TYPE_INSTR_SYSENTER // clang-format off
+                // The AArch64 scatter/gather expansion test skips faulting
+                // instructions in the signal handler by incrementing the PC.
+                IF_AARCH64(||
+                           (knob_test_name_ == "scattergather" &&
+                            memref.instr.addr ==
+                                shard->last_signal_context_.xfer_int_pc + 4));
+            // clang-format on
             report_if_false(
                 shard,
-                (kernel_event_marker_equality && pre_signal_flow_continuity) ||
+                kernel_event_marker_equality ||
                     // Nested signal.  XXX: This only works for our annotated test
                     // signal_invariants where we know shard->app_handler_pc_.
                     memref.instr.addr == shard->app_handler_pc_ ||
-                    // Marker for rseq abort handler.  Not as unique as a prefetch, but
+                    // Marker for rseq abort handler. Not as unique as a prefetch, but
                     // we need an instruction and not a data type.
                     memref.instr.type == TRACE_TYPE_INSTR_DIRECT_JUMP ||
                     // Instruction-filtered can easily skip the return point.
@@ -602,10 +1238,9 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
         // book-keeping using prev_instr_ on the TRACE_MARKER_TYPE_KERNEL_EVENT marker.
         // E.g. if there was no instr between two nested signals, we do not want to
         // record any pre-signal instr for the second signal.
-        shard->last_instr_in_cur_context_ = memref;
+        shard->last_instr_in_cur_context_ = cur_instr_info;
 #endif
-        shard->prev_instr_ = memref;
-        shard->prev_instr_decoded_ = std::move(cur_instr_decoded);
+        shard->prev_instr_ = cur_instr_info;
         // Clear prev_xfer_marker_ on an instr (not a memref which could come between an
         // instr and a kernel-mediated far-away instr) to ensure it's *immediately*
         // prior (i#3937).
@@ -649,11 +1284,8 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
     }
     if (memref.marker.type == TRACE_TYPE_MARKER &&
         memref.marker.marker_type == TRACE_MARKER_TYPE_CPU_ID) {
-        shard->sched_.emplace_back(shard->tid_, shard->last_timestamp_,
-                                   memref.marker.marker_value, shard->instr_count_);
-        shard->cpu2sched_[memref.marker.marker_value].emplace_back(
-            shard->tid_, shard->last_timestamp_, memref.marker.marker_value,
-            shard->instr_count_);
+        shard->sched_data_.record_cpu_id(shard->tid_, memref.marker.marker_value,
+                                         shard->last_timestamp_, shard->instr_count_);
     }
 
 #ifdef UNIX
@@ -669,16 +1301,44 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                       << "marker type " << memref.marker.marker_type << " value 0x"
                       << std::hex << memref.marker.marker_value << std::dec << "\n";
         }
+        // Zero is pushed as a sentinel. This push matches the return used by post
+        // signal handler to run the restorer code. It is assumed that all signal
+        // handlers return normally and longjmp is not used.
+        if (memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT &&
+            // retaddr_stack_ tracking is only for user-space code where we do
+            // function tracing.
+            !(shard->between_kernel_syscall_trace_markers_ ||
+              shard->between_kernel_context_switch_markers_)) {
+            // If the marker is preceded by an RSEQ ABORT marker, do not push the sentinel
+            // since there will not be a corresponding return.
+            if (shard->prev_entry_.marker.type != TRACE_TYPE_MARKER ||
+                shard->prev_entry_.marker.marker_type != TRACE_MARKER_TYPE_RSEQ_ABORT) {
+                shard->retaddr_stack_.push(0);
+            }
+        }
 #ifdef UNIX
         report_if_false(shard, memref.marker.marker_value != 0,
                         "Kernel event marker value missing");
         if (memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_XFER) {
+            // We expect a proper pairing of TRACE_MARKER_TYPE_KERNEL_EVENT and
+            // TRACE_MARKER_TYPE_KERNEL_XFER markers inside the kernel system call
+            // and context switch traces that are used for trace injection.
+            // XXX: Note that we do not make an effort to add these markers at all
+            // to the PT syscall traces today.
+            report_if_false(shard,
+                            shard->signal_stack_depth_at_syscall_trace_start_ <
+                                static_cast<int>(shard->signal_stack_.size()),
+                            "Syscall trace has extra kernel_xfer marker");
+            report_if_false(shard,
+                            shard->signal_stack_depth_at_context_switch_trace_start_ <
+                                static_cast<int>(shard->signal_stack_.size()),
+                            "Context switch trace has extra kernel_xfer marker");
             // We assume paired signal entry-exit (so no longjmp and no rseq
             // inside signal handlers).
             if (shard->signal_stack_.empty()) {
                 // This can happen if tracing started in the middle of a signal.
                 // Try to continue by skipping the checks.
-                shard->last_signal_context_ = { 0, {}, false };
+                shard->last_signal_context_ = { 0, {} };
                 // We have not seen any instr in the outermost scope that we just
                 // discovered.
                 shard->last_instr_in_cur_context_ = {};
@@ -698,30 +1358,44 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                 shard->last_instr_in_cur_context_ =
                     shard->last_signal_context_.pre_signal_instr;
             }
-        }
-        if (memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT) {
+        } else if (memref.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT) {
             // If preceded by an RSEQ abort marker, this is not really a signal.
             if (shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
                 shard->prev_entry_.marker.marker_type == TRACE_MARKER_TYPE_RSEQ_ABORT) {
                 saw_rseq_abort = true;
             } else {
-                if (type_is_instr(shard->last_instr_in_cur_context_.instr.type) &&
+                if (type_is_instr(shard->last_instr_in_cur_context_.memref.instr.type) &&
                     !shard->saw_rseq_abort_ &&
                     // XXX i#3937: Online traces do not place signal markers properly,
                     // so we can't precisely check for continuity there.
                     knob_offline_) {
+                    per_shard_t::instr_info_t memref_info;
+                    memref_info.memref = memref;
                     // Ensure no discontinuity between a prior instr and the interrupted
                     // PC, for non-rseq signals where we have the interrupted PC.
                     const std::string discontinuity = check_for_pc_discontinuity(
-                        shard, memref, shard->last_instr_in_cur_context_,
-                        memref.marker.marker_value, nullptr,
+                        shard, shard->last_instr_in_cur_context_, memref_info,
                         TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, shard->file_type_),
                         /*at_kernel_event=*/true);
-                    report_if_false(shard, discontinuity.empty(), discontinuity);
+                    const std::string error_msg_suffix = " @ kernel_event marker";
+                    report_if_false(shard, discontinuity.empty(),
+                                    discontinuity + error_msg_suffix);
+                } else if (shard->prev_kernel_end_branch_target_ != 0 &&
+                           !type_is_instr(
+                               shard->last_instr_in_cur_context_.memref.instr.type)) {
+                    // If we skipped the pc continuity checks because there was no prior
+                    // instruction in the same context, we still want to verify that
+                    // the branch target marker at the last injected syscall trace was
+                    // set correctly to the next instruction's pc.
+                    report_if_false(shard,
+                                    shard->prev_kernel_end_branch_target_ ==
+                                        memref.marker.marker_value,
+                                    "Kernel trace-end branch marker does not match "
+                                    "context-first kernel_event marker");
+                    shard->prev_kernel_end_branch_target_ = 0;
                 }
-                shard->signal_stack_.push({ memref.marker.marker_value,
-                                            shard->last_instr_in_cur_context_,
-                                            shard->saw_rseq_abort_ });
+                shard->signal_stack_.push(
+                    { memref.marker.marker_value, shard->last_instr_in_cur_context_ });
                 // XXX: if last_instr_in_cur_context_ is {} currently, it means this is
                 // either a signal that arrived before the first instr in the trace, or
                 // it's a nested signal without any intervening instr after its
@@ -764,9 +1438,14 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
             if (!type_is_instr_direct_branch(memref.instr.type)) {
                 is_indirect = true;
                 report_if_false(shard,
-                                // We assume the app doesn't actually target PC=0.
-                                memref.instr.indirect_branch_target != 0,
+                                shard->between_kernel_syscall_trace_markers_ ||
+                                    // We assume the app doesn't actually target PC=0.
+                                    memref.instr.indirect_branch_target != 0,
                                 "Indirect branches must contain targets");
+                if (memref.instr.indirect_branch_target == 0 &&
+                    shard->between_kernel_syscall_trace_markers_) {
+                    shard->verify_next_thread_exit_ = true;
+                }
             }
         }
         if (type_is_instr(memref.instr.type) && !is_indirect) {
@@ -790,11 +1469,63 @@ invariant_checker_t::parallel_shard_memref(void *shard_data, const memref_t &mem
                 memref.marker.marker_type == TRACE_MARKER_TYPE_CPU_ID))) {
         shard->saw_rseq_abort_ = false;
     }
-    shard->prev_prev_entry_ = shard->prev_entry_;
 #endif
+    shard->prev_prev_entry_ = shard->prev_entry_;
     shard->prev_entry_ = memref;
     if (type_is_instr_branch(shard->prev_entry_.instr.type))
         shard->last_branch_ = shard->prev_entry_;
+
+    if (type_is_data(memref.data.type) && shard->prev_instr_.decoding.is_valid()) {
+        // If the instruction is predicated, the check is skipped since we do
+        // not have the data to determine how many memory accesses to expect.
+        if (!shard->prev_instr_.decoding.is_predicated_ &&
+            !TESTANY(OFFLINE_FILE_TYPE_FILTERED | OFFLINE_FILE_TYPE_DFILTERED,
+                     shard->file_type_)) {
+            if (type_is_read(memref.data.type)) {
+                // Skip D-filtered traces which don't have every load or store records.
+                report_if_false(
+                    shard,
+                    shard->expected_read_records_ >
+                        0 IF_X86(|| relax_expected_read_count_check_for_kernel(shard)),
+                    "Too many read records");
+                if (shard->expected_read_records_ > 0 &&
+                    // We cannot decrease the shard->expected_read_records_ counter in
+                    // OFFLINE_FILE_TYPE_ARCH_REGDEPS traces because we cannot determine
+                    // the exact number of loads a DR_ISA_REGDEPS instruction performs.
+                    // If a DR_ISA_REGDEPS instruction has a DR_INSTR_CATEGORY_LOAD among
+                    // its categories, we simply set
+                    // cur_instr_info.decoding.num_memory_read_access_ to 1. We rely on
+                    // the next instruction to re-set shard->expected_read_records_
+                    // accordingly.
+                    !TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_)) {
+                    shard->expected_read_records_--;
+                }
+            } else {
+                // Skip D-filtered traces which don't have every load or store records.
+                report_if_false(
+                    shard,
+                    shard->expected_write_records_ >
+                        0 IF_X86(|| relax_expected_write_count_check_for_kernel(shard)),
+                    "Too many write records");
+                if (shard->expected_write_records_ > 0 &&
+                    // We cannot decrease the shard->expected_write_records_ counter in
+                    // OFFLINE_FILE_TYPE_ARCH_REGDEPS traces because we cannot determine
+                    // the exact number of stores a DR_ISA_REGDEPS instruction performs.
+                    // If a DR_ISA_REGDEPS instruction has a DR_INSTR_CATEGORY_STORE among
+                    // its categories, we simply set
+                    // cur_instr_info.decoding.num_memory_write_access_ to 1. We rely on
+                    // the next instruction to re-set shard->expected_write_records_
+                    // accordingly.
+                    !TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_)) {
+                    shard->expected_write_records_--;
+                }
+            }
+        }
+    }
+    // Run additional checks for OFFLINE_FILE_TYPE_ARCH_REGDEPS traces.
+    if (TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_))
+        check_regdeps_invariants(shard, memref);
+
     return true;
 }
 
@@ -802,12 +1533,15 @@ bool
 invariant_checker_t::process_memref(const memref_t &memref)
 {
     per_shard_t *per_shard;
-    const auto &lookup = shard_map_.find(memref.data.tid);
+    int shard_index = serial_stream_->get_shard_index();
+    const auto &lookup = shard_map_.find(shard_index);
     if (lookup == shard_map_.end()) {
         auto per_shard_unique = std::unique_ptr<per_shard_t>(new per_shard_t);
         per_shard = per_shard_unique.get();
         per_shard->stream = serial_stream_;
-        shard_map_[memref.data.tid] = std::move(per_shard_unique);
+        per_shard->tid_ = serial_stream_->get_tid();
+        per_shard->last_next_trace_pc_ = serial_stream_->get_next_trace_pc();
+        shard_map_[shard_index] = std::move(per_shard_unique);
     } else
         per_shard = lookup->second.get();
     if (!parallel_shard_memref(reinterpret_cast<void *>(per_shard), memref)) {
@@ -820,7 +1554,8 @@ invariant_checker_t::process_memref(const memref_t &memref)
 void
 invariant_checker_t::check_schedule_data(per_shard_t *global)
 {
-    if (serial_schedule_file_ == nullptr && cpu_schedule_file_ == nullptr)
+    if (dynamic_syscall_trace_injection_ ||
+        (serial_schedule_file_ == nullptr && cpu_schedule_file_ == nullptr))
         return;
     // Check that the scheduling data in the files written by raw2trace match
     // the data in the trace.
@@ -828,96 +1563,101 @@ invariant_checker_t::check_schedule_data(per_shard_t *global)
     auto stream = std::unique_ptr<memtrace_stream_t>(
         new default_memtrace_stream_t(&global->ref_count_));
     global->stream = stream.get();
-    std::vector<schedule_entry_t> serial;
-    std::unordered_map<uint64_t, std::vector<schedule_entry_t>> cpu2sched;
+
+    std::string err;
+    schedule_file_t sched;
     for (auto &shard_keyval : shard_map_) {
-        serial.insert(serial.end(), shard_keyval.second->sched_.begin(),
-                      shard_keyval.second->sched_.end());
-        for (auto &keyval : shard_keyval.second->cpu2sched_) {
-            auto &vec = cpu2sched[keyval.first];
-            vec.insert(vec.end(), keyval.second.begin(), keyval.second.end());
+        err = sched.merge_shard_data(shard_keyval.second->sched_data_);
+        if (!err.empty()) {
+            report_if_false(global, false, "Failed to merge schedule data: " + err);
+            return;
         }
     }
-    auto schedule_entry_comparator = [](const schedule_entry_t &l,
-                                        const schedule_entry_t &r) {
-        if (l.timestamp != r.timestamp)
-            return l.timestamp < r.timestamp;
-        if (l.cpu != r.cpu)
-            return l.cpu < r.cpu;
-        // We really need to sort by either (timestamp, cpu_id) or
-        // (timestamp, thread_id): a single thread cannot be on two CPUs at
-        // the same timestamp; also a single CPU cannot have two threads at the
-        // same timestamp. We still sort by (timestamp, cpu_id, thread_id)
-        // to prevent inadvertent issues with test data.
-        return l.thread < r.thread;
-    };
-    std::sort(serial.begin(), serial.end(), schedule_entry_comparator);
-    // For entries with the same timestamp, the order can differ.  We could
-    // identify each such sequence and collect it into a set but it is simpler to
-    // read the whole file and sort it the same way.
     if (serial_schedule_file_ != nullptr) {
-        schedule_entry_t next(0, 0, 0, 0);
-        std::vector<schedule_entry_t> serial_file;
-        while (
-            serial_schedule_file_->read(reinterpret_cast<char *>(&next), sizeof(next))) {
-            serial_file.push_back(next);
+        const std::vector<schedule_entry_t> &serial = sched.get_full_serial_records();
+        const std::vector<schedule_entry_t> &serial_redux = sched.get_serial_records();
+        // For entries with the same timestamp, the order can differ.  We could
+        // identify each such sequence and collect it into a set but it is simpler to
+        // read the whole file and sort it the same way.
+        schedule_file_t serial_reader;
+        err = serial_reader.read_serial_file(serial_schedule_file_);
+        if (!err.empty()) {
+            report_if_false(global, false, "Failed to read serial schedule file: " + err);
+            return;
         }
-        std::sort(serial_file.begin(), serial_file.end(), schedule_entry_comparator);
+        const std::vector<schedule_entry_t> &serial_file =
+            serial_reader.get_full_serial_records();
         if (knob_verbose_ >= 1) {
             std::cerr << "Serial schedule: read " << serial_file.size()
                       << " records from the file and observed " << serial.size()
-                      << " transition in the trace\n";
+                      << " transitions in the trace\n";
         }
-        report_if_false(global, serial_file.size() == serial.size(),
-                        "Serial schedule entry count does not match trace");
-        for (int i = 0; i < static_cast<int>(serial.size()) &&
+        // We created both types of schedule and select which to compare against.
+        const std::vector<schedule_entry_t> *tomatch;
+        if (serial_file.size() == serial.size())
+            tomatch = &serial;
+        else if (serial_file.size() == serial_redux.size())
+            tomatch = &serial_redux;
+        else {
+            report_if_false(global, core_sharded_,
+                            "Serial schedule entry count does not match trace");
+            return;
+        }
+        for (int i = 0; i < static_cast<int>(tomatch->size()) &&
              i < static_cast<int>(serial_file.size());
              ++i) {
             global->ref_count_ = serial_file[i].start_instruction;
             global->tid_ = serial_file[i].thread;
             if (knob_verbose_ >= 1) {
-                std::cerr << "Saw T" << serial[i].thread << " on " << serial[i].cpu
-                          << " @" << serial[i].timestamp << " "
-                          << serial[i].start_instruction << " vs file T"
+                std::cerr << "Saw T" << (*tomatch)[i].thread << " on "
+                          << (*tomatch)[i].cpu << " @" << (*tomatch)[i].timestamp << " "
+                          << (*tomatch)[i].start_instruction << " vs file T"
                           << serial_file[i].thread << " on " << serial_file[i].cpu << " @"
                           << serial_file[i].timestamp << " "
                           << serial_file[i].start_instruction << "\n";
             }
-            report_if_false(global,
-                            memcmp(&serial[i], &serial_file[i], sizeof(serial[i])) == 0,
-                            "Serial schedule entry does not match trace");
+            report_if_false(
+                global,
+                memcmp(&(*tomatch)[i], &serial_file[i], sizeof((*tomatch)[i])) == 0,
+                "Serial schedule entry does not match trace");
         }
     }
     if (cpu_schedule_file_ == nullptr)
         return;
-    for (auto &keyval : cpu2sched) {
-        std::sort(keyval.second.begin(), keyval.second.end(), schedule_entry_comparator);
+
+    const std::unordered_map<uint64_t, std::vector<schedule_entry_t>> &cpu2sched =
+        sched.get_full_cpu_records();
+    const std::unordered_map<uint64_t, std::vector<schedule_entry_t>> &cpu2sched_redux =
+        sched.get_cpu_records();
+    schedule_file_t cpu_reader;
+    err = cpu_reader.read_cpu_file(cpu_schedule_file_);
+    if (!err.empty()) {
+        report_if_false(global, false, "Failed to read cpu schedule file: " + err);
+        return;
     }
-    // The zipfile reader will form a continuous stream from all elements in the
-    // archive.  We figure out which cpu each one is from on the fly.
-    std::unordered_map<uint64_t, std::vector<schedule_entry_t>> cpu2sched_file;
-    schedule_entry_t next(0, 0, 0, 0);
-    while (cpu_schedule_file_->read(reinterpret_cast<char *>(&next), sizeof(next))) {
-        cpu2sched_file[next.cpu].push_back(next);
-    }
-    for (auto &keyval : cpu2sched_file) {
-        std::sort(keyval.second.begin(), keyval.second.end(),
-                  [](const schedule_entry_t &l, const schedule_entry_t &r) {
-                      if (l.timestamp == r.timestamp)
-                          return l.thread < r.thread;
-                      return l.timestamp < r.timestamp;
-                  });
-        report_if_false(global, keyval.second.size() == cpu2sched[keyval.first].size(),
-                        "Cpu schedule entry count does not match trace");
-        for (int i = 0; i < static_cast<int>(cpu2sched[keyval.first].size()) &&
+    const std::unordered_map<uint64_t, std::vector<schedule_entry_t>> &cpu2sched_file =
+        cpu_reader.get_full_cpu_records();
+    for (const auto &keyval : cpu2sched_file) {
+        const std::vector<schedule_entry_t> *tomatch;
+        if (keyval.second.size() == cpu2sched.find(keyval.first)->second.size())
+            tomatch = &cpu2sched.find(keyval.first)->second;
+        else if (keyval.second.size() ==
+                 cpu2sched_redux.find(keyval.first)->second.size())
+            tomatch = &cpu2sched_redux.find(keyval.first)->second;
+        else {
+            report_if_false(global, false,
+                            "Cpu schedule entry count does not match trace");
+            return;
+        }
+        for (int i = 0; i < static_cast<int>(tomatch->size()) &&
              i < static_cast<int>(keyval.second.size());
              ++i) {
             global->ref_count_ = keyval.second[i].start_instruction;
             global->tid_ = keyval.second[i].thread;
-            report_if_false(global,
-                            memcmp(&cpu2sched[keyval.first][i], &keyval.second[i],
-                                   sizeof(keyval.second[i])) == 0,
-                            "Cpu schedule entry does not match trace");
+            report_if_false(
+                global,
+                memcmp(&(*tomatch)[i], &keyval.second[i], sizeof(keyval.second[i])) == 0,
+                "Cpu schedule entry does not match trace");
         }
     }
 }
@@ -925,54 +1665,84 @@ invariant_checker_t::check_schedule_data(per_shard_t *global)
 bool
 invariant_checker_t::print_results()
 {
+    if (serial_stream_ != nullptr) {
+        for (const auto &keyval : shard_map_) {
+            parallel_shard_exit(keyval.second.get());
+        }
+    }
     per_shard_t global;
     check_schedule_data(&global);
-    std::cerr << "Trace invariant checks passed\n";
+    uint64_t total_error_count = global.error_count_;
+    if (!abort_on_invariant_error_) {
+        for (const auto &keyval : shard_map_) {
+            total_error_count += keyval.second->error_count_;
+        }
+    }
+    if (total_error_count == 0) {
+        std::cerr << "Trace invariant checks passed\n";
+    } else {
+        // XXX: Should the invariant checker cause an abort on finding invariant
+        // errors? In some cases it's useful: unit tests where we want to fail
+        // where the collected trace has invariant errors. This is currently
+        // supported by the default setting of -abort_on_invariant_error which
+        // aborts on finding the very first invariant error. In other cases,
+        // aborting may not be appropriate as the invariant checker indeed
+        // successfully did what it was supposed to (find/count invariant errors),
+        // and there may be other tools that are running too; perhaps aborting
+        // should be reserved only for cases when there's some internal fatal error
+        // in the framework or the tool that cannot be recovered from. OTOH aborting,
+        // even if at the end after finding all invariant errors, may be useful
+        // to highlight that there were invariant errors in the trace. For now
+        // we do not fail or return an error exit code on
+        // -no_abort_on_invariant_error even if some invariant errors were found.
+        std::cerr << "Found " << total_error_count << " invariant errors\n";
+    }
+    if (!shard_map_.empty()) {
+        uint64_t filetype = shard_map_.begin()->second->file_type_;
+        if (TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, filetype)) {
+            std::cerr << "WARNING: invariant_checker is being run on an "
+                         "OFFLINE_FILE_TYPE_ARCH_REGDEPS trace.\nSome invariant checks "
+                         "have been disabled.\n";
+        }
+    }
     return true;
 }
 
 std::string
 invariant_checker_t::check_for_pc_discontinuity(
-    per_shard_t *shard, const memref_t &memref, const memref_t &prev_instr, addr_t cur_pc,
-    const std::unique_ptr<instr_autoclean_t> &cur_instr_decoded, bool expect_encoding,
+    per_shard_t *shard, const per_shard_t::instr_info_t &prev_instr_info,
+    const per_shard_t::instr_info_t &cur_memref_info, bool expect_encoding,
     bool at_kernel_event)
 {
+    const memref_t prev_instr = prev_instr_info.memref;
     std::string error_msg = "";
     bool have_branch_target = false;
     addr_t branch_target = 0;
     const addr_t prev_instr_trace_pc = prev_instr.instr.addr;
-    if (prev_instr_trace_pc == 0 /*first*/)
-        return "";
+    // cur_memref_info is a marker (not an instruction) if at_kernel_event is true.
+    const addr_t cur_pc = at_kernel_event ? cur_memref_info.memref.marker.marker_value
+                                          : cur_memref_info.memref.instr.addr;
+    if (shard->prev_kernel_end_branch_target_ != 0) {
+        const addr_t kernel_end_branch_target = shard->prev_kernel_end_branch_target_;
+        shard->prev_kernel_end_branch_target_ = 0;
+        if (kernel_end_branch_target != cur_pc)
+            // We want the check for PC continuity of cur_pc to take precedence
+            // over this, so later code may overwrite error_msg.
+            error_msg = "Kernel trace-end branch marker does not match next pc";
+    }
+    if (prev_instr_trace_pc == 0 /*first*/) {
+        return error_msg;
+    }
     // We do not bother to support legacy traces without encodings.
     if (expect_encoding && type_is_instr_direct_branch(prev_instr.instr.type)) {
-        if (prev_instr.instr.encoding_is_new)
-            shard->branch_target_cache.erase(prev_instr_trace_pc);
-        auto cached = shard->branch_target_cache.find(prev_instr_trace_pc);
-        if (cached != shard->branch_target_cache.end()) {
-            have_branch_target = true;
-            branch_target = cached->second;
+        if (!prev_instr_info.decoding.is_valid()) {
+            // Neither condition should happen but they could on an invalid
+            // encoding from raw2trace or the reader so we report an
+            // invariant rather than asserting.
+            report_if_false(shard, false, "Branch target is not decodeable");
         } else {
-            // TODO i#5912: This prev_instr_decoded_ isn't always the same as the
-            // decoding of the passed-in prev_instr, for signals.  What we should do is
-            // create a new instr_info_t struct with fields for the memref_t plus the
-            // from-decoding attributes is_syscall, writes_memory, and branch_target, and
-            // fill it in at decode time.  We can then store it as prev_instr_ and in
-            // pre_signal_instr and last_instr_in_cur_context_ and pass it here as
-            // prev_instr.  We can then delete this branch_target_cache and
-            // prev_instr_decoded_.  For now we live with this inaccuracy as it is
-            // rare to not match and we leave the cleanup for i#5912.
-            if (shard->prev_instr_decoded_ == nullptr ||
-                !opnd_is_pc(instr_get_target(shard->prev_instr_decoded_->data))) {
-                // Neither condition should happen but they could on an invalid
-                // encoding from raw2trace or the reader so we report an
-                // invariant rather than asserting.
-                report_if_false(shard, false, "Branch target is not decodeable");
-            } else {
-                have_branch_target = true;
-                branch_target = reinterpret_cast<addr_t>(
-                    opnd_get_pc(instr_get_target(shard->prev_instr_decoded_->data)));
-                shard->branch_target_cache[prev_instr_trace_pc] = branch_target;
-            }
+            have_branch_target = true;
+            branch_target = prev_instr_info.decoding.branch_target_;
         }
     }
     // Check for all valid transitions except taken branches. We consider taken
@@ -987,28 +1757,60 @@ invariant_checker_t::check_for_pc_discontinuity(
                 shard->file_type_) ||
         // Regular fall-through.
         (fall_through_allowed && prev_instr_trace_pc + prev_instr.instr.size == cur_pc) ||
+        // First instr of kernel system call trace.
+        (shard->between_kernel_syscall_trace_markers_ &&
+         (shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
+          shard->prev_entry_.marker.marker_type ==
+              TRACE_MARKER_TYPE_SYSCALL_TRACE_START)) ||
+        // First instr of kernel context switch trace.
+        (shard->between_kernel_context_switch_markers_ &&
+         (shard->prev_entry_.marker.type == TRACE_TYPE_MARKER &&
+          shard->prev_entry_.marker.marker_type ==
+              TRACE_MARKER_TYPE_CONTEXT_SWITCH_START)) ||
         // String loop.
         (prev_instr_trace_pc == cur_pc &&
-         (memref.instr.type == TRACE_TYPE_INSTR_NO_FETCH ||
+         (cur_memref_info.memref.instr.type == TRACE_TYPE_INSTR_NO_FETCH ||
           // Online incorrectly marks the 1st string instr across a thread
-          // switch as fetched.
+          // switch as fetched.  We no longer emit timestamps in pipe splits so
+          // we can't use saw_timestamp_but_no_instr_.  We can't just check for
+          // prev_instr.instr_type being no-fetch as the prev might have been
+          // a single instance, which is fetched.  We check the sizes for now.
           // TODO i#4915, #4948: Eliminate non-fetched and remove the
           // underlying instrs altogether, which would fix this for us.
-          (!knob_offline_ && shard->saw_timestamp_but_no_instr_))) ||
+          (!knob_offline_ &&
+           cur_memref_info.memref.instr.size == prev_instr.instr.size))) ||
         // Same PC is allowed for a kernel interruption which may restart the
         // same instruction.
         (prev_instr_trace_pc == cur_pc && at_kernel_event) ||
         // Kernel-mediated, but we can't tell if we had a thread swap.
-        // TODO i#5912: Isn't this relaxation too loose since we really only want
-        // to relax if a kernel event happened immediately prior, while prev_xfer_marker_
-        // could be many records back?
         (shard->prev_xfer_marker_.instr.tid != 0 && !at_kernel_event &&
          (shard->prev_xfer_marker_.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_EVENT ||
           shard->prev_xfer_marker_.marker.marker_type == TRACE_MARKER_TYPE_KERNEL_XFER ||
           shard->prev_xfer_marker_.marker.marker_type == TRACE_MARKER_TYPE_RSEQ_ABORT)) ||
+#ifdef UNIX
+        // In case of an RSEQ abort followed by a signal, the pre-signal-instr PC is
+        // different from the interruption PC which is the RSEQ handler. If there is a
+        // back-to-back signal without any intervening instructions, the kernel transfer
+        // marker of the second signal should point to the same interruption PC, and not
+        // the pre-signal-instr PC. The shard->last_signal_context_ has not been updated,
+        // it still points to the previous signal context.
+        (at_kernel_event && cur_pc == shard->last_signal_context_.xfer_int_pc &&
+         prev_instr_trace_pc ==
+             shard->last_signal_context_.pre_signal_instr.memref.instr.addr) ||
+#endif
         // We expect a gap on a window transition.
-        shard->window_transition_ || prev_instr.instr.type == TRACE_TYPE_INSTR_SYSENTER;
-
+        shard->window_transition_ ||
+        prev_instr.instr.type ==
+            TRACE_TYPE_INSTR_SYSENTER IF_X86(
+                ||
+                (shard->between_kernel_syscall_trace_markers_ &&
+                 // hlt suspends processing until the next interrupt, which may be
+                 // handled at a discontinuous PC.
+                 (shard->prev_instr_.decoding.opcode_ == OP_hlt ||
+                  // After interrupts are enabled, we may be interrupted. The tolerance
+                  // of 2-instrs was found empirically on some x86 QEMU system call
+                  // trace templates.
+                  (shard->instrs_since_sti > 0 && shard->instrs_since_sti <= 2))));
     if (!valid_nonbranch_flow) {
         // Check if the type is a branch instruction and there is a branch target
         // mismatch.
@@ -1024,16 +1826,22 @@ invariant_checker_t::check_for_pc_discontinuity(
                     have_branch_target = true;
                 }
             }
-            if (have_branch_target && branch_target != cur_pc)
+            if (have_branch_target && branch_target != cur_pc &&
+                // We cannot determine the branch target in OFFLINE_FILE_TYPE_ARCH_REGDEPS
+                // traces because next_pc != cur_pc + instr.size and
+                // indirect_branch_target is not saved in inst.src[0].
+                // So, we skip this invariant error.
+                !TESTANY(OFFLINE_FILE_TYPE_ARCH_REGDEPS, shard->file_type_)) {
                 error_msg = "Branch does not go to the correct target";
-        } else if (cur_instr_decoded != nullptr &&
-                   shard->prev_instr_decoded_ != nullptr &&
-                   instr_is_syscall(cur_instr_decoded->data) &&
+            }
+        } else if (cur_memref_info.decoding.is_valid() &&
+                   prev_instr_info.decoding.is_valid() &&
+                   cur_memref_info.decoding.is_syscall_ &&
                    cur_pc == prev_instr_trace_pc &&
-                   instr_is_syscall(shard->prev_instr_decoded_->data)) {
+                   prev_instr_info.decoding.is_syscall_) {
             error_msg = "Duplicate syscall instrs with the same PC";
-        } else if (shard->prev_instr_decoded_ != nullptr &&
-                   instr_writes_memory(shard->prev_instr_decoded_->data) &&
+        } else if (prev_instr_info.decoding.is_valid() &&
+                   prev_instr_info.decoding.writes_memory_ &&
                    type_is_instr_conditional_branch(shard->last_branch_.instr.type)) {
             // This sequence happens when an rseq side exit occurs which
             // results in missing instruction in the basic block.
@@ -1044,6 +1852,273 @@ invariant_checker_t::check_for_pc_discontinuity(
     }
 
     return error_msg;
+}
+
+void
+invariant_checker_t::check_regdeps_invariants(per_shard_t *shard, const memref_t &memref)
+{
+    // Check instructions.
+    if (type_is_instr(memref.instr.type)) {
+        const bool expect_encoding =
+            TESTANY(OFFLINE_FILE_TYPE_ENCODINGS, shard->file_type_);
+        if (expect_encoding) {
+            // Decode memref_t to get an instr_t we can analyze.
+            const app_pc trace_pc = reinterpret_cast<app_pc>(memref.instr.addr);
+            instr_noalloc_t noalloc;
+            instr_noalloc_init(drcontext_, &noalloc);
+            instr_t *noalloc_instr = instr_from_noalloc(&noalloc);
+            const app_pc encoding_addr = const_cast<app_pc>(memref.instr.encoding);
+            app_pc next_pc =
+                decode_from_copy(drcontext_, encoding_addr, trace_pc, noalloc_instr);
+            bool instr_is_decoded = next_pc != nullptr;
+            report_if_false(
+                shard, instr_is_decoded,
+                "DR_ISA_REGDEPS instructions should always succeed during decoding");
+            // We still check this condition in case we don't abort on invariant errors.
+            if (instr_is_decoded) {
+                // ISA mode should be DR_ISA_REGDEPS
+                report_if_false(shard,
+                                instr_get_isa_mode(noalloc_instr) == DR_ISA_REGDEPS,
+                                "DR_ISA_REGDEPS instruction has incorrect ISA mode");
+                // Only OP_UNDECODED as opcode are allowed.
+                report_if_false(shard, instr_get_opcode(noalloc_instr) == OP_UNDECODED,
+                                "DR_ISA_REGDEPS instruction opcode is not OP_UNDECODED");
+                // Only register operands are allowed.
+                int num_dsts = instr_num_dsts(noalloc_instr);
+                for (int dst_index = 0; dst_index < num_dsts; ++dst_index) {
+                    opnd_t dst_opnd = instr_get_dst(noalloc_instr, dst_index);
+                    report_if_false(shard, opnd_is_reg(dst_opnd),
+                                    "DR_ISA_REGDEPS instruction destination operand is "
+                                    "not a register");
+                }
+                int num_srcs = instr_num_srcs(noalloc_instr);
+                for (int src_index = 0; src_index < num_srcs; ++src_index) {
+                    opnd_t src_opnd = instr_get_src(noalloc_instr, src_index);
+                    report_if_false(
+                        shard, opnd_is_reg(src_opnd),
+                        "DR_ISA_REGDEPS instruction source operand is not a register");
+                }
+                // Arithmetic flags should either be 0 or all read or all written or both,
+                // but nothing in between, as we don't expose individual flags.
+                uint eflags = instr_get_arith_flags(noalloc_instr, DR_QUERY_DEFAULT);
+                report_if_false(
+                    shard,
+                    eflags == 0 || eflags == EFLAGS_WRITE_ARITH ||
+                        eflags == EFLAGS_READ_ARITH ||
+                        eflags == (EFLAGS_WRITE_ARITH | EFLAGS_READ_ARITH),
+                    "DR_ISA_REGDEPS instruction has incorrect arithmetic flags");
+                // Instruction length should be a multiple of 4 bytes
+                // (i.e., REGDEPS_ALIGN_BYTES).
+                report_if_false(
+                    shard, ((next_pc - encoding_addr) % REGDEPS_ALIGN_BYTES) == 0,
+                    "DR_ISA_REGDEPS instruction has incorrect length, it's not a "
+                    "multiple of REGDEPS_ALIGN_BYTES = 4");
+            }
+        }
+    }
+
+    // Check markers.
+    if (memref.marker.type == TRACE_TYPE_MARKER) {
+        switch (memref.marker.marker_type) {
+        case TRACE_MARKER_TYPE_FILETYPE:
+            report_if_false(
+                shard,
+                static_cast<offline_file_type_t>(memref.marker.marker_value) ==
+                    shard->file_type_,
+                "TRACE_MARKER_TYPE_FILETYPE and shard file type are not the same");
+            // Check that the file type does not contain any architecture specific
+            // information except OFFLINE_FILE_TYPE_ARCH_REGDEPS.
+            report_if_false(
+                shard,
+                !TESTANY(OFFLINE_FILE_TYPE_ARCH_ALL & ~OFFLINE_FILE_TYPE_ARCH_REGDEPS,
+                         shard->file_type_),
+                "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have other"
+                "OFFLINE_FILE_TYPE_ARCH_*");
+            break;
+        case TRACE_MARKER_TYPE_CPU_ID:
+            report_if_false(shard, memref.marker.marker_value == INVALID_CPU_MARKER_VALUE,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have a valid "
+                            "TRACE_MARKER_TYPE_CPU_ID");
+            break;
+        case TRACE_MARKER_TYPE_SYSCALL_IDX:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SYSCALL_IDX markers");
+            break;
+        case TRACE_MARKER_TYPE_SYSCALL:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SYSCALL markers");
+            break;
+        case TRACE_MARKER_TYPE_SYSCALL_TRACE_START:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SYSCALL_TRACE_START markers");
+            break;
+        case TRACE_MARKER_TYPE_SYSCALL_TRACE_END:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SYSCALL_TRACE_END markers");
+            break;
+        case TRACE_MARKER_TYPE_SYSCALL_FAILED:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SYSCALL_FAILED markers");
+            break;
+        // This case also covers TRACE_MARKER_TYPE_FUNC_RETADDR,
+        // TRACE_MARKER_TYPE_FUNC_RETVAL, and TRACE_MARKER_TYPE_FUNC_ARG, since these
+        // markers are always preceded by TRACE_MARKER_TYPE_FUNC_ID.
+        case TRACE_MARKER_TYPE_FUNC_ID: {
+            // In OFFLINE_FILE_TYPE_ARCH_REGDEPS traces the only TRACE_MARKER_TYPE_FUNC_
+            // markers allowed are those related to SYS_futex. We can only check that
+            // for LINUX builds of DR, otherwise we disable this check and print a
+            // warning instead.
+#ifdef LINUX
+            report_if_false(
+                shard,
+                memref.marker.marker_value ==
+                    static_cast<uintptr_t>(func_trace_t::TRACE_FUNC_ID_SYSCALL_BASE) +
+                        SYS_futex,
+                "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                "TRACE_MARKER_TYPE_FUNC_ID markers related to functions that "
+                "are not SYS_futex");
+#else
+            std::cerr << "WARNING: we cannot determine whether the function ID of "
+                         "TRACE_MARKER_TYPE_FUNC_ID is allowed in an "
+                         "OFFLINE_FILE_TYPE_ARCH_REGDEPS trace because DynamoRIO "
+                         "was not built on a Linux platform.\n";
+#endif
+        } break;
+        case TRACE_MARKER_TYPE_SIGNAL_NUMBER:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_SIGNAL_NUMBER markers");
+            break;
+        // XXX i#7155: Allow these markers once we update their values in record_filter.
+        case TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION:
+            report_if_false(shard, false,
+                            "OFFLINE_FILE_TYPE_ARCH_REGDEPS traces cannot have "
+                            "TRACE_MARKER_TYPE_UNCOMPLETED_INSTRUCTION markers");
+            break;
+        default:
+            // All other markers are allowed.
+            break;
+        }
+    }
+}
+
+void
+invariant_checker_t::per_shard_t::reset_at_context_switch(const memref_t &memref,
+                                                          bool core_sharded_on_disk)
+{
+    tid_ = memref.data.tid;
+    uint64_t pc;
+    if (memref_has_pc(memref, pc)) {
+        last_next_trace_pc_ = pc;
+    } else {
+        last_next_trace_pc_ = stream->get_next_trace_pc();
+    }
+
+    if (!core_sharded_on_disk) {
+        // Stream ordinals in core-sharded-on-disk traces do not change
+        // on context switches, so we can keep the existing values.
+        dyn_injected_syscall_ref_count_ = 0;
+        dyn_injected_syscall_instr_count_ = 0;
+        instr_count_since_last_timestamp_ = 0;
+        ref_count_ = stream->get_record_ordinal();
+        instr_count_ = stream->get_instruction_ordinal();
+    }
+
+    // Reset various state that depends on the trace content seen before.
+    // In some ways, we want to act like we're now processing a new trace.
+    // This results in not being able to check any invariants that rely on
+    // state from the current thread extending to its future actions. But
+    // this is a reasonable compromise for core-sharded traces, until we
+    // add support for per-thread state during dynamic scheduling.
+    // TODO i#7674: Such "reset" actions may be avoided if can keep this
+    // state across core-shards more easily.
+    last_branch_ = {};
+    prev_entry_ = {};
+    prev_prev_entry_ = {};
+    prev_xfer_marker_ = {};
+    last_xfer_marker_ = {};
+    prev_func_id_ = 0;
+    prev_was_syscall_marker_ = false;
+    syscall_trace_num_after_last_userspace_instr_ = -1;
+    in_rseq_region_ = false;
+    retaddr_stack_ = std::stack<addr_t>();
+#ifdef X86
+    instrs_since_sti = -1;
+#endif
+    prev_instr_ = {};
+    last_syscall_marker_value_ = 0;
+    expect_syscall_trace_ = false;
+    prev_kernel_end_branch_target_ = 0;
+#ifdef UNIX
+    signal_stack_ = std::stack<signal_context>();
+    last_signal_context_ = { 0, {} };
+    last_instr_in_cur_context_ = {};
+    saw_rseq_abort_ = false;
+    instrs_until_interrupt_ = -1;
+    memrefs_until_interrupt_ = -1;
+#endif
+}
+
+std::string
+invariant_checker_t::per_shard_t::decoding_info_t::set_decode_info_derived(
+    void *dcontext, const dynamorio::drmemtrace::_memref_instr_t &memref_instr,
+    instr_t *instr, app_pc decode_pc)
+{
+    is_prefetch_ = instr_is_prefetch(instr);
+    opcode_ = instr_get_opcode(instr);
+#ifdef X86
+    is_xsave_ = instr_is_xsave(instr);
+    is_xrstor_ = instr_is_xrstor(instr);
+#endif
+    is_syscall_ = instr_is_syscall(instr);
+    writes_memory_ = instr_writes_memory(instr);
+    is_predicated_ = instr_is_predicated(instr);
+    if (instr_get_isa_mode(instr) == DR_ISA_REGDEPS) {
+        // DR_ISA_REGDEPS instructions don't have an opcode, hence we use
+        // their category to determine whether they perform at least one read
+        // or write.
+        num_memory_read_access_ =
+            TESTANY(DR_INSTR_CATEGORY_LOAD, instr_get_category(instr)) ? 1 : 0;
+        num_memory_write_access_ =
+            TESTANY(DR_INSTR_CATEGORY_STORE, instr_get_category(instr)) ? 1 : 0;
+        // DR_ISA_REGDEPS instructions don't have a branch target saved as
+        // instr.src[0], so we cannot retrieve this information.
+        branch_target_ = 0;
+    } else {
+        num_memory_read_access_ = instr_num_memory_read_access(instr);
+        num_memory_write_access_ = instr_num_memory_write_access(instr);
+        if (type_is_instr_branch(memref_instr.type)) {
+            if (instr_num_srcs(instr) == 0) {
+                // This may be a sysret/eret for which we cannot figure out the
+                // branch target from the encoding itself.
+                branch_target_ = 0;
+            } else {
+                const opnd_t target = instr_get_target(instr);
+                if (opnd_is_pc(target)) {
+                    branch_target_ = reinterpret_cast<addr_t>(opnd_get_pc(target));
+                }
+            }
+        }
+    }
+    return "";
+}
+
+bool
+invariant_checker_t::init_decode_cache(per_shard_t *shard, void *dcontext)
+{
+    assert(shard->decode_cache_ == nullptr);
+    shard->decode_cache_ = std::unique_ptr<decode_cache_t<per_shard_t::decoding_info_t>>(
+        new decode_cache_t<per_shard_t::decoding_info_t>(
+            dcontext,
+            /*include_decoded_instr=*/true,
+            /*persist_decoded_instrs=*/false));
+    shard->error_ = shard->decode_cache_->init(shard->file_type_);
+    return shard->error_.empty();
 }
 
 } // namespace drmemtrace

@@ -61,6 +61,7 @@ inscount(uint num_instrs)
     global_sg_count += num_instrs;
 }
 
+#if defined(X86)
 /* Global, because the markers will be in a different app2app list after breaking up
  * scatter/gather into separate basic blocks during expansion.
  */
@@ -69,6 +70,7 @@ static app_pc mask_update_test_avx512_gather_pc = (app_pc)INT_MAX;
 static app_pc mask_clobber_test_avx512_scatter_pc = (app_pc)INT_MAX;
 static app_pc mask_update_test_avx512_scatter_pc = (app_pc)INT_MAX;
 static app_pc mask_update_test_avx2_gather_pc = (app_pc)INT_MAX;
+#endif /* defined(X86) */
 
 static ptr_int_t instru_mode;
 enum {
@@ -113,6 +115,14 @@ event_app_instruction(void *drcontext, void *tag, instrlist_t *bb, instr_t *inst
     return DR_EMIT_DEFAULT; // NOCHECK STORE_TRANSLATIONS;
 }
 
+#if defined(AARCH64)
+/* OS libraries can contain scatter / gather instructions so the test instructions
+ * are guarded by NOPs
+ */
+#    define GUARD_NOPS_COUNT 4
+static uint nops_to_find = GUARD_NOPS_COUNT;
+#endif /* AARCH64 */
+
 static dr_emit_flags_t
 event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                   bool translating, void **user_data)
@@ -122,12 +132,23 @@ event_bb_analysis(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
     for (instr_t *instr = instrlist_first(bb); instr != NULL;
          instr = instr_get_next(instr)) {
         if (instr_is_gather(instr) || instr_is_scatter(instr)) {
-            /* FIXME i#2985: some scatter/gather instructions will not get expanded in
+            /* XXX i#2985: some scatter/gather instructions will not get expanded in
              * 32-bit mode.
              */
             IF_X64(dr_fprintf(STDERR, "Unexpected scatter or gather instruction\n"));
         }
-        if (drmgr_is_emulation_start(instr)) {
+
+#if defined(AARCH64)
+        if (nops_to_find) {
+            if (instr_get_opcode(instr) == OP_nop)
+                nops_to_find--;
+            else
+                nops_to_find = GUARD_NOPS_COUNT;
+        }
+#endif
+
+        if (drmgr_is_emulation_start(instr) IF_AARCH64(&&nops_to_find == 0)) {
+            IF_AARCH64(nops_to_find = GUARD_NOPS_COUNT;)
             emulated_instr_t emulated_instr;
             emulated_instr.size = sizeof(emulated_instr);
             CHECK(drmgr_get_emulated_instr_data(instr, &emulated_instr),
@@ -257,6 +278,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
             scatter_gather_present = true;
         } else if (instr_is_scatter(instr)) {
             scatter_gather_present = true;
+#if defined(X86)
         } else if (instr_is_mov_constant(instr, &val) &&
                    val == TEST_AVX512_GATHER_MASK_CLOBBER_MARKER) {
             instr_t *next_instr = instr_get_next(instr);
@@ -325,6 +347,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
                         search_for_next_gather_pc(drcontext, next_instr);
                 }
             }
+#endif /* defined(X86) */
         }
     }
     bool expansion_ok = drx_expand_scatter_gather(drcontext, bb, &expanded);
@@ -336,6 +359,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
     }
     CHECK((scatter_gather_present IF_X64(&&expanded)) || (expansion_ok && !expanded),
           "drx_expand_scatter_gather() bad OUT values");
+#if defined(X86)
     for (instr = instrlist_first(bb); instr != NULL; instr = instr_get_next(instr)) {
         if (instr_get_opcode(instr) == OP_kandnw &&
             (instr_get_app_pc(instr) == mask_clobber_test_avx512_gather_pc ||
@@ -381,6 +405,7 @@ event_bb_app2app(void *drcontext, void *tag, instrlist_t *bb, bool for_trace,
             break;
         }
     }
+#endif /* defined(X86) */
     return DR_EMIT_DEFAULT;
 }
 
@@ -397,7 +422,7 @@ dr_init(client_id_t id)
     CHECK(ok, "drx_init failed");
     res = drreg_init(&ops);
     CHECK(res == DRREG_SUCCESS, "drreg_init failed");
-    dr_register_exit_event(event_exit);
+    drmgr_register_exit_event(event_exit);
 
     drbbdup_options_t opts = {
         sizeof(opts),

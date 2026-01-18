@@ -35,15 +35,19 @@
 #include <assert.h>
 #include <stddef.h>
 
+#include <cstdint>
 #include <functional>
+#include <limits>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
-#include "memref.h"
+#include "cache_replacement_policy.h"
 #include "caching_device_block.h"
 #include "caching_device_stats.h"
+#include "memref.h"
 #include "prefetcher.h"
 #include "snoop_filter.h"
 #include "trace_entry.h"
@@ -74,22 +78,30 @@ caching_device_t::~caching_device_t()
 }
 
 bool
-caching_device_t::init(int associativity, int block_size, int num_blocks,
+caching_device_t::init(int associativity, int64_t block_size, int64_t num_blocks,
                        caching_device_t *parent, caching_device_stats_t *stats,
-                       prefetcher_t *prefetcher, bool inclusive, bool coherent_cache,
+                       std::unique_ptr<cache_replacement_policy_t> replacement_policy,
+                       prefetcher_t *prefetcher,
+                       cache_inclusion_policy_t inclusion_policy, bool coherent_cache,
                        int id, snoop_filter_t *snoop_filter,
                        const std::vector<caching_device_t *> &children)
 {
     // Assume cache has nonzero capacity.
-    if (associativity < 1 || num_blocks < 1)
+    if (associativity < 1 || num_blocks < 1) {
         return false;
+    }
     // Assume caching device block size is at least 4 bytes.
-    if (!IS_POWER_OF_2(block_size) || block_size < 4)
+    if (!IS_POWER_OF_2(block_size) || block_size < 4) {
         return false;
-    if (stats == NULL)
+    }
+    if (stats == NULL) {
         return false; // A stats must be provided for perf: avoid conditional code
-    else if (!*stats)
+    } else if (!*stats) {
         return false;
+    }
+    if (replacement_policy == NULL) {
+        return false;
+    }
     associativity_ = associativity;
     block_size_ = block_size;
     num_blocks_ = num_blocks;
@@ -98,7 +110,10 @@ caching_device_t::init(int associativity, int block_size, int num_blocks,
     // Make sure num_blocks_ is evenly divisible by associativity
     if (blocks_per_way_ * associativity_ != num_blocks_)
         return false;
-    blocks_per_way_mask_ = blocks_per_way_ - 1;
+    // Make sure blocks_per_way_ fits in the mask and can be used as an index.
+    if (blocks_per_way_ > std::numeric_limits<int>::max())
+        return false;
+    blocks_per_way_mask_ = static_cast<int>(blocks_per_way_ - 1);
     block_size_bits_ = compute_log2(block_size);
     // Non-power-of-two associativities and total cache sizes are allowed, so
     // long as the number blocks per cache way is a power of two.
@@ -110,14 +125,15 @@ caching_device_t::init(int associativity, int block_size, int num_blocks,
     id_ = id;
     snoop_filter_ = snoop_filter;
     coherent_cache_ = coherent_cache;
-
-    blocks_ = new caching_device_block_t *[num_blocks_];
+    blocks_ = new caching_device_block_t *[static_cast<size_t>(num_blocks_)];
     init_blocks();
 
     last_tag_ = TAG_INVALID; // sentinel
 
-    inclusive_ = inclusive;
+    inclusion_policy_ = inclusion_policy;
     children_ = children;
+
+    replacement_policy_ = std::move(replacement_policy);
 
     return true;
 }
@@ -129,7 +145,10 @@ caching_device_t::get_description() const
     return "size=" + std::to_string(get_size_bytes()) +
         ", assoc=" + std::to_string(get_associativity()) +
         ", block=" + std::to_string(get_block_size()) + ", " + get_replace_policy() +
-        (is_coherent() ? ", coherent" : "") + (is_inclusive() ? ", inclusive" : "");
+        (is_coherent() ? ", coherent" : "") +
+        (is_inclusive()       ? ", inclusive"
+             : is_exclusive() ? ", exclusive"
+                              : "");
 }
 
 std::pair<caching_device_block_t *, int>
@@ -171,7 +190,7 @@ caching_device_t::request(const memref_t &memref_in)
             &get_caching_device_block(last_block_idx_, last_way_);
         assert(tag != TAG_INVALID && tag == cache_block->tag_);
         record_access_stats(memref_in, true /*hit*/, cache_block);
-        access_update(last_block_idx_, last_way_);
+        access_update(last_block_idx_, last_way_, HIT);
         return;
     }
 
@@ -201,68 +220,52 @@ caching_device_t::request(const memref_t &memref_in)
                     parent_->propagate_write(tag, this);
                 }
             }
+            // If this is an exclusive cache with children, a hit transfers the
+            // line to the child that missed and our copy is no longer needed.
+            // It seems pointless to have an exclusive cache without children,
+            // but who are we to judge.
+            if (is_exclusive() && !children_.empty()) {
+                // We don't need to tell the snoop filter about this eviction since
+                // we know the child cache contains the evicted line.
+                invalidate(tag, INVALIDATION_EXCLUSIVE);
+                // Mark the tag as previously stored in this cache.
+                prev_serviced_exclusive_tags_.insert(tag);
+                // Done with this line.
+                continue;
+            }
         } else {
             // Access is a miss.
-            way = replace_which_way(block_idx);
-            caching_device_block_t *cache_block =
-                &get_caching_device_block(block_idx, way);
-
-            record_access_stats(memref, false /*miss*/, cache_block);
             missed = true;
-            // If no parent we assume we get the data from main memory
-            if (parent_ != NULL)
-                parent_->request(memref);
-            if (snoop_filter_ != NULL) {
-                // Update snoop filter, other private caches invalidated on write.
-                snoop_filter_->snoop(tag, id_, (memref.data.type == TRACE_TYPE_WRITE));
-            }
-
-            addr_t victim_tag = cache_block->tag_;
-            // Check if we are inserting a new block, if we are then increment
-            // the block loaded count.
-            if (victim_tag == TAG_INVALID) {
-                loaded_blocks_++;
+            // Exclusive caches only insert lines that have been evicted
+            // by a child cache.  So for a "normal" miss like this, no line
+            // is getting evicted.  Use a temporary invalid line for
+            // purposes of updating the access stats.
+            if (is_exclusive()) {
+                caching_device_block_t invalid_block; // Dummy for stats update.
+                record_access_stats(memref, /*hit=*/false, &invalid_block);
             } else {
-                if (!children_.empty() && inclusive_) {
-                    for (auto &child : children_) {
-                        child->invalidate(victim_tag, INVALIDATION_INCLUSIVE);
-                    }
-                }
-                if (coherent_cache_) {
-                    bool child_holds_tag = false;
-                    if (!children_.empty()) {
-                        /* We must check child caches to find out if the snoop filter
-                         * should clear the ownership bit for this evicted tag.
-                         * If any of this cache's children contain the evicted tag the
-                         * snoop filter should still consider this cache an owner.
-                         */
-                        for (auto &child : children_) {
-                            if (child->contains_tag(victim_tag)) {
-                                child_holds_tag = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!child_holds_tag) {
-                        if (snoop_filter_ != NULL) {
-                            // Inform snoop filter of evicted line.
-                            snoop_filter_->snoop_eviction(victim_tag, id_);
-                        } else if (parent_ != NULL) {
-                            // Inform parent of evicted line.
-                            parent_->propagate_eviction(victim_tag, this);
-                        }
-                    }
-                }
+                // Replace a line in the cache.
+                way = replace_which_way(block_idx);
+                caching_device_block_t *cache_block =
+                    &get_caching_device_block(block_idx, way);
+                record_access_stats(memref, false /*miss*/, cache_block);
             }
-            update_tag(cache_block, way, tag);
+            // If no parent we assume we get the data from main memory.
+            if (parent_ != nullptr) {
+                parent_->request(memref);
+            }
+            if (is_exclusive()) {
+                continue;
+            }
+            insert_tag(tag, (memref.data.type == TRACE_TYPE_WRITE), way, block_idx);
         }
 
-        access_update(block_idx, way);
+        access_update(block_idx, way, missed ? MISS : HIT);
 
         // Issue a hardware prefetch, if any, before we remember the last tag,
         // so we remember this line and not the prefetched line.
-        if (missed && !type_is_prefetch(memref.data.type) && prefetcher_ != nullptr)
-            prefetcher_->prefetch(this, memref);
+        if (prefetcher_ != nullptr && !type_is_prefetch(memref_in.data.type))
+            prefetcher_->prefetch(this, memref, missed);
 
         if (tag + 1 <= final_tag) {
             addr_t next_addr = (tag + 1) << block_size_bits_;
@@ -278,40 +281,28 @@ caching_device_t::request(const memref_t &memref_in)
 }
 
 void
-caching_device_t::access_update(int block_idx, int way)
+caching_device_t::access_update(int block_idx, int way,
+                                cache_access_outcome_t access_type)
 {
-    // We just inc the counter for LFU.  We live with any blip on overflow.
-    get_caching_device_block(block_idx, way).counter_++;
+    replacement_policy_->access_update(compute_set_index(block_idx), way, access_type);
 }
 
 int
 caching_device_t::replace_which_way(int block_idx)
 {
-    int min_way = get_next_way_to_replace(block_idx);
-    // Clear the counter for LFU.
-    get_caching_device_block(block_idx, min_way).counter_ = 0;
-    return min_way;
+    int way_to_replace = get_next_way_to_replace(block_idx);
+    replacement_policy_->eviction_update(compute_set_index(block_idx), way_to_replace);
+    return way_to_replace;
 }
 
 int
 caching_device_t::get_next_way_to_replace(const int block_idx) const
 {
-    // The base caching device class only implements LFU.
-    // A subclass can override this and access_update() to implement
-    // some other scheme.
-    int min_counter = 0; /* avoid "may be used uninitialized" with GCC 4.4.7 */
-    int min_way = 0;
     for (int way = 0; way < associativity_; ++way) {
-        if (get_caching_device_block(block_idx, way).tag_ == TAG_INVALID) {
-            min_way = way;
-            break;
-        }
-        if (way == 0 || get_caching_device_block(block_idx, way).counter_ < min_counter) {
-            min_counter = get_caching_device_block(block_idx, way).counter_;
-            min_way = way;
-        }
+        if (get_caching_device_block(block_idx, way).tag_ == TAG_INVALID)
+            return way;
     }
-    return min_way;
+    return replacement_policy_->get_next_way_to_replace(compute_set_index(block_idx));
 }
 
 void
@@ -320,18 +311,32 @@ caching_device_t::invalidate(addr_t tag, invalidation_type_t invalidation_type)
     auto block_way = find_caching_device_block(tag);
     if (block_way.first != nullptr) {
         invalidate_caching_device_block(block_way.first);
+        loaded_blocks_--;
         stats_->invalidate(invalidation_type);
         // Invalidate last_tag_ if it was this tag.
+        replacement_policy_->invalidation_update(
+            compute_set_index(compute_block_idx(tag)), block_way.second);
         if (last_tag_ == tag) {
             last_tag_ = TAG_INVALID;
         }
         // Invalidate the block in the children's caches.
-        if (invalidation_type == INVALIDATION_INCLUSIVE && inclusive_ &&
+        if (invalidation_type == INVALIDATION_INCLUSIVE && is_inclusive() &&
             !children_.empty()) {
             for (auto &child : children_) {
                 child->invalidate(tag, invalidation_type);
             }
         }
+    }
+    if (is_exclusive() && invalidation_type != INVALIDATION_EXCLUSIVE) {
+        // Exclusive cache stores list of previously serviced tags in
+        // prev_serviced_exclusive_tags_.
+        // If the tag is invalidated due to coherence,
+        //    invalidation_type != INVALIDATION_EXCLUSIVE
+        // remove this tag from prev_serviced_exclusive_tags_.
+        // Moving the tag to a child cache also causes invalidation event with
+        //    invalidation_type == INVALIDATION_EXCLUSIVE
+        // In this case we must retain the tag in prev_serviced_exclusive_tags_.
+        prev_serviced_exclusive_tags_.erase(tag);
     }
     // If this is a coherence invalidation, we must invalidate children caches.
     if (invalidation_type == INVALIDATION_COHERENCE && !children_.empty()) {
@@ -348,7 +353,9 @@ caching_device_t::contains_tag(addr_t tag)
     auto block_way = find_caching_device_block(tag);
     if (block_way.first != nullptr)
         return true;
-    if (children_.empty()) {
+    // If there are no children or all their lines are included in
+    // this cache, there's nothing more to check.
+    if (children_.empty() || is_inclusive()) {
         return false;
     }
     for (auto &child : children_) {
@@ -359,12 +366,34 @@ caching_device_t::contains_tag(addr_t tag)
     return false;
 }
 
-// A child has evicted this tag, we propagate this notification to the snoop filter,
-// unless this cache or one of its other children holds this line.
+// The next two methods propagate writes and evictions as part of the coherence
+// logic.  When the cache hierarchy coherence logic is enabled:
+//   * A snoop filter is attached to the highest cache hierarchy level that
+//     contains multiple caches.
+//       * All caches *below* (child) the snooped level are marked "coherent".
+//       * All caches *above* (parent) the snooped level are marked
+//         "non_coherent".
+//    * On HITS, writes get propagated up to the snoop filter for coherent
+//        unsnooped caches, via propagate_write().  This is to invalidate
+//        any copies of the line in other caches.
+//    * On MISSES:
+//      * the miss request gets propagated to parent as normal.
+//      * if cache is snooped, update snoop filter for the new line.
+//      * if the new line evicts an old line:
+//        * if cache is inclusive, invalidate evicted line from all children.
+//        * if coherent and no children have a copy of the evicted line:
+//          * propagate eviction upstream to snoop filter via
+//            propagate_eviction().
+//        * if parent is exclusive and no children have a copy of the evicted line:
+//          * push evicted line to parent via propagate_eviction().
+
+// A child has evicted this tag, we propagate this notification to the snoop filter
+// or first exclusive cache, *unless* this cache or one of its other children holds
+// this line.
 void
 caching_device_t::propagate_eviction(addr_t tag, const caching_device_t *requester)
 {
-    // Check our own cache for this line.
+    // Check our own cache for this line.  If we find it, we're done.
     auto block_way = find_caching_device_block(tag);
     if (block_way.first != nullptr)
         return;
@@ -372,6 +401,8 @@ caching_device_t::propagate_eviction(addr_t tag, const caching_device_t *request
     // Check if other children contain this line.
     if (children_.size() != 1) {
         // If another child contains the line, we don't need to do anything.
+        // We don't need to check the requesting child, because it just
+        // evicted the line.
         for (auto &child : children_) {
             if (child != requester && child->contains_tag(tag)) {
                 return;
@@ -379,8 +410,33 @@ caching_device_t::propagate_eviction(addr_t tag, const caching_device_t *request
         }
     }
 
-    // Neither this cache nor its children hold line,
-    // inform snoop filter or propagate eviction.
+    // If we're exclusive, insert this line and possibly evict something else,
+    // ending the eviction propagation for this tag.
+    // Snoop info does not need to be propagated further, because
+    // we're inserting this tag which means any higher-level snoop filters
+    // or inclusive caches see no change.
+    if (is_exclusive()) {
+        int block_idx = compute_block_idx(tag);
+        int way = replace_which_way(block_idx);
+        // Insert line and update snoop filter if appropriate.
+        insert_tag(tag, /*is_write=*/false, way, block_idx);
+        // Notify the cache policy as if this were a new access to the newly
+        // inserted line.
+        // TODO i#7590: Handle cache_inclusion_policy_t::NON_INC_NON_EXC inclusion policy.
+        if (prev_serviced_exclusive_tags_.erase(tag)) {
+            // The cache block previously serviced in this cache.
+            // Consider eviction as cache HIT
+            access_update(block_idx, way, HIT);
+        } else {
+            // The cache block was passed from parent to child,
+            // not serviced in this cache. Consider eviction as cache MISS
+            access_update(block_idx, way, MISS);
+        }
+        return;
+    }
+
+    // Neither this cache nor its children hold the tag, so continue propagating
+    // eviction towards the snoop filter.
     if (snoop_filter_ != NULL) {
         snoop_filter_->snoop_eviction(tag, id_);
     } else if (parent_ != NULL) {
@@ -402,7 +458,7 @@ caching_device_t::propagate_write(addr_t tag, const caching_device_t *requester)
         }
     }
 
-    // Propagate write to snoop filter or to parent_.
+    // Propagate write to snoop filter or parent.
     if (snoop_filter_ != NULL) {
         snoop_filter_->snoop(tag, id_, true);
     } else if (parent_ != NULL) {
@@ -422,6 +478,82 @@ caching_device_t::record_access_stats(const memref_t &memref, bool hit,
             up->stats_->child_access(memref, hit, cache_block);
     } else if (parent_ != nullptr)
         parent_->stats_->child_access(memref, hit, cache_block);
+}
+
+// Inserts a tag into the cache, updating the snoop filter and dealing with
+// evictions as needed.
+void
+caching_device_t::insert_tag(addr_t tag, bool is_write, int way, int block_idx)
+{
+    caching_device_block_t *cache_block = &get_caching_device_block(block_idx, way);
+    if (snoop_filter_ != nullptr) {
+        // Update snoop filter to mark tag as present in this cache.
+        snoop_filter_->snoop(tag, id_, is_write);
+    }
+    addr_t victim_tag = cache_block->tag_;
+    if (victim_tag == TAG_INVALID) {
+        // Lucky for us, nothing needs to be evicted.
+        loaded_blocks_++;
+    } else {
+        // Evict the victim tag.
+        // First, if this cache is inclusive we must flush the victim
+        // tag from all child caches.
+        if (!children_.empty() && is_inclusive()) {
+            for (auto &child : children_) {
+                child->invalidate(victim_tag, INVALIDATION_INCLUSIVE);
+            }
+        }
+        // Handle parental notifications for coherence and exclusivity.
+        bool push_victim_to_parent = parent_ != nullptr && parent_->is_exclusive();
+        if (coherent_cache_ || push_victim_to_parent) {
+            bool child_holds_tag = false;
+            if (!children_.empty()) {
+                /* We must check child caches to find out if the snoop filter
+                 * should clear the ownership bit for this evicted tag.
+                 * If any of this cache's children contain the evicted tag the
+                 * snoop filter should still consider this cache an owner.
+                 *
+                 * Similarly, evicted lines are pushed to a parent exclusive
+                 * cache only if no child caches contain the line.  The only
+                 * difference from snoop checking is that a single LLC can
+                 * be exclusive but cannot be snooped, so the eviction for
+                 * exclusive caches may propagate higher.
+                 *
+                 * This is why we don't tell the snoop filter when a child
+                 * cache contains the line:
+                 * * Only the highest coherent cache level with >1 cache is snooped.
+                 * * Inner coherent caches rely on their snooped (grand)parent
+                 *   for snoop cache updates.  So invalidates and writes in a
+                 *   coherent cache get propagated up through parents until a
+                 *   snooped cache is found, and then the snoop filter is
+                 *   updated.
+                 *
+                 */
+                for (auto &child : children_) {
+                    if (child->contains_tag(victim_tag)) {
+                        child_holds_tag = true;
+                        break;
+                    }
+                }
+            }
+            if (!child_holds_tag) {
+                bool notify_parent_for_snoop = false;
+                if (coherent_cache_) {
+                    if (snoop_filter_ != nullptr) {
+                        // Inform snoop filter of evicted line.
+                        snoop_filter_->snoop_eviction(victim_tag, id_);
+                    } else {
+                        // If there's a parent, keep forwarding the eviction.
+                        notify_parent_for_snoop = parent_ != nullptr;
+                    }
+                }
+                if (notify_parent_for_snoop || push_victim_to_parent) {
+                    parent_->propagate_eviction(victim_tag, this);
+                }
+            }
+        }
+    }
+    update_tag(cache_block, way, tag);
 }
 
 } // namespace drmemtrace
