@@ -116,6 +116,7 @@ extern dynamorio::droption::droption_t<dynamorio::droption::bytesize_t>
     op_trace_after_instrs;
 extern dynamorio::droption::droption_t<dynamorio::droption::bytesize_t>
     op_trace_for_instrs;
+extern dynamorio::droption::droption_t<bool> op_count_fetched_instrs;
 extern dynamorio::droption::droption_t<dynamorio::droption::bytesize_t>
     op_retrace_every_instrs;
 extern dynamorio::droption::droption_t<bool> op_split_windows;
